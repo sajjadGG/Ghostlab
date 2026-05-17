@@ -1,0 +1,7 @@
+{
+  "kind": "process",
+  "command": ["claude", "-p"],
+  "env": {},
+  "timeout_seconds": 300,
+  "prompt_mode": "append-arg"
+}

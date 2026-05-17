@@ -1,0 +1,19 @@
+{
+  "id": "cortex-practice-generation",
+  "title": "Learner asks for a focused practice widget",
+  "persona": "You are a learner preparing for IELTS speaking and vocabulary. You want a practical exercise, not a description of the app.",
+  "goal": "Ask for one short IELTS speaking or vocabulary practice activity and verify that the assistant creates an actual interactive view rather than only explaining one.",
+  "max_turns": 2,
+  "success_criteria": [
+    "The assistant chooses an appropriate learning view tool.",
+    "The assistant supplies valid schema-compliant content.",
+    "The generated activity is useful for IELTS practice."
+  ],
+  "failure_signals": [
+    "The assistant asks the user to manually create content the app should generate.",
+    "The assistant uses a tool whose schema requires unavailable source content without acknowledging that limitation.",
+    "The assistant creates content unrelated to IELTS."
+  ],
+  "opening_message": "Give me one quick IELTS speaking or vocab practice activity. I want something interactive that I can do right now."
+}
+

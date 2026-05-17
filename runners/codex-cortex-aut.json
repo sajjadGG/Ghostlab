@@ -1,0 +1,18 @@
+{
+  "kind": "process",
+  "command": [
+    "codex",
+    "--sandbox",
+    "read-only",
+    "-a",
+    "never",
+    "-c",
+    "mcp_servers.cortex.url=\"https://pogo-galley-turbofan.ngrok-free.dev/mcp\"",
+    "exec",
+    "--skip-git-repo-check",
+    "-"
+  ],
+  "env": {},
+  "timeout_seconds": 600,
+  "prompt_mode": "stdin"
+}

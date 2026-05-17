@@ -1,0 +1,2 @@
+"""MCP Rehearsal test harness."""
+

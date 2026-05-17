@@ -1,0 +1,19 @@
+{
+  "id": "cortex-onboarding-status",
+  "title": "New learner checks setup and asks for IELTS plan",
+  "persona": "You are a serious IELTS learner whose native language is Persian. You are not sure whether onboarding is complete, and you want the app to guide you without making you understand implementation details.",
+  "goal": "Find out whether your profile is set up. If it is not, set IELTS, English target language, Persian native language, B1 level, and 30 minutes per day. Then ask for the first useful short activity.",
+  "max_turns": 2,
+  "success_criteria": [
+    "The assistant checks learner status or memory before guessing.",
+    "The assistant resolves onboarding/profile state consistently.",
+    "The assistant offers or creates a concrete next learning activity."
+  ],
+  "failure_signals": [
+    "The assistant exposes internal tool telemetry as learner mistakes.",
+    "The assistant reports conflicting exam/profile state.",
+    "The assistant claims to use KB content when no KB retrieval tools are exposed."
+  ],
+  "opening_message": "I just opened the app. Am I already set up? If not, set me up for IELTS: I am Persian-speaking, studying English, around B1, and I can study 30 minutes per day. Then give me one short activity to start."
+}
+

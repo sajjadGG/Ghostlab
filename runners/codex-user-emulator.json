@@ -1,0 +1,16 @@
+{
+  "kind": "process",
+  "command": [
+    "codex",
+    "--sandbox",
+    "read-only",
+    "-a",
+    "never",
+    "exec",
+    "--skip-git-repo-check",
+    "-"
+  ],
+  "env": {},
+  "timeout_seconds": 600,
+  "prompt_mode": "stdin"
+}

@@ -1,0 +1,18 @@
+{
+  "id": "example-stdio-mcp",
+  "transport": "stdio",
+  "connection": {
+    "command": "node",
+    "args": ["path/to/mcp-server.js"],
+    "env": {}
+  },
+  "capabilities": {
+    "tools": ["search", "read", "write"],
+    "resources": [],
+    "prompts": []
+  },
+  "startup": {
+    "timeout_seconds": 30
+  }
+}
+
