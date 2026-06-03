@@ -29,8 +29,15 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
   "build>=1.2",
+  "mkdocs>=1.6",
   "pytest>=8.0",
   "twine>=5.0",
+]
+docs = [
+  "mkdocs>=1.6",
+]
+ui = [
+  "streamlit>=1.30",
 ]
 
 [project.scripts]
@@ -38,8 +45,9 @@ ghostlab = "rehearsal.cli:main"
 rehearsal = "rehearsal.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/sajjadGG/mcp-ghostlab"
-Repository = "https://github.com/sajjadGG/mcp-ghostlab"
+Documentation = "https://sajjadgg.github.io/Rehearsal/"
+Homepage = "https://github.com/sajjadGG/Rehearsal"
+Repository = "https://github.com/sajjadGG/Rehearsal"
 
 [tool.hatch.version]
 path = "rehearsal/__init__.py"
@@ -50,6 +58,8 @@ packages = ["rehearsal", "ghostlab"]
 [tool.hatch.build.targets.sdist]
 include = [
   "/README.md",
+  "/docs",
+  "/mkdocs.yml",
   "/pyproject.toml",
   "/rehearsal",
   "/ghostlab",

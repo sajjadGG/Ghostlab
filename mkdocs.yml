@@ -1,0 +1,18 @@
+site_name: Ghostlab Wiki
+site_description: Documentation for MCP Ghostlab, a dual-agent E2E testing harness for MCP apps.
+site_url: https://sajjadgg.github.io/Rehearsal/
+repo_url: https://github.com/sajjadGG/Rehearsal
+repo_name: sajjadGG/Rehearsal
+theme:
+  name: mkdocs
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Concepts: concepts.md
+  - CLI Reference: cli.md
+  - Datasets and Evaluation: datasets-evaluation.md
+  - Publishing: publishing.md
+markdown_extensions:
+  - toc:
+      permalink: true
+  - tables

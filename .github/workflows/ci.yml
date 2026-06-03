@@ -33,3 +33,6 @@ jobs:
 
       - name: Check package build
         run: python -m build
+
+      - name: Check docs build
+        run: python -m mkdocs build --strict

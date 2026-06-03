@@ -2,6 +2,8 @@
 
 A local end-to-end testing harness for **any MCP-exposed app** where coding agents role-play real users.
 
+Documentation wiki: https://sajjadgg.github.io/Rehearsal/
+
 ## Goal
 
 Build a repeatable, sandboxed tester that can:
@@ -161,6 +163,10 @@ PyPI Trusted Publishing. To enable it, create a PyPI project named
 `mcp-ghostlab` and add a trusted publisher for this repository, workflow
 `.github/workflows/release.yml`, environment `pypi`. No PyPI username or token
 needs to be committed.
+
+The Pages workflow builds the docs wiki with MkDocs and deploys it to GitHub
+Pages on pushes to `main`, `v*.*.*` release tags, and manual workflow runs. In
+the GitHub repository settings, set Pages to use GitHub Actions as the source.
 
 ### Understand a new MCP: `inspect`
 
