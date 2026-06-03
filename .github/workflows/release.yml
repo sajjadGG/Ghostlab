@@ -32,6 +32,9 @@ jobs:
       - name: Build distribution
         run: python -m build
 
+      - name: Verify distribution name
+        run: python -c "import email, pathlib, zipfile; wheel = next(pathlib.Path('dist').glob('*.whl')); metadata_name = next(name for name in zipfile.ZipFile(wheel).namelist() if name.endswith('METADATA')); metadata = email.message_from_bytes(zipfile.ZipFile(wheel).read(metadata_name)); assert metadata['Name'] == 'ghostlab', metadata['Name']; print(f\"Publishing {metadata['Name']} {metadata['Version']}\")"
+
       - name: Check distribution
         run: python -m twine check dist/*
 

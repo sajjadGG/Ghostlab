@@ -153,7 +153,7 @@ works and is treated as `run`):
 Run the whole pipeline from a browser instead of the CLI:
 
 ```bash
-pip install 'mcp-ghostlab[ui]'   # installs streamlit
+pip install 'ghostlab[ui]'       # installs streamlit
 ghostlab ui                      # opens http://localhost:8501
 ```
 
@@ -171,6 +171,14 @@ The app walks an MCP through the pipeline as tabs, each step feeding the next:
    with its arguments and results, and the judge's verdict with per-criterion
    evidence.
 
+The sidebar sets the **workspace dir**, the **codex binary**, and the **codex
+model** (applied to every codex-backed stage — generation, the AUT/user runners,
+and the judge — and shown wherever it is used). Each stage has a **🔍 View
+prompt** expander so you can see the exact prompt sent to codex (profile,
+persona/scenario generation, the agent-under-test and user-emulator prompts, and
+the judge). Steps gate on their prerequisites and the run step shows live
+per-case progress.
+
 Artifacts are written under the workspace directory (default
 `ghostlab_workspace/`) so runs persist and can also be opened with the CLI.
 
@@ -187,7 +195,7 @@ Build and validate distributions locally:
 CI runs tests on Python 3.10 through 3.13 and verifies that the package builds.
 The release workflow publishes to PyPI when a `v*.*.*` tag is pushed, using
 PyPI Trusted Publishing. To enable it, create a PyPI project named
-`mcp-ghostlab` and add a trusted publisher for this repository, workflow
+`ghostlab` and add a trusted publisher for this repository, workflow
 `.github/workflows/release.yml`, environment `pypi`. No PyPI username or token
 needs to be committed.
 

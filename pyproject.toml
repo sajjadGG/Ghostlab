@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcp-ghostlab"
+name = "ghostlab"
 dynamic = ["version"]
 description = "A local dual-agent end-to-end testing harness for MCP-exposed apps."
 readme = "README.md"

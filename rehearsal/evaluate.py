@@ -182,6 +182,17 @@ def combine_verdict(
     return verdict, gates
 
 
+def judge_prompt(run: dict[str, Any], capabilities: dict[str, Any] | None = None) -> str:
+    """The exact judge prompt for a run dict (from read_run), for UI preview."""
+    tool_names = None
+    if capabilities:
+        names: list[str] = []
+        for group in capabilities.get("taxonomy", {}).values():
+            names.extend(group)
+        tool_names = names
+    return _build_judge_prompt(run, tool_names)
+
+
 def evaluate_run(
     run_dir: Path, backend: CodexBackend, capabilities: dict[str, Any] | None = None
 ) -> dict[str, Any]:

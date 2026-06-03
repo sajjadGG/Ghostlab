@@ -98,6 +98,11 @@ def _to_persona_dict(raw: dict[str, Any], index: int) -> dict[str, Any]:
     }
 
 
+def persona_prompt(profile: dict[str, Any], n: int) -> str:
+    """The exact prompt that `generate_personas` sends to codex."""
+    return _build_prompt(profile, n)
+
+
 def generate_personas(
     profile: dict[str, Any], backend: CodexBackend, n: int
 ) -> list[dict[str, Any]]:
