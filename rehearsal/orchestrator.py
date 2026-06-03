@@ -73,18 +73,23 @@ def run_scenario(
     )
 
     user_message = scenario.opening_message
+    aut_stateful = getattr(aut_runner, "stateful", False)
 
     for turn_index in range(1, scenario.max_turns + 1):
         transcript.append(TranscriptTurn(role="user", content=user_message))
         logger.write(Event.create("user_message", turn=turn_index, content=user_message))
 
-        aut_prompt = build_aut_prompt(
-            target,
-            scenario,
-            transcript[:-1],
-            user_message,
-            str(mcp_config_path.resolve()),
-        )
+        if aut_stateful and turn_index > 1:
+            # The session already holds prior context; send only the new message.
+            aut_prompt = user_message
+        else:
+            aut_prompt = build_aut_prompt(
+                target,
+                scenario,
+                transcript[:-1],
+                user_message,
+                str(mcp_config_path.resolve()),
+            )
         aut_result = aut_runner.run_turn(aut_prompt)
         # The conversational message is stdout only, with known host noise
         # stripped; stderr is logged separately and never shown to the emulator.
@@ -107,6 +112,7 @@ def run_scenario(
                 output=aut_message,
                 stderr=aut_result.stderr,
                 tool_calls=tool_calls,
+                session_id=getattr(aut_runner, "thread_id", None),
             )
         )
 

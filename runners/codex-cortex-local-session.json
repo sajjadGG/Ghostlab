@@ -1,0 +1,20 @@
+{
+  "kind": "codex-session",
+  "command": [
+    "codex",
+    "--sandbox",
+    "read-only",
+    "-a",
+    "never",
+    "-c",
+    "mcp_servers.cortex.url=\"http://localhost:8000/mcp\"",
+    "exec",
+    "--json",
+    "--skip-git-repo-check",
+    "-"
+  ],
+  "env": {},
+  "timeout_seconds": 600,
+  "prompt_mode": "stdin",
+  "parser": "codex-json"
+}

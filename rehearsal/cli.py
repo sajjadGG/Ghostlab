@@ -19,6 +19,7 @@ KNOWN_COMMANDS = {
     "generate-dataset",
     "run-dataset",
     "review-dataset",
+    "doctor",
 }
 
 
@@ -148,6 +149,16 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser.add_argument("--reject", nargs="*", default=None, help="Case ids to reject (no ids = all).")
     review_parser.add_argument(
         "--needs-edit", nargs="*", default=None, dest="needs_edit", help="Case ids to mark needs-edit."
+    )
+
+    doctor_parser = sub.add_parser(
+        "doctor", help="Check codex availability and validate runner presets."
+    )
+    doctor_parser.add_argument(
+        "--runners", nargs="*", type=Path, default=None, help="Runner JSON configs to validate."
+    )
+    doctor_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
     return parser
 
@@ -380,6 +391,54 @@ def cmd_review_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validate_runner(path: Path) -> tuple[bool, str]:
+    try:
+        runner = load_runner(path)
+    except ConfigError as exc:
+        return False, str(exc)
+    if runner.kind not in ("mock", "process", "codex-session"):
+        return False, f"unknown kind '{runner.kind}'"
+    if runner.kind in ("process", "codex-session") and not runner.command:
+        return False, "empty command"
+    if runner.kind == "codex-session" and "exec" not in runner.command:
+        return False, "codex-session command must contain 'exec'"
+    if runner.parser not in ("text", "codex-json"):
+        return False, f"unknown parser '{runner.parser}'"
+    return True, f"kind={runner.kind} parser={runner.parser}"
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    import shutil
+    import subprocess
+
+    from .codex_backend import CodexError, resolve_codex_bin
+
+    ok = True
+    print("Rehearsal / MCP Ghostlab doctor")
+    try:
+        codex_bin = args.codex_bin or resolve_codex_bin()
+        version = subprocess.run(
+            [codex_bin, "--version"], capture_output=True, text=True, timeout=20
+        )
+        tag = version.stdout.strip() or version.stderr.strip()
+        print(f"  [ok] codex: {codex_bin} ({tag})")
+    except (CodexError, OSError, subprocess.SubprocessError) as exc:
+        ok = False
+        print(f"  [!!] codex: {exc}")
+
+    runner_paths = args.runners
+    if runner_paths is None:
+        runners_dir = Path("runners")
+        runner_paths = sorted(runners_dir.glob("*.json")) if runners_dir.is_dir() else []
+    for path in runner_paths:
+        valid, detail = _validate_runner(path)
+        ok = ok and valid
+        print(f"  [{'ok' if valid else '!!'}] {path}: {detail}")
+
+    print("All good." if ok else "Problems found.")
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     # Backward compatibility: bare `--target ... --scenario ...` defaults to `run`.
@@ -413,6 +472,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_run_dataset(args)
         if args.command == "review-dataset":
             return cmd_review_dataset(args)
+        if args.command == "doctor":
+            return cmd_doctor(args)
     except ConfigError as exc:
         parser.error(str(exc))
         return 2

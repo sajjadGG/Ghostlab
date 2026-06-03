@@ -330,6 +330,34 @@ redacted) becomes the conversational message handed to the other agent, while
 raw stderr is logged for debugging. This prevents the emulator from reacting to
 agent-host warnings instead of the assistant's actual reply.
 
+### Session runner (one live agent across turns)
+
+By default each turn spawns a fresh agent process and the orchestrator replays
+the transcript. The **session runner** (`"kind": "codex-session"`) instead keeps
+one codex session alive: turn 1 records the `thread_id` from the JSONL
+`thread.started` event, and later turns run `codex exec resume <thread_id>` so
+codex retains context — the orchestrator then sends only the new user message
+instead of the whole transcript (fewer tokens, no repeated cold-start noise). The
+shared `session_id` is logged per turn in `events.jsonl` for auditability.
+
+```bash
+ghostlab run --target targets/cortex-local.json --scenario <scenario.json> \
+  --aut-runner runners/codex-cortex-local-session.json --user-runner <user.json>
+```
+
+### Validate your setup: `doctor`
+
+Check that codex is reachable and that runner presets are well-formed before a
+run:
+
+```bash
+ghostlab doctor               # validates runners/*.json
+ghostlab doctor --runners runners/codex-cortex-local-session.json
+```
+
+It reports the codex binary + version and validates each runner's kind, command,
+and parser (e.g. a `codex-session` command must contain `exec`).
+
 ### Default agent backend
 
 `codex` is the default coding-agent backend for the generation and run stages.
