@@ -141,6 +141,8 @@ works and is treated as `run`):
 - `ghostlab review-dataset` — review & curate a dataset (coverage, flags, approve/reject).
 - `ghostlab run-dataset` — run every case in a dataset.
 - `ghostlab run` — run a dual-agent E2E scenario.
+- `ghostlab evaluate` — score a run into a pass/fail verdict (codex judge).
+- `ghostlab doctor` — check codex and validate runner presets.
 
 ## Packaging & Release
 
@@ -329,6 +331,23 @@ stdout and stderr are kept **separate**: only stdout (with known host noise
 redacted) becomes the conversational message handed to the other agent, while
 raw stderr is logged for debugging. This prevents the emulator from reacting to
 agent-host warnings instead of the assistant's actual reply.
+
+### Evaluate a run: `evaluate`
+
+Turn a run into a structured pass/fail verdict:
+
+```bash
+ghostlab evaluate --run runs/<id> --capabilities runs/<id>-inspect/capabilities.json
+```
+
+It combines **deterministic checks** over the captured tool calls (failed calls,
+expected-tool coverage from the scenario's `exercises`) with a **codex
+LLM-judge** that scores each `success_criterion` (met?) and `failure_signal`
+(triggered?) from the transcript and tool calls. Hard gates force an overall
+`fail`: the run crashed, a failure signal triggered, or — when `--capabilities`
+is supplied — the assistant claimed a tool the server does not expose. Writes
+`verdict.json` + `verdict.md`; exits non-zero unless the verdict is `pass`
+(`partial` exits 0 unless `--strict`), so datasets can gate CI.
 
 ### Session runner (one live agent across turns)
 

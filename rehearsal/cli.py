@@ -20,6 +20,7 @@ KNOWN_COMMANDS = {
     "run-dataset",
     "review-dataset",
     "doctor",
+    "evaluate",
 }
 
 
@@ -160,6 +161,21 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
+
+    eval_parser = sub.add_parser(
+        "evaluate", help="Score a run into a pass/fail verdict (uses codex as judge)."
+    )
+    eval_parser.add_argument("--run", required=True, type=Path, help="Path to a run directory.")
+    eval_parser.add_argument(
+        "--capabilities", type=Path, help="Optional capabilities.json for hallucinated-tool checks."
+    )
+    eval_parser.add_argument(
+        "--strict", action="store_true", help="Exit non-zero unless the verdict is a full pass."
+    )
+    eval_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
+    )
+    eval_parser.add_argument("--model", default="", help="Model override for codex.")
     return parser
 
 
@@ -439,6 +455,41 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    from .codex_backend import CodexBackend, CodexError
+    from .evaluate import evaluate_run, write_verdict_artifacts
+
+    if not (args.run / "events.jsonl").exists():
+        raise ConfigError(f"No events.jsonl in {args.run}")
+    capabilities = None
+    if args.capabilities:
+        if not args.capabilities.exists():
+            raise ConfigError(f"capabilities.json not found: {args.capabilities}")
+        capabilities = json.loads(args.capabilities.read_text(encoding="utf-8"))
+
+    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    print(f"Evaluating {args.run} with codex judge ({backend._bin()})...")
+    try:
+        verdict = evaluate_run(args.run, backend, capabilities)
+    except CodexError as exc:
+        print(f"codex backend error: {exc}")
+        return 1
+
+    json_path, md_path = write_verdict_artifacts(verdict, args.run)
+    det = verdict["deterministic"]
+    print(f"Verdict: {verdict['verdict'].upper()} ({verdict['scenario']})")
+    print(f"  coverage={det['coverage']} failed_calls={len(det['tool_failures'])} gates={verdict['gates'] or 'none'}")
+    print(f"  {verdict['judge'].get('summary', '')}")
+    print(f"  wrote {md_path}")
+    print(f"  wrote {json_path}")
+
+    if verdict["verdict"] == "pass":
+        return 0
+    if verdict["verdict"] == "partial" and not args.strict:
+        return 0
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     # Backward compatibility: bare `--target ... --scenario ...` defaults to `run`.
@@ -474,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_review_dataset(args)
         if args.command == "doctor":
             return cmd_doctor(args)
+        if args.command == "evaluate":
+            return cmd_evaluate(args)
     except ConfigError as exc:
         parser.error(str(exc))
         return 2
