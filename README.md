@@ -114,13 +114,44 @@ mcp-rehearsal/
   docker/
 ```
 
+## Commands
+
+Rehearsal exposes subcommands (the bare `--target ... --scenario ...` form still
+works and is treated as `run`):
+
+- `rehearsal inspect` — connect to a target MCP and capture what it exposes.
+- `rehearsal run` — run a dual-agent E2E scenario.
+
+### Understand a new MCP: `inspect`
+
+Point it at a target and it introspects the server without any coding-agent
+credits or manual `curl`:
+
+```bash
+python3 -m rehearsal.cli inspect --target targets/cortex-local.json
+```
+
+This connects over the configured transport (stdio / streamable-HTTP / SSE),
+runs the `initialize` handshake, and pages through `tools/list`,
+`resources/list`, `resources/templates/list`, and `prompts/list`. It writes
+`runs/<id>-inspect/inspect.json` (raw) and `inspect.md` (readable), and **lints**
+tool/resource descriptions for references to tools the server does not actually
+expose (e.g. Cortex descriptions mention `kb_find` / `kb_read` / `kb_read_skill`,
+which are not in `tools/list`). This capability dump is the input to capability
+profiling and scenario generation.
+
+### Default agent backend
+
+`codex` is the default coding-agent backend for the generation and run stages.
+The `inspect` command needs no agent — it is a direct MCP client.
+
 ## Quick Start
 
 Run a mock scenario without spending any coding-agent credits:
 
 ```bash
 cd mcp-rehearsal
-python3 -m rehearsal.cli \
+python3 -m rehearsal.cli run \
   --target targets/example-stdio.json \
   --scenario scenarios/basic-discovery.json \
   --aut-runner runners/mock-aut.json \
