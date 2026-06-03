@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .config import ConfigError, load_runner, load_scenario, load_target
@@ -8,7 +9,7 @@ from .inspect import inspect_target, write_inspect_artifacts
 from .orchestrator import run_scenario
 from .types import utc_now
 
-KNOWN_COMMANDS = {"run", "inspect"}
+KNOWN_COMMANDS = {"run", "inspect", "profile"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +31,23 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument(
         "--timeout", type=float, default=30.0, help="Per-request timeout in seconds."
     )
+
+    profile_parser = sub.add_parser(
+        "profile", help="Build a capability profile from an inspect.json (uses codex)."
+    )
+    profile_parser.add_argument(
+        "--inspect", required=True, type=Path, help="Path to an inspect.json from `inspect`."
+    )
+    profile_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Where to write capabilities.json/.md (default: alongside inspect.json).",
+    )
+    profile_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
+    )
+    profile_parser.add_argument("--model", default="", help="Model override for codex.")
     return parser
 
 
@@ -70,6 +88,36 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_profile(args: argparse.Namespace) -> int:
+    from .codex_backend import CodexBackend, CodexError
+    from .profile import build_capability_profile, write_profile_artifacts
+
+    inspect_path = args.inspect
+    if not inspect_path.exists():
+        raise ConfigError(f"inspect.json not found: {inspect_path}")
+    inspect_data = json.loads(inspect_path.read_text(encoding="utf-8"))
+
+    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    print(f"Generating capability profile with codex ({backend._bin()})...")
+    try:
+        profile = build_capability_profile(inspect_data, backend)
+    except CodexError as exc:
+        print(f"codex backend error: {exc}")
+        return 1
+
+    out_dir = args.output_dir or inspect_path.parent
+    json_path, md_path = write_profile_artifacts(profile, out_dir)
+    print(f"Profiled {profile.get('mcp', '?')}")
+    print(
+        f"  categories={len(profile.get('categories', []))} "
+        f"workflows={len(profile.get('workflows', []))} "
+        f"missing_tools={len(profile.get('gaps', {}).get('missing_referenced_tools', []))}"
+    )
+    print(f"  wrote {json_path}")
+    print(f"  wrote {md_path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     # Backward compatibility: bare `--target ... --scenario ...` defaults to `run`.
@@ -91,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_run(args)
         if args.command == "inspect":
             return cmd_inspect(args)
+        if args.command == "profile":
+            return cmd_profile(args)
     except ConfigError as exc:
         parser.error(str(exc))
         return 2
