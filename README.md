@@ -116,6 +116,20 @@ mcp-rehearsal/
 
 ## Commands
 
+Install locally from this checkout:
+
+```bash
+python3.13 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+```
+
+The package installs two equivalent console scripts:
+
+```bash
+ghostlab --help
+rehearsal --help
+```
+
 Rehearsal exposes subcommands (the bare `--target ... --scenario ...` form still
 works and is treated as `run`):
 
@@ -127,6 +141,23 @@ works and is treated as `run`):
 - `rehearsal review-dataset` — review & curate a dataset (coverage, flags, approve/reject).
 - `rehearsal run-dataset` — run every case in a dataset.
 - `rehearsal run` — run a dual-agent E2E scenario.
+
+## Packaging & Release
+
+Build and validate distributions locally:
+
+```bash
+.venv/bin/python -m pytest
+.venv/bin/python -m build
+.venv/bin/twine check dist/*
+```
+
+CI runs tests on Python 3.10 through 3.13 and verifies that the package builds.
+The release workflow publishes to PyPI when a `v*.*.*` tag is pushed, using
+PyPI Trusted Publishing. To enable it, create a PyPI project named
+`mcp-ghostlab` and add a trusted publisher for this repository, workflow
+`.github/workflows/release.yml`, environment `pypi`. No PyPI username or token
+needs to be committed.
 
 ### Understand a new MCP: `inspect`
 

@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-ghostlab"
+dynamic = ["version"]
+description = "A local dual-agent end-to-end testing harness for MCP-exposed apps."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Sajjad Gholamzadeh" }
+]
+keywords = ["mcp", "testing", "cli", "agents", "evaluation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Testing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2",
+  "pytest>=8.0",
+  "twine>=5.0",
+]
+
+[project.scripts]
+ghostlab = "rehearsal.cli:main"
+rehearsal = "rehearsal.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/sajjadGG/mcp-ghostlab"
+Repository = "https://github.com/sajjadGG/mcp-ghostlab"
+
+[tool.hatch.version]
+path = "rehearsal/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rehearsal", "ghostlab"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/README.md",
+  "/pyproject.toml",
+  "/rehearsal",
+  "/ghostlab",
+  "/tests",
+  "/targets",
+  "/scenarios",
+  "/runners",
+  "/personas",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

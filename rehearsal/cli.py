@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from . import __version__
 from .config import ConfigError, load_persona, load_runner, load_scenario, load_target
 from .inspect import inspect_target, write_inspect_artifacts
 from .orchestrator import run_scenario
@@ -22,7 +23,8 @@ KNOWN_COMMANDS = {
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Rehearsal / MCP Ghostlab.")
+    parser = argparse.ArgumentParser(prog="ghostlab", description="Rehearsal / MCP Ghostlab.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     run_parser = sub.add_parser("run", help="Run a dual-agent E2E scenario.")
@@ -386,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw and raw[0] not in KNOWN_COMMANDS and not raw[0].startswith("-"):
         parser.error(f"Unknown command: {raw[0]}")
-    if raw and raw[0].startswith("-"):
+    if raw and raw[0].startswith("-") and raw[0] not in {"-h", "--help", "--version"}:
         raw = ["run", *raw]
 
     args = parser.parse_args(raw)
