@@ -9,7 +9,15 @@ from .inspect import inspect_target, write_inspect_artifacts
 from .orchestrator import run_scenario
 from .types import utc_now
 
-KNOWN_COMMANDS = {"run", "inspect", "profile", "generate-scenarios", "generate-personas"}
+KNOWN_COMMANDS = {
+    "run",
+    "inspect",
+    "profile",
+    "generate-scenarios",
+    "generate-personas",
+    "generate-dataset",
+    "run-dataset",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -85,6 +93,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
     persona_parser.add_argument("--model", default="", help="Model override for codex.")
+
+    dataset_parser = sub.add_parser(
+        "generate-dataset",
+        help="Generate a persona x scenario dataset from a profile (uses codex).",
+    )
+    dataset_parser.add_argument(
+        "--profile", required=True, type=Path, help="Path to a capabilities.json from `profile`."
+    )
+    dataset_parser.add_argument("--name", default="", help="Dataset name (default: derived from MCP).")
+    dataset_parser.add_argument("--personas", type=int, default=2, help="Number of personas.")
+    dataset_parser.add_argument(
+        "--scenarios-per-persona", type=int, default=2, help="Scenarios generated per persona."
+    )
+    dataset_parser.add_argument("--seed", type=int, default=0, help="Seed for case ordering.")
+    dataset_parser.add_argument(
+        "--output-dir", type=Path, default=Path("datasets"), help="Base directory for datasets."
+    )
+    dataset_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
+    )
+    dataset_parser.add_argument("--model", default="", help="Model override for codex.")
+
+    rundataset_parser = sub.add_parser("run-dataset", help="Run every case in a dataset.")
+    rundataset_parser.add_argument(
+        "--dataset", required=True, type=Path, help="Path to a dataset directory (with dataset.json)."
+    )
+    rundataset_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
+    rundataset_parser.add_argument("--aut-runner", type=Path, help="Path to AUT runner JSON config.")
+    rundataset_parser.add_argument("--user-runner", type=Path, help="Path to user emulator runner JSON config.")
+    rundataset_parser.add_argument(
+        "--output-dir", type=Path, default=Path("runs"), help="Directory for per-case runs and summary."
+    )
+    rundataset_parser.add_argument(
+        "--limit", type=int, default=None, help="Only run the first N cases (for small dev runs)."
+    )
     return parser
 
 
@@ -94,7 +137,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     aut_runner = load_runner(args.aut_runner)
     user_runner = load_runner(args.user_runner)
     persona = load_persona(args.persona) if args.persona else None
-    report_path = run_scenario(
+    result = run_scenario(
         target=target,
         scenario=scenario,
         aut_runner_config=aut_runner,
@@ -102,7 +145,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         output_dir=args.output_dir,
         persona=persona,
     )
-    print(f"Rehearsal report written to {report_path}")
+    print(f"Rehearsal run {result.status} ({result.turns} turns)")
+    print(f"  report: {result.report_path}")
     return 0
 
 
@@ -208,6 +252,61 @@ def cmd_generate_personas(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_generate_dataset(args: argparse.Namespace) -> int:
+    from .codex_backend import CodexBackend, CodexError
+    from .dataset import build_dataset, write_dataset
+
+    if not args.profile.exists():
+        raise ConfigError(f"capabilities.json not found: {args.profile}")
+    profile = json.loads(args.profile.read_text(encoding="utf-8"))
+
+    mcp_name = str(profile.get("mcp", "mcp")).split("@")[0]
+    name = args.name or mcp_name
+    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    print(
+        f"Generating dataset '{name}': {args.personas} personas x "
+        f"{args.scenarios_per_persona} scenarios with codex ({backend._bin()})..."
+    )
+    try:
+        dataset = build_dataset(
+            profile,
+            backend,
+            n_personas=args.personas,
+            scenarios_per_persona=args.scenarios_per_persona,
+            seed=args.seed,
+            name=name,
+        )
+    except CodexError as exc:
+        print(f"codex backend error: {exc}")
+        return 1
+
+    out_dir = args.output_dir / name
+    manifest_path = write_dataset(dataset, out_dir)
+    cases = dataset["manifest"]["cases"]
+    print(f"Dataset written: {manifest_path}")
+    print(f"  personas={len(dataset['personas'])} scenarios={len(dataset['scenarios'])} cases={len(cases)}")
+    for case in cases:
+        print(f"  - {case['id']} [{case.get('intent', '?')}]")
+    return 0
+
+
+def cmd_run_dataset(args: argparse.Namespace) -> int:
+    from .dataset import run_dataset
+
+    if not (args.dataset / "dataset.json").exists():
+        raise ConfigError(f"No dataset.json in {args.dataset}")
+    summary_path = run_dataset(
+        args.dataset,
+        target_path=args.target,
+        aut_runner_path=args.aut_runner,
+        user_runner_path=args.user_runner,
+        output_dir=args.output_dir,
+        limit=args.limit,
+    )
+    print(f"Dataset summary written to {summary_path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     # Backward compatibility: bare `--target ... --scenario ...` defaults to `run`.
@@ -235,6 +334,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_generate_scenarios(args)
         if args.command == "generate-personas":
             return cmd_generate_personas(args)
+        if args.command == "generate-dataset":
+            return cmd_generate_dataset(args)
+        if args.command == "run-dataset":
+            return cmd_run_dataset(args)
     except ConfigError as exc:
         parser.error(str(exc))
         return 2

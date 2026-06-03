@@ -96,13 +96,40 @@ def _profile_digest(profile: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _build_prompt(profile: dict[str, Any], n: int) -> str:
+def _persona_block(persona: dict[str, Any]) -> str:
+    traits = ", ".join(persona.get("traits", []))
+    context = "; ".join(f"{k}: {v}" for k, v in persona.get("context", {}).items())
+    lines = [
+        f"These scenarios are for ONE specific, fixed user persona:",
+        f"- name: {persona.get('name', persona.get('id', '?'))}",
+        f"- summary: {persona.get('summary', '')}",
+    ]
+    if traits:
+        lines.append(f"- traits: {traits}")
+    if context:
+        lines.append(f"- context: {context}")
+    lines.append(
+        "The persona's IDENTITY is fixed and supplied separately at run time. Do NOT restate "
+        "their identity in the `persona` field. Instead, put only a short SITUATIONAL note there "
+        "(what is happening for them in THIS conversation, e.g. 'in a hurry on mobile', 'just "
+        "failed a mock test'). Tailor goals, opening messages, and difficulty to this persona."
+    )
+    return "\n".join(lines)
+
+
+def _build_prompt(profile: dict[str, Any], n: int, persona: dict[str, Any] | None = None) -> str:
+    persona_section = f"\n\n{_persona_block(persona)}\n" if persona else ""
+    persona_field_help = (
+        "a SHORT situational note for this conversation (not the persona's identity)."
+        if persona
+        else "1-3 sentences describing the user (background, constraints, attitude)."
+    )
     return f"""You design end-to-end test scenarios for an MCP (Model Context Protocol) server.
 In each test, one agent role-plays a user and another agent uses the MCP tools to help them.
 
 Capability profile:
 
-{_profile_digest(profile)}
+{_profile_digest(profile)}{persona_section}
 
 Generate exactly {n} diverse, realistic scenarios that this MCP can support. Spread them across intents:
 - happy_path: a primary, well-supported use case.
@@ -113,7 +140,7 @@ For each scenario provide:
 - id: short kebab-case identifier.
 - title: one short line.
 - intent: one of happy_path | edge_case | adversarial.
-- persona: 1-3 sentences describing the user (background, constraints, attitude).
+- persona: {persona_field_help}
 - goal: what the user wants to achieve in this conversation.
 - max_turns: an integer between 3 and 6.
 - opening_message: the user's first message, in their voice.
@@ -148,10 +175,13 @@ def _to_scenario_dict(raw: dict[str, Any], tool_names: set[str], index: int) -> 
 
 
 def generate_scenarios(
-    profile: dict[str, Any], backend: CodexBackend, n: int
+    profile: dict[str, Any],
+    backend: CodexBackend,
+    n: int,
+    persona: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     tool_names = profile_tool_names(profile)
-    result = backend.generate_json(_build_prompt(profile, n), _SCENARIOS_SCHEMA)
+    result = backend.generate_json(_build_prompt(profile, n, persona), _SCENARIOS_SCHEMA)
     raw_scenarios = result.get("scenarios", []) if isinstance(result, dict) else []
 
     scenarios: list[dict[str, Any]] = []

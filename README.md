@@ -123,6 +123,8 @@ works and is treated as `run`):
 - `rehearsal profile` — turn an `inspect.json` into a capability profile (codex).
 - `rehearsal generate-scenarios` — generate scenarios from a profile (codex).
 - `rehearsal generate-personas` — generate a reusable persona library (codex).
+- `rehearsal generate-dataset` — build a persona x scenario dataset (codex).
+- `rehearsal run-dataset` — run every case in a dataset.
 - `rehearsal run` — run a dual-agent E2E scenario.
 
 ### Understand a new MCP: `inspect`
@@ -202,6 +204,50 @@ python3 -m rehearsal.cli run ... --persona personas/ielts-power-user.json
 The user-emulator prompt is composed from the persona's summary + traits +
 context. Scenarios with an inline `persona` string still work unchanged; when a
 persona is supplied, the scenario's inline note refines it.
+
+### Build a dataset: `generate-dataset`
+
+A dataset is a **persona x scenario matrix** — different users, and different
+scenarios tailored to each of them. For every persona, codex generates
+persona-specific scenarios, and the pairs become runnable cases:
+
+```bash
+python3 -m rehearsal.cli generate-dataset \
+  --profile runs/<id>-inspect/capabilities.json \
+  --personas 3 --scenarios-per-persona 3 --seed 7 \
+  --name cortex
+```
+
+This writes a self-contained dataset directory:
+
+```text
+datasets/cortex/
+  dataset.json          manifest: mcp, seed, cases[]
+  personas/<id>.json
+  scenarios/<id>.json    persona-namespaced; inline `persona` is a situational note
+```
+
+The persona is the authoritative identity at run time; each scenario's inline
+`persona` carries only a short situational note ("has 45 minutes before work"),
+so the two never conflict. The `--seed` governs case ordering for reproducible
+manifests.
+
+### Run a dataset: `run-dataset`
+
+Execute every case (use `--limit` for small dev runs):
+
+```bash
+python3 -m rehearsal.cli run-dataset \
+  --dataset datasets/cortex \
+  --target targets/cortex-local.json \
+  --aut-runner runners/codex-cortex-aut.json \
+  --user-runner runners/codex-user-emulator.json \
+  --limit 2
+```
+
+Each case runs through the orchestrator (with its persona) into its own run
+directory, and a dataset-level `summary.md` + `results.json` capture per-case
+status and turn counts.
 
 ### Default agent backend
 

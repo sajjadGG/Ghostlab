@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from .config import PersonaConfig, RunnerConfig, ScenarioConfig, TargetConfig
@@ -10,6 +10,14 @@ from .prompts import build_aut_prompt, build_user_emulator_prompt
 from .report import write_markdown_report
 from .runners import create_runner
 from .types import Event, TranscriptTurn, utc_now
+
+
+@dataclass(frozen=True)
+class RunResult:
+    report_path: Path
+    run_dir: Path
+    status: str
+    turns: int
 
 
 def build_run_id(target_id: str, scenario_id: str) -> str:
@@ -25,7 +33,7 @@ def run_scenario(
     user_runner_config: RunnerConfig,
     output_dir: Path,
     persona: PersonaConfig | None = None,
-) -> Path:
+) -> RunResult:
     run_id = build_run_id(target.id, scenario.id)
     run_dir = output_dir / run_id
     event_log_path = run_dir / "events.jsonl"
@@ -120,4 +128,5 @@ def run_scenario(
 
     logger.write(Event.create("run_finished", status=status, transcript=[asdict(t) for t in transcript]))
     write_markdown_report(report_path, target, scenario, transcript, status, event_log_path)
-    return report_path
+    turns = sum(1 for turn in transcript if turn.role == "assistant")
+    return RunResult(report_path=report_path, run_dir=run_dir, status=status, turns=turns)
