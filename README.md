@@ -142,6 +142,7 @@ works and is treated as `run`):
 - `ghostlab run-dataset` — run every case in a dataset.
 - `ghostlab run` — run a dual-agent E2E scenario.
 - `ghostlab evaluate` — score a run into a pass/fail verdict (codex judge).
+- `ghostlab compare` — diff two dataset runs for regressions.
 - `ghostlab doctor` — check codex and validate runner presets.
 
 ## Packaging & Release
@@ -348,6 +349,33 @@ LLM-judge** that scores each `success_criterion` (met?) and `failure_signal`
 is supplied — the assistant claimed a tool the server does not expose. Writes
 `verdict.json` + `verdict.md`; exits non-zero unless the verdict is `pass`
 (`partial` exits 0 unless `--strict`), so datasets can gate CI.
+
+### Score a whole dataset
+
+`run-dataset --evaluate` runs the codex judge on each case and records the
+verdict in the per-case run dir and in the summary's `results.json` (stamped with
+the ghostlab version + dataset seed for provenance):
+
+```bash
+ghostlab run-dataset --dataset datasets/cortex \
+  --target targets/cortex-local.json \
+  --aut-runner runners/codex-cortex-local-session.json \
+  --evaluate --capabilities runs/<id>-inspect/capabilities.json
+```
+
+### Compare two runs: `compare`
+
+After editing a prompt or tool description, re-run the same dataset and diff the
+results to see what got better or worse:
+
+```bash
+ghostlab compare --base runs/<base>-summary --candidate runs/<cand>-summary \
+  --output comparison.md
+```
+
+It diffs case-by-case on verdict (falling back to run status), listing
+**regressions** (newly failing) first, then **fixes** (newly passing), then other
+changes. Exits non-zero when there are regressions, so it can gate CI.
 
 ### Session runner (one live agent across turns)
 

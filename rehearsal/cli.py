@@ -21,6 +21,7 @@ KNOWN_COMMANDS = {
     "review-dataset",
     "doctor",
     "evaluate",
+    "compare",
 }
 
 
@@ -136,6 +137,16 @@ def build_parser() -> argparse.ArgumentParser:
     rundataset_parser.add_argument(
         "--approved-only", action="store_true", help="Only run cases with status=approved."
     )
+    rundataset_parser.add_argument(
+        "--evaluate", action="store_true", help="Score each case with the codex judge."
+    )
+    rundataset_parser.add_argument(
+        "--capabilities", type=Path, help="capabilities.json for evaluation (hallucinated-tool checks)."
+    )
+    rundataset_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary for evaluation (default: auto-detect)."
+    )
+    rundataset_parser.add_argument("--model", default="", help="Model override for the codex judge.")
 
     review_parser = sub.add_parser(
         "review-dataset", help="Review and curate a dataset (coverage, previews, flags, approve/reject)."
@@ -176,6 +187,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
     eval_parser.add_argument("--model", default="", help="Model override for codex.")
+
+    compare_parser = sub.add_parser(
+        "compare", help="Diff two run-dataset result sets for regressions."
+    )
+    compare_parser.add_argument(
+        "--base", required=True, type=Path, help="Base summary dir or results.json."
+    )
+    compare_parser.add_argument(
+        "--candidate", required=True, type=Path, help="Candidate summary dir or results.json."
+    )
+    compare_parser.add_argument(
+        "--output", type=Path, default=None, help="Where to write comparison.md (default: stdout only)."
+    )
     return parser
 
 
@@ -343,6 +367,18 @@ def cmd_run_dataset(args: argparse.Namespace) -> int:
 
     if not (args.dataset / "dataset.json").exists():
         raise ConfigError(f"No dataset.json in {args.dataset}")
+
+    backend = None
+    capabilities = None
+    if args.evaluate:
+        from .codex_backend import CodexBackend
+
+        backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+        if args.capabilities:
+            if not args.capabilities.exists():
+                raise ConfigError(f"capabilities.json not found: {args.capabilities}")
+            capabilities = json.loads(args.capabilities.read_text(encoding="utf-8"))
+
     summary_path = run_dataset(
         args.dataset,
         target_path=args.target,
@@ -351,9 +387,35 @@ def cmd_run_dataset(args: argparse.Namespace) -> int:
         output_dir=args.output_dir,
         limit=args.limit,
         approved_only=args.approved_only,
+        evaluate=args.evaluate,
+        capabilities=capabilities,
+        backend=backend,
     )
     print(f"Dataset summary written to {summary_path}")
     return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    from .compare import diff_results, load_results, render_comparison_md
+
+    base = load_results(args.base)
+    candidate = load_results(args.candidate)
+    diff = diff_results(base, candidate)
+    md = render_comparison_md(diff)
+
+    print(
+        f"Comparison: regressions={len(diff['regressions'])} fixes={len(diff['fixes'])} "
+        f"changed={len(diff['changed'])} unchanged={diff['unchanged']}"
+    )
+    for entry in diff["regressions"]:
+        print(f"  REGRESSION {entry['case']}: {entry['base']} -> {entry['candidate']}")
+    if args.output:
+        args.output.write_text(md, encoding="utf-8")
+        print(f"  wrote {args.output}")
+    else:
+        print()
+        print(md)
+    return 1 if diff["regressions"] else 0
 
 
 def cmd_review_dataset(args: argparse.Namespace) -> int:
@@ -527,6 +589,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_doctor(args)
         if args.command == "evaluate":
             return cmd_evaluate(args)
+        if args.command == "compare":
+            return cmd_compare(args)
     except ConfigError as exc:
         parser.error(str(exc))
         return 2

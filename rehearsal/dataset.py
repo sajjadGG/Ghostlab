@@ -154,6 +154,9 @@ def run_dataset(
     output_dir: Path,
     limit: int | None = None,
     approved_only: bool = False,
+    evaluate: bool = False,
+    capabilities: dict[str, Any] | None = None,
+    backend: "Any | None" = None,
 ) -> Path:
     manifest = json.loads((dataset_dir / "dataset.json").read_text(encoding="utf-8"))
     target = load_target(target_path)
@@ -179,29 +182,49 @@ def run_dataset(
             output_dir=output_dir,
             persona=persona,
         )
-        results.append(
-            {
-                "case": case["id"],
-                "persona": case["persona"],
-                "scenario": case["scenario"],
-                "intent": case.get("intent", ""),
-                "status": run.status,
-                "turns": run.turns,
-                "run_dir": str(run.run_dir),
-            }
-        )
-        print(f"    -> {run.status} ({run.turns} turns)")
+        row = {
+            "case": case["id"],
+            "persona": case["persona"],
+            "scenario": case["scenario"],
+            "intent": case.get("intent", ""),
+            "status": run.status,
+            "turns": run.turns,
+            "run_dir": str(run.run_dir),
+        }
+        if evaluate and backend is not None:
+            from .evaluate import evaluate_run, write_verdict_artifacts
+
+            verdict = evaluate_run(run.run_dir, backend, capabilities)
+            write_verdict_artifacts(verdict, run.run_dir)
+            row["verdict"] = verdict["verdict"]
+            row["gates"] = verdict["gates"]
+            print(f"    -> {run.status} ({run.turns} turns) verdict={verdict['verdict']}")
+        else:
+            print(f"    -> {run.status} ({run.turns} turns)")
+        results.append(row)
 
     summary_dir = output_dir / f"{_summary_stamp()}-{manifest.get('name', 'dataset')}-summary"
     summary_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "dataset": manifest.get("name"),
+        "seed": manifest.get("seed"),
+        "version": _ghostlab_version(),
+        "target": str(target_path),
+        "created": utc_now(),
+        "results": results,
+    }
     (summary_dir / "results.json").write_text(
-        json.dumps({"dataset": manifest.get("name"), "results": results}, indent=2, ensure_ascii=False)
-        + "\n",
-        encoding="utf-8",
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     summary_md = summary_dir / "summary.md"
     summary_md.write_text(_render_summary(manifest, results), encoding="utf-8")
     return summary_md
+
+
+def _ghostlab_version() -> str:
+    from . import __version__
+
+    return __version__
 
 
 def _summary_stamp() -> str:
@@ -210,8 +233,12 @@ def _summary_stamp() -> str:
 
 def _render_summary(manifest: dict[str, Any], results: list[dict[str, Any]]) -> str:
     by_status: dict[str, int] = {}
+    by_verdict: dict[str, int] = {}
+    have_verdicts = any("verdict" in row for row in results)
     for row in results:
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+        if "verdict" in row:
+            by_verdict[row["verdict"]] = by_verdict.get(row["verdict"], 0) + 1
 
     lines = [
         f"# Dataset Run: {manifest.get('name', '?')}",
@@ -220,15 +247,21 @@ def _render_summary(manifest: dict[str, Any], results: list[dict[str, Any]]) -> 
         f"- Seed: `{manifest.get('seed', '?')}`",
         f"- Cases run: {len(results)}",
         "- Status counts: " + (", ".join(f"{k}={v}" for k, v in sorted(by_status.items())) or "none"),
-        "",
-        "## Cases",
-        "",
-        "| case | intent | status | turns |",
-        "| --- | --- | --- | --- |",
     ]
-    for row in results:
+    if have_verdicts:
         lines.append(
-            f"| {row['case']} | {row['intent']} | {row['status']} | {row['turns']} |"
+            "- Verdict counts: " + (", ".join(f"{k}={v}" for k, v in sorted(by_verdict.items())) or "none")
         )
+    lines += ["", "## Cases", ""]
+    if have_verdicts:
+        lines += ["| case | intent | status | turns | verdict |", "| --- | --- | --- | --- | --- |"]
+        for row in results:
+            lines.append(
+                f"| {row['case']} | {row['intent']} | {row['status']} | {row['turns']} | {row.get('verdict', '-')} |"
+            )
+    else:
+        lines += ["| case | intent | status | turns |", "| --- | --- | --- | --- |"]
+        for row in results:
+            lines.append(f"| {row['case']} | {row['intent']} | {row['status']} | {row['turns']} |")
     lines.append("")
     return "\n".join(lines)
