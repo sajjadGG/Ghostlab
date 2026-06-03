@@ -1,10 +1,33 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
 from .config import RunnerConfig
+
+# Known host noise that should never be treated as conversational content.
+# Matched line-by-line and stripped from the message passed to the other agent.
+_NOISE_PATTERNS = [
+    re.compile(r"^\s*mcp:\s+\S+/\S+\s+(started|\(completed\)|\(failed\))\s*$"),
+    re.compile(r"reconnecting\.\.\.", re.IGNORECASE),
+    re.compile(r"failed to connect to websocket", re.IGNORECASE),
+    re.compile(r"exceeded retry limit", re.IGNORECASE),
+    re.compile(r"^\s*\[\d{4}-\d{2}-\d{2}T.*\]\s", ),  # timestamped log lines
+    re.compile(r"cf-ray:", re.IGNORECASE),
+    re.compile(r"^\s*tokens used", re.IGNORECASE),
+]
+
+
+def redact_host_noise(text: str) -> str:
+    """Drop known agent-host noise lines so they aren't seen as conversation."""
+    kept = [
+        line
+        for line in text.splitlines()
+        if not any(pattern.search(line) for pattern in _NOISE_PATTERNS)
+    ]
+    return "\n".join(kept).strip()
 
 
 @dataclass(frozen=True)
@@ -12,6 +35,7 @@ class RunnerResult:
     output: str
     exit_code: int
     timed_out: bool = False
+    stderr: str = ""
 
 
 class AgentRunner:
@@ -72,13 +96,20 @@ class ProcessRunner(AgentRunner):
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or "") + (exc.stderr or "")
-            return RunnerResult(output=output.strip(), exit_code=124, timed_out=True)
+            # Keep streams separate even on timeout so stderr never pollutes the
+            # conversational message handed to the other agent.
+            return RunnerResult(
+                output=(exc.stdout or "").strip(),
+                exit_code=124,
+                timed_out=True,
+                stderr=(exc.stderr or "").strip(),
+            )
 
-        output = completed.stdout.strip()
-        if completed.stderr.strip():
-            output = f"{output}\n\n[stderr]\n{completed.stderr.strip()}".strip()
-        return RunnerResult(output=output, exit_code=completed.returncode)
+        return RunnerResult(
+            output=completed.stdout.strip(),
+            exit_code=completed.returncode,
+            stderr=completed.stderr.strip(),
+        )
 
 
 def create_runner(config: RunnerConfig, name: str) -> AgentRunner:

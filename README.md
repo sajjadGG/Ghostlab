@@ -313,6 +313,20 @@ Each case runs through the orchestrator (with its persona) into its own run
 directory, and a dataset-level `summary.md` + `results.json` capture per-case
 status and turn counts.
 
+### Tool-call capture & output hygiene
+
+Every run captures structured MCP tool calls from the agent host. Codex prints
+tool activity on stderr (`mcp: <server>/<tool> started` / `(completed)` /
+`(failed)`); the orchestrator pairs these into ordered tool-call records
+(server, tool, status) and writes them to `events.jsonl` plus a per-turn table
+in `report.md`. When a scenario declares `exercises`, the report also shows a
+tool-coverage line (expected vs. actually called).
+
+stdout and stderr are kept **separate**: only stdout (with known host noise
+redacted) becomes the conversational message handed to the other agent, while
+raw stderr is logged for debugging. This prevents the emulator from reacting to
+agent-host warnings instead of the assistant's actual reply.
+
 ### Default agent backend
 
 `codex` is the default coding-agent backend for the generation and run stages.

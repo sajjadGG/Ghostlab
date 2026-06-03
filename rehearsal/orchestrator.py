@@ -8,7 +8,8 @@ from .logging import JsonlLogger
 from .mcp_config import write_mcp_servers_config
 from .prompts import build_aut_prompt, build_user_emulator_prompt
 from .report import write_markdown_report
-from .runners import create_runner
+from .runners import create_runner, redact_host_noise
+from .tool_capture import parse_tool_calls, summarize_tool_calls
 from .types import Event, TranscriptTurn, utc_now
 
 
@@ -55,6 +56,7 @@ def run_scenario(
     user_runner = create_runner(user_runner_config, "user")
 
     transcript: list[TranscriptTurn] = []
+    tool_calls_by_turn: dict[int, list] = {}
     status = "completed"
 
     logger.write(
@@ -84,32 +86,41 @@ def run_scenario(
             str(mcp_config_path.resolve()),
         )
         aut_result = aut_runner.run_turn(aut_prompt)
+        # The conversational message is stdout only, with known host noise
+        # stripped; stderr is logged separately and never shown to the emulator.
+        aut_message = redact_host_noise(aut_result.output)
+        tool_calls = parse_tool_calls(aut_result.output, aut_result.stderr)
+        tool_calls_by_turn[turn_index] = tool_calls
         logger.write(
             Event.create(
                 "aut_result",
                 turn=turn_index,
                 exit_code=aut_result.exit_code,
                 timed_out=aut_result.timed_out,
-                output=aut_result.output,
+                output=aut_message,
+                stderr=aut_result.stderr,
+                tool_calls=tool_calls,
             )
         )
 
         if aut_result.timed_out or aut_result.exit_code != 0:
             status = "aut_failed"
-            transcript.append(TranscriptTurn(role="assistant", content=aut_result.output))
+            transcript.append(TranscriptTurn(role="assistant", content=aut_message))
             break
 
-        transcript.append(TranscriptTurn(role="assistant", content=aut_result.output))
+        transcript.append(TranscriptTurn(role="assistant", content=aut_message))
 
-        user_prompt = build_user_emulator_prompt(scenario, transcript, aut_result.output, persona)
+        user_prompt = build_user_emulator_prompt(scenario, transcript, aut_message, persona)
         user_result = user_runner.run_turn(user_prompt)
+        user_message_out = redact_host_noise(user_result.output)
         logger.write(
             Event.create(
                 "user_emulator_result",
                 turn=turn_index,
                 exit_code=user_result.exit_code,
                 timed_out=user_result.timed_out,
-                output=user_result.output,
+                output=user_message_out,
+                stderr=user_result.stderr,
             )
         )
 
@@ -117,7 +128,7 @@ def run_scenario(
             status = "user_emulator_failed"
             break
 
-        next_message = user_result.output.strip()
+        next_message = user_message_out.strip()
         if next_message == "REHEARSAL_DONE":
             status = "completed"
             break
@@ -126,7 +137,17 @@ def run_scenario(
     else:
         status = "max_turns_reached"
 
-    logger.write(Event.create("run_finished", status=status, transcript=[asdict(t) for t in transcript]))
-    write_markdown_report(report_path, target, scenario, transcript, status, event_log_path)
+    all_tool_calls = [call for turn in sorted(tool_calls_by_turn) for call in tool_calls_by_turn[turn]]
+    logger.write(
+        Event.create(
+            "run_finished",
+            status=status,
+            transcript=[asdict(t) for t in transcript],
+            tool_call_summary=summarize_tool_calls(all_tool_calls),
+        )
+    )
+    write_markdown_report(
+        report_path, target, scenario, transcript, status, event_log_path, tool_calls_by_turn
+    )
     turns = sum(1 for turn in transcript if turn.role == "assistant")
     return RunResult(report_path=report_path, run_dir=run_dir, status=status, turns=turns)
