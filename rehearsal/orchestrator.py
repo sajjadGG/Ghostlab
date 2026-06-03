@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from .config import RunnerConfig, ScenarioConfig, TargetConfig
+from .config import PersonaConfig, RunnerConfig, ScenarioConfig, TargetConfig
 from .logging import JsonlLogger
 from .mcp_config import write_mcp_servers_config
 from .prompts import build_aut_prompt, build_user_emulator_prompt
@@ -24,6 +24,7 @@ def run_scenario(
     aut_runner_config: RunnerConfig,
     user_runner_config: RunnerConfig,
     output_dir: Path,
+    persona: PersonaConfig | None = None,
 ) -> Path:
     run_id = build_run_id(target.id, scenario.id)
     run_dir = output_dir / run_id
@@ -57,6 +58,7 @@ def run_scenario(
             mcp_config_path=str(mcp_config_path),
             aut_runner=asdict(aut_runner_config),
             user_runner=asdict(user_runner_config),
+            persona=asdict(persona) if persona else None,
         )
     )
 
@@ -91,7 +93,7 @@ def run_scenario(
 
         transcript.append(TranscriptTurn(role="assistant", content=aut_result.output))
 
-        user_prompt = build_user_emulator_prompt(scenario, transcript, aut_result.output)
+        user_prompt = build_user_emulator_prompt(scenario, transcript, aut_result.output, persona)
         user_result = user_runner.run_turn(user_prompt)
         logger.write(
             Event.create(

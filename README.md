@@ -122,6 +122,7 @@ works and is treated as `run`):
 - `rehearsal inspect` — connect to a target MCP and capture what it exposes.
 - `rehearsal profile` — turn an `inspect.json` into a capability profile (codex).
 - `rehearsal generate-scenarios` — generate scenarios from a profile (codex).
+- `rehearsal generate-personas` — generate a reusable persona library (codex).
 - `rehearsal run` — run a dual-agent E2E scenario.
 
 ### Understand a new MCP: `inspect`
@@ -176,6 +177,31 @@ and each declares an `exercises` list of the tools it should drive the assistant
 to use. Tool references are filtered to real tool names, so scenarios never
 depend on hallucinated or non-exposed tools. Each scenario is written as a
 `ScenarioConfig`-shaped JSON file ready for `run`.
+
+### Build a persona library: `generate-personas`
+
+Personas are reusable **user profiles** decoupled from scenarios, so the same
+persona can be paired with many scenarios (the basis for the dataset matrix).
+Generate a domain-relevant library from a capability profile:
+
+```bash
+python3 -m rehearsal.cli generate-personas \
+  --profile runs/<id>-inspect/capabilities.json \
+  --n 4 \
+  --output-dir personas
+```
+
+Each persona has a `summary`, behavioral `traits` (terse, impatient, easily
+confused, non-native, ...), and a domain `context` map (native_language,
+target_exam, level, ...). Pass one to a run with `--persona`:
+
+```bash
+python3 -m rehearsal.cli run ... --persona personas/ielts-power-user.json
+```
+
+The user-emulator prompt is composed from the persona's summary + traits +
+context. Scenarios with an inline `persona` string still work unchanged; when a
+persona is supplied, the scenario's inline note refines it.
 
 ### Default agent backend
 

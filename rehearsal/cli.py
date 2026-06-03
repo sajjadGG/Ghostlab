@@ -4,12 +4,12 @@ import argparse
 import json
 from pathlib import Path
 
-from .config import ConfigError, load_runner, load_scenario, load_target
+from .config import ConfigError, load_persona, load_runner, load_scenario, load_target
 from .inspect import inspect_target, write_inspect_artifacts
 from .orchestrator import run_scenario
 from .types import utc_now
 
-KNOWN_COMMANDS = {"run", "inspect", "profile", "generate-scenarios"}
+KNOWN_COMMANDS = {"run", "inspect", "profile", "generate-scenarios", "generate-personas"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--scenario", required=True, type=Path, help="Path to scenario JSON config.")
     run_parser.add_argument("--aut-runner", type=Path, help="Path to AUT runner JSON config.")
     run_parser.add_argument("--user-runner", type=Path, help="Path to user emulator runner JSON config.")
+    run_parser.add_argument("--persona", type=Path, help="Optional persona JSON to drive the user emulator.")
     run_parser.add_argument("--output-dir", type=Path, default=Path("runs"), help="Directory for logs and reports.")
 
     inspect_parser = sub.add_parser("inspect", help="Introspect a target MCP server.")
@@ -66,6 +67,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
     gen_parser.add_argument("--model", default="", help="Model override for codex.")
+
+    persona_parser = sub.add_parser(
+        "generate-personas", help="Generate a persona library from a capability profile (uses codex)."
+    )
+    persona_parser.add_argument(
+        "--profile", required=True, type=Path, help="Path to a capabilities.json from `profile`."
+    )
+    persona_parser.add_argument("--n", type=int, default=4, help="Number of personas to generate.")
+    persona_parser.add_argument(
+        "--output-dir", type=Path, default=Path("personas"), help="Where to write persona JSON files."
+    )
+    persona_parser.add_argument(
+        "--prefix", default="", help="Optional filename prefix for generated personas."
+    )
+    persona_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
+    )
+    persona_parser.add_argument("--model", default="", help="Model override for codex.")
     return parser
 
 
@@ -74,12 +93,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     scenario = load_scenario(args.scenario)
     aut_runner = load_runner(args.aut_runner)
     user_runner = load_runner(args.user_runner)
+    persona = load_persona(args.persona) if args.persona else None
     report_path = run_scenario(
         target=target,
         scenario=scenario,
         aut_runner_config=aut_runner,
         user_runner_config=user_runner,
         output_dir=args.output_dir,
+        persona=persona,
     )
     print(f"Rehearsal report written to {report_path}")
     return 0
@@ -162,6 +183,31 @@ def cmd_generate_scenarios(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_generate_personas(args: argparse.Namespace) -> int:
+    from .codex_backend import CodexBackend, CodexError
+    from .personas import generate_personas, write_personas
+
+    if not args.profile.exists():
+        raise ConfigError(f"capabilities.json not found: {args.profile}")
+    profile = json.loads(args.profile.read_text(encoding="utf-8"))
+
+    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    print(f"Generating {args.n} persona(s) with codex ({backend._bin()})...")
+    try:
+        personas = generate_personas(profile, backend, args.n)
+    except CodexError as exc:
+        print(f"codex backend error: {exc}")
+        return 1
+
+    paths = write_personas(personas, args.output_dir, prefix=args.prefix)
+    print(f"Generated {len(paths)} persona(s) for {profile.get('mcp', '?')}:")
+    for persona, path in zip(personas, paths):
+        traits = ", ".join(persona.get("traits", [])) or "(none)"
+        print(f"  {persona['id']} ({persona.get('name', '')}) -> {path}")
+        print(f"      traits: {traits}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     # Backward compatibility: bare `--target ... --scenario ...` defaults to `run`.
@@ -187,6 +233,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_profile(args)
         if args.command == "generate-scenarios":
             return cmd_generate_scenarios(args)
+        if args.command == "generate-personas":
+            return cmd_generate_personas(args)
     except ConfigError as exc:
         parser.error(str(exc))
         return 2

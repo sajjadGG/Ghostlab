@@ -45,6 +45,23 @@ class ScenarioConfig:
     intent: str = ""
 
 
+@dataclass(frozen=True)
+class PersonaConfig:
+    """A reusable user profile that drives the user-emulator.
+
+    Decoupled from scenarios so the same persona can be paired with many
+    scenarios. `summary` is the headline description; `traits` shape emulation
+    style (terse, impatient, non-native, adversarial); `context` holds
+    domain attributes the MCP cares about (native_language, target_exam, ...).
+    """
+
+    id: str
+    name: str
+    summary: str
+    traits: list[str] = field(default_factory=list)
+    context: dict[str, str] = field(default_factory=dict)
+
+
 def load_json(path: Path) -> dict[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -95,6 +112,25 @@ def load_scenario(path: Path) -> ScenarioConfig:
         opening_message=str(data["opening_message"]),
         exercises=[str(item) for item in data.get("exercises", [])],
         intent=str(data.get("intent", "")),
+    )
+
+
+def load_persona(path: Path) -> PersonaConfig:
+    data = load_json(path)
+    missing = [key for key in ("id", "summary") if key not in data]
+    if missing:
+        raise ConfigError(f"Persona {path} is missing required keys: {', '.join(missing)}")
+
+    context = data.get("context", {})
+    if not isinstance(context, dict):
+        raise ConfigError(f"Persona {path} `context` must be an object")
+
+    return PersonaConfig(
+        id=str(data["id"]),
+        name=str(data.get("name", data["id"])),
+        summary=str(data["summary"]),
+        traits=[str(item) for item in data.get("traits", [])],
+        context={str(key): str(value) for key, value in context.items()},
     )
 
 

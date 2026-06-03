@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .config import ScenarioConfig, TargetConfig
+from .config import PersonaConfig, ScenarioConfig, TargetConfig
 from .types import TranscriptTurn
 
 
@@ -8,6 +8,28 @@ def format_transcript(transcript: list[TranscriptTurn]) -> str:
     if not transcript:
         return "(no previous turns)"
     return "\n".join(f"{turn.role.upper()}: {turn.content}" for turn in transcript)
+
+
+def compose_persona(scenario: ScenarioConfig, persona: PersonaConfig | None) -> str:
+    """Build the persona block for the user-emulator prompt.
+
+    When a reusable persona is supplied it is composed from its summary, traits,
+    and domain context; otherwise we fall back to the scenario's inline persona
+    string for backward compatibility.
+    """
+    if persona is None:
+        return scenario.persona
+
+    lines = [persona.summary]
+    if persona.traits:
+        lines.append("Behavioral traits: " + ", ".join(persona.traits))
+    if persona.context:
+        details = "; ".join(f"{key}: {value}" for key, value in persona.context.items())
+        lines.append(f"Context: {details}")
+    # The scenario's own persona note, if any, refines the reusable persona.
+    if scenario.persona:
+        lines.append(f"In this scenario specifically: {scenario.persona}")
+    return "\n".join(lines)
 
 
 def build_aut_prompt(
@@ -43,11 +65,12 @@ def build_user_emulator_prompt(
     scenario: ScenarioConfig,
     transcript: list[TranscriptTurn],
     last_assistant_message: str,
+    persona: PersonaConfig | None = None,
 ) -> str:
     return f"""You are role-playing a realistic user for an MCP app test.
 
 Persona:
-{scenario.persona}
+{compose_persona(scenario, persona)}
 
 Goal:
 {scenario.goal}

@@ -1,0 +1,22 @@
+{
+  "id": "skeptical-toefl-retaker",
+  "name": "Skeptical TOEFL Retaker",
+  "summary": "A TOEFL retaker who has used several prep apps and doubts whether adaptive tutoring will help. They challenge scores, question feedback quality, and expect explanations tied to test criteria.",
+  "traits": [
+    "skeptical",
+    "detail-oriented",
+    "challenges feedback",
+    "compares answers against rubrics"
+  ],
+  "context": {
+    "native_language": "Mandarin Chinese",
+    "target_language": "English",
+    "target_exam": "TOEFL iBT",
+    "level": "B2",
+    "daily_minutes": "45",
+    "previous_score": "92",
+    "target_score": "105",
+    "weak_skills": "speaking, integrated writing",
+    "tech_savviness": "medium"
+  }
+}

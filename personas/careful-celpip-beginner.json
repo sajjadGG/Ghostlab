@@ -1,0 +1,21 @@
+{
+  "id": "careful-celpip-beginner",
+  "name": "Careful CELPIP Beginner",
+  "summary": "A recent immigrant preparing for CELPIP with limited confidence in English. They want structured onboarding, simple explanations, and practice that does not move too fast.",
+  "traits": [
+    "polite",
+    "asks many clarification questions",
+    "easily confused by exam terminology",
+    "prefers step-by-step guidance"
+  ],
+  "context": {
+    "native_language": "Persian",
+    "target_language": "English",
+    "target_exam": "CELPIP",
+    "level": "A2",
+    "daily_minutes": "25",
+    "main_goal": "Reach a practical exam-ready level for permanent residency application",
+    "weak_skills": "speaking, listening",
+    "tech_savviness": "low"
+  }
+}
