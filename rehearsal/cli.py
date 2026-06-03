@@ -22,6 +22,7 @@ KNOWN_COMMANDS = {
     "doctor",
     "evaluate",
     "compare",
+    "ui",
 }
 
 
@@ -199,6 +200,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare_parser.add_argument(
         "--output", type=Path, default=None, help="Where to write comparison.md (default: stdout only)."
+    )
+
+    ui_parser = sub.add_parser("ui", help="Launch the Streamlit pipeline UI.")
+    ui_parser.add_argument("--port", type=int, default=8501, help="Port to serve the UI on.")
+    ui_parser.add_argument(
+        "--server-address", default="localhost", help="Address Streamlit binds to."
     )
     return parser
 
@@ -552,6 +559,38 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    import subprocess
+    import sys
+    from importlib import util as importlib_util
+
+    if importlib_util.find_spec("streamlit") is None:
+        print(
+            "Streamlit is not installed. Install the UI extra:\n"
+            "  pip install 'mcp-ghostlab[ui]'   (or: pip install streamlit)"
+        )
+        return 1
+
+    app_path = Path(__file__).resolve().parent / "ui" / "app.py"
+    command = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app_path),
+        "--server.port",
+        str(args.port),
+        "--server.address",
+        args.server_address,
+        "--server.headless",
+        "true",
+        "--browser.gatherUsageStats",
+        "false",
+    ]
+    print(f"Launching MCP Ghostlab UI at http://{args.server_address}:{args.port}")
+    return subprocess.call(command)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     # Backward compatibility: bare `--target ... --scenario ...` defaults to `run`.
@@ -591,6 +630,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_evaluate(args)
         if args.command == "compare":
             return cmd_compare(args)
+        if args.command == "ui":
+            return cmd_ui(args)
     except ConfigError as exc:
         parser.error(str(exc))
         return 2

@@ -146,6 +146,33 @@ works and is treated as `run`):
 - `ghostlab evaluate` — score a run into a pass/fail verdict (codex judge).
 - `ghostlab compare` — diff two dataset runs for regressions.
 - `ghostlab doctor` — check codex and validate runner presets.
+- `ghostlab ui` — launch the Streamlit pipeline UI.
+
+### The UI: `ghostlab ui`
+
+Run the whole pipeline from a browser instead of the CLI:
+
+```bash
+pip install 'mcp-ghostlab[ui]'   # installs streamlit
+ghostlab ui                      # opens http://localhost:8501
+```
+
+The app walks an MCP through the pipeline as tabs, each step feeding the next:
+
+1. **Connect & Inspect** — enter the MCP URL (or stdio command) and introspect
+   it (tools, resources, lint findings).
+2. **Profile** — build the capability profile (codex).
+3. **Generate Dataset** — set the parameters (number of personas, scenarios per
+   persona, seed, name) and generate the persona × scenario matrix.
+4. **Review & Curate** — coverage matrix, flags, and per-case approve/reject.
+5. **Run & Evaluate** — run the cases (persistent session runner, optional mock
+   user, codex judge) and watch live progress.
+6. **Trace Viewer** — browse any run: the multi-turn transcript, every tool call
+   with its arguments and results, and the judge's verdict with per-criterion
+   evidence.
+
+Artifacts are written under the workspace directory (default
+`ghostlab_workspace/`) so runs persist and can also be opened with the CLI.
 
 ## Packaging & Release
 
