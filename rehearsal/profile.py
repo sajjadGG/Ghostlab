@@ -120,6 +120,12 @@ Produce a JSON object with:
 Output only the JSON object."""
 
 
+def profile_prompt(inspect: dict[str, Any]) -> str:
+    """The exact prompt that `build_capability_profile` sends to codex."""
+    families = list(taxonomy(inspect.get("tools", [])).keys())
+    return _build_prompt(_digest(inspect), families)
+
+
 def build_capability_profile(inspect: dict[str, Any], backend: CodexBackend) -> dict[str, Any]:
     tools = inspect.get("tools", [])
     tax = taxonomy(tools)

@@ -171,6 +171,14 @@ The app walks an MCP through the pipeline as tabs, each step feeding the next:
    with its arguments and results, and the judge's verdict with per-criterion
    evidence.
 
+The sidebar sets the **workspace dir**, the **codex binary**, and the **codex
+model** (applied to every codex-backed stage — generation, the AUT/user runners,
+and the judge — and shown wherever it is used). Each stage has a **🔍 View
+prompt** expander so you can see the exact prompt sent to codex (profile,
+persona/scenario generation, the agent-under-test and user-emulator prompts, and
+the judge). Steps gate on their prerequisites and the run step shows live
+per-case progress.
+
 Artifacts are written under the workspace directory (default
 `ghostlab_workspace/`) so runs persist and can also be opened with the CLI.
 

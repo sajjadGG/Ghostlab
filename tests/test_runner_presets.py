@@ -29,6 +29,15 @@ class AutRunnerTest(unittest.TestCase):
         runner = codex_aut_runner(_http_target(), codex_bin="/opt/codex/bin/codex")
         self.assertEqual(runner.command[0], "/opt/codex/bin/codex")
 
+    def test_model_injected_as_dash_m(self) -> None:
+        runner = codex_aut_runner(_http_target(), model="o3")
+        self.assertIn("-m", runner.command)
+        self.assertEqual(runner.command[runner.command.index("-m") + 1], "o3")
+
+    def test_no_model_means_no_dash_m(self) -> None:
+        self.assertNotIn("-m", codex_aut_runner(_http_target()).command)
+        self.assertNotIn("-m", codex_user_runner().command)
+
     def test_stdio_injects_command_and_args(self) -> None:
         target = TargetConfig(
             id="fs", transport="stdio", connection={"command": "python", "args": ["-m", "srv"]}

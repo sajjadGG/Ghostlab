@@ -47,12 +47,22 @@ def _mcp_config_args(target: TargetConfig) -> list[str]:
     raise ValueError(f"Unsupported transport for codex runner: {target.transport}")
 
 
+def _model_args(model: str) -> list[str]:
+    return ["-m", model] if model else []
+
+
 def codex_aut_runner(
-    target: TargetConfig, *, session: bool = True, timeout_seconds: int = 600, codex_bin: str = ""
+    target: TargetConfig,
+    *,
+    session: bool = True,
+    timeout_seconds: int = 600,
+    codex_bin: str = "",
+    model: str = "",
 ) -> RunnerConfig:
     """AUT runner: codex with the target MCP injected, JSON output for capture."""
     command = [
         *_codex_base(_codex_bin(codex_bin)),
+        *_model_args(model),
         *_mcp_config_args(target),
         "exec",
         "--json",
@@ -68,9 +78,15 @@ def codex_aut_runner(
     )
 
 
-def codex_user_runner(timeout_seconds: int = 600, codex_bin: str = "") -> RunnerConfig:
+def codex_user_runner(timeout_seconds: int = 600, codex_bin: str = "", model: str = "") -> RunnerConfig:
     """User-emulator runner: plain codex, no MCP, plain-text output."""
-    command = [*_codex_base(_codex_bin(codex_bin)), "exec", "--skip-git-repo-check", "-"]
+    command = [
+        *_codex_base(_codex_bin(codex_bin)),
+        *_model_args(model),
+        "exec",
+        "--skip-git-repo-check",
+        "-",
+    ]
     return RunnerConfig(
         kind="process",
         command=command,

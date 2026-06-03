@@ -174,6 +174,11 @@ def _to_scenario_dict(raw: dict[str, Any], tool_names: set[str], index: int) -> 
     }
 
 
+def scenario_prompt(profile: dict[str, Any], n: int, persona: dict[str, Any] | None = None) -> str:
+    """The exact prompt that `generate_scenarios` sends to codex."""
+    return _build_prompt(profile, n, persona)
+
+
 def generate_scenarios(
     profile: dict[str, Any],
     backend: CodexBackend,
