@@ -9,7 +9,7 @@ from .mcp_config import write_mcp_servers_config
 from .prompts import build_aut_prompt, build_user_emulator_prompt
 from .report import write_markdown_report
 from .runners import create_runner, redact_host_noise
-from .tool_capture import parse_tool_calls, summarize_tool_calls
+from .tool_capture import parse_codex_output, parse_tool_calls, summarize_tool_calls
 from .types import Event, TranscriptTurn, utc_now
 
 
@@ -88,8 +88,15 @@ def run_scenario(
         aut_result = aut_runner.run_turn(aut_prompt)
         # The conversational message is stdout only, with known host noise
         # stripped; stderr is logged separately and never shown to the emulator.
-        aut_message = redact_host_noise(aut_result.output)
-        tool_calls = parse_tool_calls(aut_result.output, aut_result.stderr)
+        # With the codex-json parser we recover the message and rich tool calls
+        # (arguments/result/error) from the JSONL stream instead.
+        if aut_runner_config.parser == "codex-json":
+            parsed = parse_codex_output(aut_result.output)
+            aut_message = parsed["message"] or redact_host_noise(aut_result.output)
+            tool_calls = parsed["tool_calls"]
+        else:
+            aut_message = redact_host_noise(aut_result.output)
+            tool_calls = parse_tool_calls(aut_result.output, aut_result.stderr)
         tool_calls_by_turn[turn_index] = tool_calls
         logger.write(
             Event.create(

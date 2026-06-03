@@ -14,6 +14,7 @@ failures. It is intentionally tolerant: an unmatched `started` is still reported
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -75,6 +76,51 @@ def parse_tool_calls(*streams: str) -> list[dict[str, Any]]:
                         }
                     )
     return calls
+
+
+def parse_codex_output(jsonl_text: str) -> dict[str, Any]:
+    """Parse codex `exec --json` (experimental thread/turn/item) output.
+
+    Returns the assistant message (concatenated `agent_message` items) and rich
+    tool-call records from `mcp_tool_call` items — including arguments, result,
+    and error, which the plain-text path cannot recover. Non-JSON lines (e.g.
+    stray logs on stdout) are ignored so the parse degrades gracefully.
+    """
+    messages: list[str] = []
+    calls: list[dict[str, Any]] = []
+    for line in jsonl_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item") or {}
+        item_type = item.get("type")
+        if item_type == "agent_message":
+            text = item.get("text")
+            if text:
+                messages.append(text)
+        elif item_type == "mcp_tool_call":
+            error = item.get("error")
+            status = item.get("status") or ("failed" if error else "completed")
+            if status not in ("completed", "failed"):
+                status = "failed" if error else "completed"
+            calls.append(
+                {
+                    "index": len(calls) + 1,
+                    "server": item.get("server", "?"),
+                    "tool": item.get("tool", "?"),
+                    "status": status,
+                    "arguments": item.get("arguments"),
+                    "result": item.get("result"),
+                    "error": error,
+                }
+            )
+    return {"message": "\n".join(messages).strip(), "tool_calls": calls}
 
 
 def summarize_tool_calls(calls: list[dict[str, Any]]) -> dict[str, Any]:

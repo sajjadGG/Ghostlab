@@ -7,7 +7,7 @@
     "-a",
     "never",
     "-c",
-    "mcp_servers.cortex.url=\"https://pogo-galley-turbofan.ngrok-free.dev/mcp\"",
+    "mcp_servers.cortex.url=\"http://localhost:8000/mcp\"",
     "exec",
     "--json",
     "--skip-git-repo-check",

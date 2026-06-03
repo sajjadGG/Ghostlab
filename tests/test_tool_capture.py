@@ -4,7 +4,7 @@ from __future__ import annotations
 import unittest
 
 from rehearsal.runners import redact_host_noise
-from rehearsal.tool_capture import parse_tool_calls, summarize_tool_calls
+from rehearsal.tool_capture import parse_codex_output, parse_tool_calls, summarize_tool_calls
 
 # Real codex stderr shape observed in prior cortex runs.
 STDERR = """\
@@ -51,6 +51,48 @@ class ParseToolCallsTest(unittest.TestCase):
         self.assertEqual(summary["total"], 4)
         self.assertEqual(summary["by_status"], {"completed": 3, "failed": 1})
         self.assertEqual(summary["by_tool"]["cortex/student_complete_onboarding"], 2)
+
+
+# Real codex `exec --json` lines (thread/turn/item schema) observed live.
+CODEX_JSONL = "\n".join(
+    [
+        '{"type":"thread.started","thread_id":"t1"}',
+        '{"type":"turn.started"}',
+        '{"type":"item.started","item":{"id":"item_0","type":"mcp_tool_call","server":"cortex","tool":"student_get_status","arguments":{},"status":"in_progress"}}',
+        '{"type":"item.completed","item":{"id":"item_0","type":"mcp_tool_call","server":"cortex","tool":"student_get_status","arguments":{},"result":{"content":[{"type":"text","text":"ok"}]},"error":null,"status":"completed"}}',
+        '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"You are set up for IELTS."}}',
+        '{"type":"turn.completed"}',
+        "stray non-json log line",
+    ]
+)
+
+
+class CodexJsonParseTest(unittest.TestCase):
+    def test_extracts_message_and_rich_tool_call(self) -> None:
+        parsed = parse_codex_output(CODEX_JSONL)
+        self.assertEqual(parsed["message"], "You are set up for IELTS.")
+        self.assertEqual(len(parsed["tool_calls"]), 1)
+        call = parsed["tool_calls"][0]
+        self.assertEqual(call["tool"], "student_get_status")
+        self.assertEqual(call["status"], "completed")
+        self.assertEqual(call["arguments"], {})
+        self.assertIn("content", call["result"])
+
+    def test_only_counts_completed_items(self) -> None:
+        # The in_progress item.started must not create a duplicate record.
+        parsed = parse_codex_output(CODEX_JSONL)
+        self.assertEqual(len(parsed["tool_calls"]), 1)
+
+    def test_failed_tool_call_status(self) -> None:
+        jsonl = '{"type":"item.completed","item":{"type":"mcp_tool_call","server":"s","tool":"t","arguments":{},"result":null,"error":{"message":"boom"},"status":"failed"}}'
+        call = parse_codex_output(jsonl)["tool_calls"][0]
+        self.assertEqual(call["status"], "failed")
+        self.assertEqual(call["error"], {"message": "boom"})
+
+    def test_summary_works_on_codex_calls(self) -> None:
+        summary = summarize_tool_calls(parse_codex_output(CODEX_JSONL)["tool_calls"])
+        self.assertEqual(summary["total"], 1)
+        self.assertEqual(summary["by_status"], {"completed": 1})
 
 
 class RedactionTest(unittest.TestCase):

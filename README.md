@@ -315,11 +315,14 @@ status and turn counts.
 
 ### Tool-call capture & output hygiene
 
-Every run captures structured MCP tool calls from the agent host. Codex prints
-tool activity on stderr (`mcp: <server>/<tool> started` / `(completed)` /
-`(failed)`); the orchestrator pairs these into ordered tool-call records
-(server, tool, status) and writes them to `events.jsonl` plus a per-turn table
-in `report.md`. When a scenario declares `exercises`, the report also shows a
+Every run captures structured MCP tool calls from the agent host. The codex AUT
+runners set `"parser": "codex-json"` and run `codex exec --json`, so the
+orchestrator parses the JSONL stream and records each `mcp_tool_call` with its
+**arguments, result, error, and status** — plus the clean assistant message —
+into `events.jsonl`, with a per-turn table in `report.md`. (Runners without the
+codex-json parser fall back to scraping codex's plain-text
+`mcp: <server>/<tool> started|(completed)|(failed)` lines for tool name +
+status.) When a scenario declares `exercises`, the report also shows a
 tool-coverage line (expected vs. actually called).
 
 stdout and stderr are kept **separate**: only stdout (with known host noise

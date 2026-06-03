@@ -17,6 +17,9 @@ class RunnerConfig:
     env: dict[str, str] = field(default_factory=dict)
     timeout_seconds: int = 180
     prompt_mode: str = "stdin"
+    # How to interpret this runner's output: "text" (plain) or "codex-json"
+    # (codex `exec --json` JSONL, enabling rich tool-call capture).
+    parser: str = "text"
 
 
 @dataclass(frozen=True)
@@ -150,4 +153,5 @@ def load_runner(path: Path | None, fallback_kind: str = "mock") -> RunnerConfig:
         env={str(key): str(value) for key, value in dict(data.get("env", {})).items()},
         timeout_seconds=int(data.get("timeout_seconds", 180)),
         prompt_mode=str(data.get("prompt_mode", "stdin")),
+        parser=str(data.get("parser", "text")),
     )
