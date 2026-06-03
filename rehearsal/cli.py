@@ -567,7 +567,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
     if importlib_util.find_spec("streamlit") is None:
         print(
             "Streamlit is not installed. Install the UI extra:\n"
-            "  pip install 'mcp-ghostlab[ui]'   (or: pip install streamlit)"
+            "  pip install 'ghostlab[ui]'   (or: pip install streamlit)"
         )
         return 1
 

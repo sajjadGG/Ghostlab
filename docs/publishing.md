@@ -10,9 +10,9 @@ Build and validate distributions locally:
 .venv/bin/twine check dist/*
 ```
 
-The `Release` workflow publishes to PyPI when a `v*.*.*` tag is pushed or the workflow is run manually.
+The `Release` workflow publishes the `ghostlab` package to PyPI when a `v*.*.*` tag is pushed or the workflow is run manually.
 
-PyPI publishing uses Trusted Publishing. Create or claim the `mcp-ghostlab` project on PyPI and add a trusted publisher for:
+PyPI publishing uses Trusted Publishing. Create or claim the `ghostlab` project on PyPI and add a trusted publisher for:
 
 - Repository: `sajjadGG/Rehearsal`
 - Workflow: `.github/workflows/release.yml`
