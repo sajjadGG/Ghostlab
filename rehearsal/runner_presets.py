@@ -10,9 +10,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .codex_backend import CodexError, resolve_codex_bin
 from .config import RunnerConfig, TargetConfig
 
-_CODEX_BASE = ["codex", "--sandbox", "read-only", "-a", "never"]
+
+def _codex_bin(override: str = "") -> str:
+    """Resolve the codex executable, falling back to bare 'codex' on PATH."""
+    if override:
+        return override
+    try:
+        return resolve_codex_bin()
+    except CodexError:
+        return "codex"
+
+
+def _codex_base(codex_bin: str) -> list[str]:
+    return [codex_bin, "--sandbox", "read-only", "-a", "never"]
 
 
 def _mcp_config_args(target: TargetConfig) -> list[str]:
@@ -35,11 +48,11 @@ def _mcp_config_args(target: TargetConfig) -> list[str]:
 
 
 def codex_aut_runner(
-    target: TargetConfig, *, session: bool = True, timeout_seconds: int = 600
+    target: TargetConfig, *, session: bool = True, timeout_seconds: int = 600, codex_bin: str = ""
 ) -> RunnerConfig:
     """AUT runner: codex with the target MCP injected, JSON output for capture."""
     command = [
-        *_CODEX_BASE,
+        *_codex_base(_codex_bin(codex_bin)),
         *_mcp_config_args(target),
         "exec",
         "--json",
@@ -55,9 +68,9 @@ def codex_aut_runner(
     )
 
 
-def codex_user_runner(timeout_seconds: int = 600) -> RunnerConfig:
+def codex_user_runner(timeout_seconds: int = 600, codex_bin: str = "") -> RunnerConfig:
     """User-emulator runner: plain codex, no MCP, plain-text output."""
-    command = [*_CODEX_BASE, "exec", "--skip-git-repo-check", "-"]
+    command = [*_codex_base(_codex_bin(codex_bin)), "exec", "--skip-git-repo-check", "-"]
     return RunnerConfig(
         kind="process",
         command=command,

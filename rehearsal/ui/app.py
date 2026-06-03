@@ -311,8 +311,9 @@ with tabs[4]:
 
         if st.button("▶️ Run", type="primary"):
             runs_dir = workspace() / "runs"
-            aut_cfg = codex_aut_runner(target, session=use_session)
-            user_cfg = mock_runner() if user_mock else codex_user_runner()
+            codex_bin = st.session_state.get("codex_bin", "")
+            aut_cfg = codex_aut_runner(target, session=use_session, codex_bin=codex_bin)
+            user_cfg = mock_runner() if user_mock else codex_user_runner(codex_bin=codex_bin)
             results = []
             progress = st.progress(0.0)
             log = st.container()

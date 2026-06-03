@@ -25,6 +25,10 @@ class AutRunnerTest(unittest.TestCase):
     def test_non_session_is_process(self) -> None:
         self.assertEqual(codex_aut_runner(_http_target(), session=False).kind, "process")
 
+    def test_explicit_codex_bin_is_used_as_executable(self) -> None:
+        runner = codex_aut_runner(_http_target(), codex_bin="/opt/codex/bin/codex")
+        self.assertEqual(runner.command[0], "/opt/codex/bin/codex")
+
     def test_stdio_injects_command_and_args(self) -> None:
         target = TargetConfig(
             id="fs", transport="stdio", connection={"command": "python", "args": ["-m", "srv"]}
