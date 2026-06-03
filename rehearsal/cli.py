@@ -9,7 +9,7 @@ from .inspect import inspect_target, write_inspect_artifacts
 from .orchestrator import run_scenario
 from .types import utc_now
 
-KNOWN_COMMANDS = {"run", "inspect", "profile"}
+KNOWN_COMMANDS = {"run", "inspect", "profile", "generate-scenarios"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,6 +48,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
     profile_parser.add_argument("--model", default="", help="Model override for codex.")
+
+    gen_parser = sub.add_parser(
+        "generate-scenarios", help="Generate scenarios from a capability profile (uses codex)."
+    )
+    gen_parser.add_argument(
+        "--profile", required=True, type=Path, help="Path to a capabilities.json from `profile`."
+    )
+    gen_parser.add_argument("--n", type=int, default=3, help="Number of scenarios to generate.")
+    gen_parser.add_argument(
+        "--output-dir", type=Path, default=Path("scenarios"), help="Where to write scenario JSON files."
+    )
+    gen_parser.add_argument(
+        "--prefix", default="", help="Optional filename prefix for generated scenarios."
+    )
+    gen_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
+    )
+    gen_parser.add_argument("--model", default="", help="Model override for codex.")
     return parser
 
 
@@ -118,6 +136,32 @@ def cmd_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_generate_scenarios(args: argparse.Namespace) -> int:
+    from .codex_backend import CodexBackend, CodexError
+    from .generate import generate_scenarios, write_scenarios
+
+    if not args.profile.exists():
+        raise ConfigError(f"capabilities.json not found: {args.profile}")
+    profile = json.loads(args.profile.read_text(encoding="utf-8"))
+
+    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    print(f"Generating {args.n} scenario(s) with codex ({backend._bin()})...")
+    try:
+        scenarios = generate_scenarios(profile, backend, args.n)
+    except CodexError as exc:
+        print(f"codex backend error: {exc}")
+        return 1
+
+    paths = write_scenarios(scenarios, args.output_dir, prefix=args.prefix)
+    print(f"Generated {len(paths)} scenario(s) for {profile.get('mcp', '?')}:")
+    for scenario, path in zip(scenarios, paths):
+        intent = scenario.get("intent", "?")
+        exercises = ", ".join(scenario.get("exercises", [])) or "(none)"
+        print(f"  [{intent}] {scenario['id']} -> {path}")
+        print(f"      exercises: {exercises}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     # Backward compatibility: bare `--target ... --scenario ...` defaults to `run`.
@@ -141,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_inspect(args)
         if args.command == "profile":
             return cmd_profile(args)
+        if args.command == "generate-scenarios":
+            return cmd_generate_scenarios(args)
     except ConfigError as exc:
         parser.error(str(exc))
         return 2

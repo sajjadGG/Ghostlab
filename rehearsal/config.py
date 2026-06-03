@@ -38,6 +38,11 @@ class ScenarioConfig:
     success_criteria: list[str]
     failure_signals: list[str]
     opening_message: str
+    # Optional generation metadata: which tools the scenario should exercise, and
+    # whether it is a happy-path / edge-case / adversarial probe. Used for
+    # coverage measurement; ignored by the run loop.
+    exercises: list[str] = field(default_factory=list)
+    intent: str = ""
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -88,6 +93,8 @@ def load_scenario(path: Path) -> ScenarioConfig:
         success_criteria=[str(item) for item in data.get("success_criteria", [])],
         failure_signals=[str(item) for item in data.get("failure_signals", [])],
         opening_message=str(data["opening_message"]),
+        exercises=[str(item) for item in data.get("exercises", [])],
+        intent=str(data.get("intent", "")),
     )
 
 

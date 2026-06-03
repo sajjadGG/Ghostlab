@@ -121,6 +121,7 @@ works and is treated as `run`):
 
 - `rehearsal inspect` — connect to a target MCP and capture what it exposes.
 - `rehearsal profile` — turn an `inspect.json` into a capability profile (codex).
+- `rehearsal generate-scenarios` — generate scenarios from a profile (codex).
 - `rehearsal run` — run a dual-agent E2E scenario.
 
 ### Understand a new MCP: `inspect`
@@ -157,6 +158,24 @@ It writes `capabilities.json` + `capabilities.md` next to the `inspect.json`.
 Generated workflow steps are filtered to real tool names, so the profile never
 references hallucinated or non-exposed tools. This profile is the input scenario
 generation consumes.
+
+### Generate scenarios: `generate-scenarios`
+
+Generate grounded use-case scenarios the MCP supports, derived from the
+capability profile:
+
+```bash
+python3 -m rehearsal.cli generate-scenarios \
+  --profile runs/<id>-inspect/capabilities.json \
+  --n 3 \
+  --output-dir scenarios
+```
+
+Scenarios are spread across intents (`happy_path` / `edge_case` / `adversarial`)
+and each declares an `exercises` list of the tools it should drive the assistant
+to use. Tool references are filtered to real tool names, so scenarios never
+depend on hallucinated or non-exposed tools. Each scenario is written as a
+`ScenarioConfig`-shaped JSON file ready for `run`.
 
 ### Default agent backend
 
