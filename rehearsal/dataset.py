@@ -153,6 +153,7 @@ def run_dataset(
     user_runner_path: Path | None,
     output_dir: Path,
     limit: int | None = None,
+    approved_only: bool = False,
 ) -> Path:
     manifest = json.loads((dataset_dir / "dataset.json").read_text(encoding="utf-8"))
     target = load_target(target_path)
@@ -160,6 +161,8 @@ def run_dataset(
     user_runner = load_runner(user_runner_path)
 
     cases = manifest.get("cases", [])
+    if approved_only:
+        cases = [c for c in cases if c.get("status") == "approved"]
     if limit is not None:
         cases = cases[:limit]
 

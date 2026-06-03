@@ -17,6 +17,7 @@ KNOWN_COMMANDS = {
     "generate-personas",
     "generate-dataset",
     "run-dataset",
+    "review-dataset",
 }
 
 
@@ -127,6 +128,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rundataset_parser.add_argument(
         "--limit", type=int, default=None, help="Only run the first N cases (for small dev runs)."
+    )
+    rundataset_parser.add_argument(
+        "--approved-only", action="store_true", help="Only run cases with status=approved."
+    )
+
+    review_parser = sub.add_parser(
+        "review-dataset", help="Review and curate a dataset (coverage, previews, flags, approve/reject)."
+    )
+    review_parser.add_argument(
+        "--dataset", required=True, type=Path, help="Path to a dataset directory (with dataset.json)."
+    )
+    review_parser.add_argument(
+        "--profile", type=Path, help="Optional capabilities.json for tool-coverage analysis."
+    )
+    review_parser.add_argument("--approve", nargs="*", default=None, help="Case ids to approve (no ids = all).")
+    review_parser.add_argument("--reject", nargs="*", default=None, help="Case ids to reject (no ids = all).")
+    review_parser.add_argument(
+        "--needs-edit", nargs="*", default=None, dest="needs_edit", help="Case ids to mark needs-edit."
     )
     return parser
 
@@ -302,8 +321,60 @@ def cmd_run_dataset(args: argparse.Namespace) -> int:
         user_runner_path=args.user_runner,
         output_dir=args.output_dir,
         limit=args.limit,
+        approved_only=args.approved_only,
     )
     print(f"Dataset summary written to {summary_path}")
+    return 0
+
+
+def cmd_review_dataset(args: argparse.Namespace) -> int:
+    from .review import (
+        build_review,
+        ensure_statuses,
+        load_dataset,
+        save_manifest,
+        set_statuses,
+        write_review_artifacts,
+    )
+
+    if not (args.dataset / "dataset.json").exists():
+        raise ConfigError(f"No dataset.json in {args.dataset}")
+    dataset = load_dataset(args.dataset)
+    manifest = dataset["manifest"]
+
+    changed = ensure_statuses(manifest)
+    # Apply curation actions, if any.
+    for status, ids in (
+        ("approved", args.approve),
+        ("rejected", args.reject),
+        ("needs-edit", args.needs_edit),
+    ):
+        if ids is None:
+            continue
+        updated = set_statuses(manifest, set(ids), status)
+        changed = changed or bool(updated)
+        print(f"Marked {len(updated)} case(s) {status}.")
+    if changed:
+        save_manifest(args.dataset, manifest)
+
+    profile = None
+    if args.profile:
+        if not args.profile.exists():
+            raise ConfigError(f"capabilities.json not found: {args.profile}")
+        profile = json.loads(args.profile.read_text(encoding="utf-8"))
+
+    review = build_review(dataset, profile)
+    json_path, md_path = write_review_artifacts(review, args.dataset)
+    totals = review["totals"]
+    print(f"Reviewed dataset '{review['dataset']}' ({review['mcp']})")
+    print(
+        f"  cases={totals['cases']} intents={totals['by_intent']} "
+        f"statuses={totals['by_status']} flags={len(review['flags'])}"
+    )
+    for flag in review["flags"]:
+        print(f"  ! {flag['kind']}: {flag['detail']}")
+    print(f"  wrote {md_path}")
+    print(f"  wrote {json_path}")
     return 0
 
 
@@ -338,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_generate_dataset(args)
         if args.command == "run-dataset":
             return cmd_run_dataset(args)
+        if args.command == "review-dataset":
+            return cmd_review_dataset(args)
     except ConfigError as exc:
         parser.error(str(exc))
         return 2

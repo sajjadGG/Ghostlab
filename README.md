@@ -124,6 +124,7 @@ works and is treated as `run`):
 - `rehearsal generate-scenarios` — generate scenarios from a profile (codex).
 - `rehearsal generate-personas` — generate a reusable persona library (codex).
 - `rehearsal generate-dataset` — build a persona x scenario dataset (codex).
+- `rehearsal review-dataset` — review & curate a dataset (coverage, flags, approve/reject).
 - `rehearsal run-dataset` — run every case in a dataset.
 - `rehearsal run` — run a dual-agent E2E scenario.
 
@@ -231,6 +232,38 @@ The persona is the authoritative identity at run time; each scenario's inline
 `persona` carries only a short situational note ("has 45 minutes before work"),
 so the two never conflict. The `--seed` governs case ordering for reproducible
 manifests.
+
+### Review & curate a dataset: `review-dataset`
+
+Before spending agent credits, check that the dataset makes sense:
+
+```bash
+python3 -m rehearsal.cli review-dataset \
+  --dataset datasets/cortex \
+  --profile runs/<id>-inspect/capabilities.json
+```
+
+This writes `review.md` + `review.json` with a **tool-coverage matrix** (which
+tool categories are exercised, which tools are never touched), **per-case
+previews** (persona traits, situation, goal, opening message, success/failure
+criteria, exercises), and **flags**: near-duplicate cases, scenarios exercising
+non-exposed tools, and personas with no scenarios.
+
+Curation is **file-first** — each case gets a `status` in `dataset.json`
+(`pending` / `approved` / `rejected` / `needs-edit`). Edit it by hand, or use:
+
+```bash
+# approve/reject by case id (no ids = all cases)
+python3 -m rehearsal.cli review-dataset --dataset datasets/cortex \
+  --approve case-a case-b --reject case-c
+```
+
+Then run only the approved cases:
+
+```bash
+python3 -m rehearsal.cli run-dataset --dataset datasets/cortex \
+  --target targets/cortex-local.json --approved-only
+```
 
 ### Run a dataset: `run-dataset`
 
