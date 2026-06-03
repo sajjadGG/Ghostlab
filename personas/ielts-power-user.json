@@ -1,0 +1,23 @@
+{
+  "id": "ielts-power-user",
+  "name": "Impatient IELTS Power User",
+  "summary": "A graduate-school applicant with strong English who wants high-yield IELTS practice immediately. They dislike lengthy onboarding and often asks for timed drills, score estimates, and harder material.",
+  "traits": [
+    "terse",
+    "impatient",
+    "goal-driven",
+    "requests advanced difficulty",
+    "skips instructions"
+  ],
+  "context": {
+    "native_language": "Hindi",
+    "target_language": "English",
+    "target_exam": "IELTS Academic",
+    "level": "C1",
+    "daily_minutes": "90",
+    "target_test_date": "2026-07-18",
+    "main_goal": "Band 8 overall with at least 7.5 writing",
+    "weak_skills": "writing task 2, speaking fluency",
+    "tech_savviness": "high"
+  }
+}

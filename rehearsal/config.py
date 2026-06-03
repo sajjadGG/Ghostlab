@@ -17,6 +17,9 @@ class RunnerConfig:
     env: dict[str, str] = field(default_factory=dict)
     timeout_seconds: int = 180
     prompt_mode: str = "stdin"
+    # How to interpret this runner's output: "text" (plain) or "codex-json"
+    # (codex `exec --json` JSONL, enabling rich tool-call capture).
+    parser: str = "text"
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,28 @@ class ScenarioConfig:
     success_criteria: list[str]
     failure_signals: list[str]
     opening_message: str
+    # Optional generation metadata: which tools the scenario should exercise, and
+    # whether it is a happy-path / edge-case / adversarial probe. Used for
+    # coverage measurement; ignored by the run loop.
+    exercises: list[str] = field(default_factory=list)
+    intent: str = ""
+
+
+@dataclass(frozen=True)
+class PersonaConfig:
+    """A reusable user profile that drives the user-emulator.
+
+    Decoupled from scenarios so the same persona can be paired with many
+    scenarios. `summary` is the headline description; `traits` shape emulation
+    style (terse, impatient, non-native, adversarial); `context` holds
+    domain attributes the MCP cares about (native_language, target_exam, ...).
+    """
+
+    id: str
+    name: str
+    summary: str
+    traits: list[str] = field(default_factory=list)
+    context: dict[str, str] = field(default_factory=dict)
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -88,6 +113,27 @@ def load_scenario(path: Path) -> ScenarioConfig:
         success_criteria=[str(item) for item in data.get("success_criteria", [])],
         failure_signals=[str(item) for item in data.get("failure_signals", [])],
         opening_message=str(data["opening_message"]),
+        exercises=[str(item) for item in data.get("exercises", [])],
+        intent=str(data.get("intent", "")),
+    )
+
+
+def load_persona(path: Path) -> PersonaConfig:
+    data = load_json(path)
+    missing = [key for key in ("id", "summary") if key not in data]
+    if missing:
+        raise ConfigError(f"Persona {path} is missing required keys: {', '.join(missing)}")
+
+    context = data.get("context", {})
+    if not isinstance(context, dict):
+        raise ConfigError(f"Persona {path} `context` must be an object")
+
+    return PersonaConfig(
+        id=str(data["id"]),
+        name=str(data.get("name", data["id"])),
+        summary=str(data["summary"]),
+        traits=[str(item) for item in data.get("traits", [])],
+        context={str(key): str(value) for key, value in context.items()},
     )
 
 
@@ -107,4 +153,5 @@ def load_runner(path: Path | None, fallback_kind: str = "mock") -> RunnerConfig:
         env={str(key): str(value) for key, value in dict(data.get("env", {})).items()},
         timeout_seconds=int(data.get("timeout_seconds", 180)),
         prompt_mode=str(data.get("prompt_mode", "stdin")),
+        parser=str(data.get("parser", "text")),
     )

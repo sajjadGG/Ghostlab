@@ -1,10 +1,34 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
 from .config import RunnerConfig
+
+# Known host noise that should never be treated as conversational content.
+# Matched line-by-line and stripped from the message passed to the other agent.
+_NOISE_PATTERNS = [
+    re.compile(r"^\s*mcp:\s+\S+/\S+\s+(started|\(completed\)|\(failed\))\s*$"),
+    re.compile(r"reconnecting\.\.\.", re.IGNORECASE),
+    re.compile(r"failed to connect to websocket", re.IGNORECASE),
+    re.compile(r"exceeded retry limit", re.IGNORECASE),
+    re.compile(r"^\s*\[\d{4}-\d{2}-\d{2}T.*\]\s", ),  # timestamped log lines
+    re.compile(r"cf-ray:", re.IGNORECASE),
+    re.compile(r"^\s*tokens used", re.IGNORECASE),
+]
+
+
+def redact_host_noise(text: str) -> str:
+    """Drop known agent-host noise lines so they aren't seen as conversation."""
+    kept = [
+        line
+        for line in text.splitlines()
+        if not any(pattern.search(line) for pattern in _NOISE_PATTERNS)
+    ]
+    return "\n".join(kept).strip()
 
 
 @dataclass(frozen=True)
@@ -12,9 +36,43 @@ class RunnerResult:
     output: str
     exit_code: int
     timed_out: bool = False
+    stderr: str = ""
+
+
+def _exec(command: list[str], input_text: str | None, env: dict[str, str], timeout: int) -> RunnerResult:
+    """Run a command once, keeping stdout and stderr separate."""
+    full_env = os.environ.copy()
+    full_env.update(env)
+    try:
+        completed = subprocess.run(
+            command,
+            input=input_text,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=full_env,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return RunnerResult(
+            output=(exc.stdout or "").strip(),
+            exit_code=124,
+            timed_out=True,
+            stderr=(exc.stderr or "").strip(),
+        )
+    return RunnerResult(
+        output=completed.stdout.strip(),
+        exit_code=completed.returncode,
+        stderr=completed.stderr.strip(),
+    )
 
 
 class AgentRunner:
+    # Stateful runners keep one agent session alive across turns, so the
+    # orchestrator should send only the new user message after the first turn.
+    stateful = False
+
     def run_turn(self, prompt: str) -> RunnerResult:
         raise NotImplementedError
 
@@ -43,10 +101,8 @@ class ProcessRunner(AgentRunner):
         self.config = config
 
     def run_turn(self, prompt: str) -> RunnerResult:
-        env = os.environ.copy()
-        env.update(self.config.env)
         command = list(self.config.command)
-        input_text = prompt
+        input_text: str | None = prompt
 
         if self.config.prompt_mode == "append-arg":
             command.append(prompt)
@@ -60,25 +116,56 @@ class ProcessRunner(AgentRunner):
                 exit_code=2,
             )
 
-        try:
-            completed = subprocess.run(
-                command,
-                input=input_text,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
-                timeout=self.config.timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or "") + (exc.stderr or "")
-            return RunnerResult(output=output.strip(), exit_code=124, timed_out=True)
+        return _exec(command, input_text, self.config.env, self.config.timeout_seconds)
 
-        output = completed.stdout.strip()
-        if completed.stderr.strip():
-            output = f"{output}\n\n[stderr]\n{completed.stderr.strip()}".strip()
-        return RunnerResult(output=output, exit_code=completed.returncode)
+
+class CodexSessionRunner(AgentRunner):
+    """Keeps one codex session alive across turns via `codex exec resume`.
+
+    Turn 1 runs the base command and records the `thread_id` from the JSONL
+    `thread.started` event. Later turns insert `resume <thread_id>` after `exec`
+    so codex retains conversation context — the orchestrator then only needs to
+    send the new user message instead of replaying the whole transcript.
+    """
+
+    stateful = True
+
+    def __init__(self, config: RunnerConfig) -> None:
+        if not config.command:
+            raise ValueError("Session runner requires a non-empty command")
+        if "exec" not in config.command:
+            raise ValueError("codex-session command must contain 'exec'")
+        self.config = config
+        self.thread_id: str | None = None
+
+    def _command_for_turn(self) -> list[str]:
+        command = list(self.config.command)
+        if self.thread_id:
+            insert_at = command.index("exec") + 1
+            command[insert_at:insert_at] = ["resume", self.thread_id]
+        return command
+
+    @staticmethod
+    def _extract_thread_id(jsonl_text: str) -> str | None:
+        for line in jsonl_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "thread.started" and event.get("thread_id"):
+                return str(event["thread_id"])
+        return None
+
+    def run_turn(self, prompt: str) -> RunnerResult:
+        result = _exec(
+            self._command_for_turn(), prompt, self.config.env, self.config.timeout_seconds
+        )
+        if self.thread_id is None:
+            self.thread_id = self._extract_thread_id(result.output)
+        return result
 
 
 def create_runner(config: RunnerConfig, name: str) -> AgentRunner:
@@ -86,4 +173,6 @@ def create_runner(config: RunnerConfig, name: str) -> AgentRunner:
         return MockRunner(name)
     if config.kind == "process":
         return ProcessRunner(config)
+    if config.kind == "codex-session":
+        return CodexSessionRunner(config)
     raise ValueError(f"Unsupported runner kind: {config.kind}")
