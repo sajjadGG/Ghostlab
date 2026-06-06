@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock, patch
 
-from rehearsal.dataset import assemble_cases
+from rehearsal.dataset import assemble_cases, build_dataset
 
 PERSONAS = [{"id": "alice"}, {"id": "bob"}]
 SCENARIOS_BY_PERSONA = {
@@ -40,6 +41,31 @@ class AssembleCasesTest(unittest.TestCase):
     def test_missing_scenarios_for_persona_is_skipped(self) -> None:
         cases = assemble_cases([{"id": "ghost"}], {}, seed=0)
         self.assertEqual(cases, [])
+
+    @patch("rehearsal.dataset.generate_scenarios")
+    @patch("rehearsal.dataset.generate_personas")
+    def test_build_dataset_reports_generation_progress(
+        self, generate_personas: MagicMock, generate_scenarios: MagicMock
+    ) -> None:
+        generate_personas.return_value = [{"id": "alice", "name": "Alice"}]
+        generate_scenarios.return_value = [{"id": "happy", "intent": "happy_path"}]
+        events = []
+
+        dataset = build_dataset(
+            {"mcp": "test"},
+            MagicMock(),
+            n_personas=1,
+            scenarios_per_persona=1,
+            seed=0,
+            name="test",
+            progress=events.append,
+        )
+
+        self.assertEqual(len(dataset["manifest"]["cases"]), 1)
+        self.assertEqual(
+            [(event["phase"], event["completed"]) for event in events],
+            [("personas", 0), ("personas", 1), ("scenarios", 0), ("scenarios", 1), ("cases", 0), ("cases", 1)],
+        )
 
 
 if __name__ == "__main__":
