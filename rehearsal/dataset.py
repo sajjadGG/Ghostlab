@@ -19,7 +19,7 @@ import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .codex_backend import CodexBackend
 from .config import load_persona, load_runner, load_scenario, load_target
@@ -78,18 +78,38 @@ def build_dataset(
     scenarios_per_persona: int,
     seed: int,
     name: str,
+    progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Generate personas + per-persona scenarios and assemble a dataset manifest.
 
     Returns a dict with keys: manifest, personas, scenarios (the latter two are
     lists of dicts ready to be written to disk).
     """
+    def notify(phase: str, completed: int, total: int, message: str) -> None:
+        if progress is not None:
+            progress(
+                {
+                    "phase": phase,
+                    "completed": completed,
+                    "total": total,
+                    "message": message,
+                }
+            )
+
+    notify("personas", 0, n_personas, f"Generating {n_personas} personas")
     personas = generate_personas(profile, backend, n_personas)
+    notify("personas", len(personas), n_personas, f"Generated {len(personas)} personas")
 
     all_scenarios: list[dict[str, Any]] = []
     scenarios_by_persona: dict[str, list[dict[str, Any]]] = {}
     seen_scenario_ids: set[str] = set()
-    for persona in personas:
+    for index, persona in enumerate(personas, start=1):
+        notify(
+            "scenarios",
+            index - 1,
+            len(personas),
+            f"Generating scenarios for {persona.get('name', persona['id'])}",
+        )
         scenarios = generate_scenarios(profile, backend, scenarios_per_persona, persona=persona)
         prefixed: list[dict[str, Any]] = []
         for scenario in scenarios:
@@ -105,7 +125,14 @@ def build_dataset(
             prefixed.append(scenario)
             all_scenarios.append(scenario)
         scenarios_by_persona[persona["id"]] = prefixed
+        notify(
+            "scenarios",
+            index,
+            len(personas),
+            f"Generated scenarios for {index}/{len(personas)} personas",
+        )
 
+    notify("cases", 0, 1, "Pairing personas and scenarios into runnable cases")
     cases = assemble_cases(personas, scenarios_by_persona, seed)
     manifest = {
         "name": name,
@@ -116,6 +143,7 @@ def build_dataset(
         "scenarios_per_persona": scenarios_per_persona,
         "cases": cases,
     }
+    notify("cases", 1, 1, f"Assembled {len(cases)} runnable cases")
     return {"manifest": manifest, "personas": personas, "scenarios": all_scenarios}
 
 

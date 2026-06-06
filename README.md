@@ -157,19 +157,22 @@ pip install 'ghostlab[ui]'       # installs streamlit
 ghostlab ui                      # opens http://localhost:8501
 ```
 
-The app walks an MCP through the pipeline as tabs, each step feeding the next:
+The app walks an MCP through four user-facing stages:
 
-1. **Connect & Inspect** — enter the MCP URL (or stdio command) and introspect
-   it (tools, resources, lint findings).
-2. **Profile** — build the capability profile (codex).
-3. **Generate Dataset** — set the parameters (number of personas, scenarios per
-   persona, seed, name) and generate the persona × scenario matrix.
-4. **Review & Curate** — coverage matrix, flags, and per-case approve/reject.
-5. **Run & Evaluate** — run the cases (persistent session runner, optional mock
-   user, codex judge) and watch live progress.
-6. **Trace Viewer** — browse any run: the multi-turn transcript, every tool call
-   with its arguments and results, and the judge's verdict with per-criterion
-   evidence.
+1. **Inspect MCP** — connect to the MCP, verify its tools/resources, and analyze
+   its capabilities and likely workflows.
+2. **Build Test Cases** — generate personas and scenarios, pair them into
+   runnable cases, then review coverage, warnings, case selection, and the
+   resolved per-case prompts together.
+3. **Run & Evaluate** — run each selected persona + scenario case with the
+   agent-under-test and user emulator, then optionally evaluate it with a codex
+   judge. Generation and runs expose determinate progress and live turn activity.
+4. **Review Results** — browse each run's chronological conversation trace,
+   inline tool activity, exact runtime prompts, model/duration metadata, and
+   verdict evidence. Filter run history by target, status, verdict, or search.
+
+A **case** is the concrete runnable preset formed by pairing one persona with
+one scenario. Each selected case produces one run and one trace.
 
 The sidebar sets the **workspace dir**, the **codex binary**, and the **codex
 model** (applied to every codex-backed stage — generation, the AUT/user runners,
