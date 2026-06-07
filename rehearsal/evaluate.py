@@ -14,7 +14,7 @@ from typing import Any
 
 from .codex_backend import CodexBackend
 from .logging import JsonlLogger
-from .types import Event
+from .types import Event, utc_now
 
 VERDICTS = ("pass", "partial", "fail")
 
@@ -57,7 +57,21 @@ _JUDGE_SCHEMA: dict[str, Any] = {
 
 
 def read_run(run_dir: Path) -> dict[str, Any]:
-    """Reconstruct run setup, chronological trace, transcript, and tool calls."""
+    """Reconstruct a run from its ``events.jsonl`` file."""
+    events: list[dict[str, Any]] = []
+    for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            events.append(json.loads(line))
+    return reconstruct_run(events)
+
+
+def reconstruct_run(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Reconstruct run setup, chronological trace, transcript, and tool calls.
+
+    Pure over an ordered list of ``{type,timestamp,data}`` events, so it works
+    the same whether events come from ``events.jsonl`` or the SQLite ledger.
+    """
     scenario: dict[str, Any] = {}
     persona: dict[str, Any] | None = None
     target: dict[str, Any] = {}
@@ -71,11 +85,7 @@ def read_run(run_dir: Path) -> dict[str, Any]:
     evaluation: dict[str, Any] = {}
     status = "unknown"
 
-    for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        event = json.loads(line)
+    for event in events:
         data = event.get("data", {})
         if event["type"] == "run_started":
             scenario = data.get("scenario", {})
@@ -269,7 +279,10 @@ def judge_prompt(run: dict[str, Any], capabilities: dict[str, Any] | None = None
 
 
 def evaluate_run(
-    run_dir: Path, backend: CodexBackend, capabilities: dict[str, Any] | None = None
+    run_dir: Path,
+    backend: CodexBackend,
+    capabilities: dict[str, Any] | None = None,
+    store: "Any | None" = None,
 ) -> dict[str, Any]:
     run = read_run(run_dir)
     deterministic = deterministic_checks(run["scenario"], run["tool_calls"])
@@ -282,14 +295,22 @@ def evaluate_run(
         tool_names = names
 
     prompt = _build_judge_prompt(run, tool_names)
+    model = backend.model or "codex default"
     logger = JsonlLogger(run_dir / "events.jsonl")
-    logger.write(
-        Event.create(
-            "evaluation_started",
-            model=backend.model or "codex default",
-            prompt=prompt,
-        )
-    )
+    started_at = utc_now()
+    started_event = Event.create("evaluation_started", model=model, prompt=prompt)
+    logger.write(started_event)
+
+    # SQLite persistence is best-effort: the verdict artifacts are always written.
+    run_db_id = None
+    if store is not None:
+        try:
+            run_db_id = store.run_id_by_public(run_dir.name)
+            if run_db_id is not None:
+                store.append_event(run_db_id, started_event)
+        except Exception:  # noqa: BLE001
+            run_db_id = None
+
     judge = backend.generate_json(prompt, _JUDGE_SCHEMA)
     verdict, gates = combine_verdict(run["status"], deterministic, judge)
     result = {
@@ -301,7 +322,17 @@ def evaluate_run(
         "deterministic": deterministic,
         "judge": judge,
     }
-    logger.write(Event.create("evaluation_finished", verdict=verdict, gates=gates))
+    finished_event = Event.create("evaluation_finished", verdict=verdict, gates=gates)
+    logger.write(finished_event)
+    if run_db_id is not None:
+        try:
+            store.append_event(run_db_id, finished_event)
+            store.record_judgment(
+                run_dir.name, result, model=model, prompt_text=prompt,
+                started_at=started_at, finished_at=utc_now(),
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return result
 
 

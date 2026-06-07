@@ -185,6 +185,7 @@ def run_dataset(
     evaluate: bool = False,
     capabilities: dict[str, Any] | None = None,
     backend: "Any | None" = None,
+    store: "Any | None" = None,
 ) -> Path:
     manifest = json.loads((dataset_dir / "dataset.json").read_text(encoding="utf-8"))
     target = load_target(target_path)
@@ -209,6 +210,7 @@ def run_dataset(
             user_runner_config=user_runner,
             output_dir=output_dir,
             persona=persona,
+            store=store,
         )
         row = {
             "case": case["id"],
@@ -222,7 +224,7 @@ def run_dataset(
         if evaluate and backend is not None:
             from .evaluate import evaluate_run, write_verdict_artifacts
 
-            verdict = evaluate_run(run.run_dir, backend, capabilities)
+            verdict = evaluate_run(run.run_dir, backend, capabilities, store=store)
             write_verdict_artifacts(verdict, run.run_dir)
             row["verdict"] = verdict["verdict"]
             row["gates"] = verdict["gates"]
