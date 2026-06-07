@@ -21,7 +21,6 @@ from rehearsal.evaluate import (
     evidence_references,
     evaluate_run,
     judge_prompt,
-    read_run,
     write_verdict_artifacts,
 )
 from rehearsal.generate import scenario_prompt
@@ -38,6 +37,7 @@ from rehearsal.review import (
     set_statuses,
 )
 from rehearsal.runner_presets import codex_aut_runner, codex_user_runner, mock_runner
+from rehearsal.storage import GhostlabStore
 
 st.set_page_config(page_title="MCP Ghostlab", page_icon="👻", layout="wide")
 
@@ -167,8 +167,11 @@ DEFAULTS = {
     "target": None,
     "inspect": None,
     "inspect_dir": None,
+    "inspection_public_id": None,
     "profile": None,
+    "profile_public_id": None,
     "dataset_dir": None,
+    "dataset_public_id": None,
     "run_results": [],
     "model": "",
 }
@@ -184,6 +187,11 @@ def workspace() -> Path:
 
 def backend() -> CodexBackend:
     return CodexBackend(bin_path=st.session_state.get("codex_bin", ""), model=st.session_state.get("model", ""))
+
+
+def open_store() -> GhostlabStore:
+    """A fresh store bound to the workspace database (one per Streamlit rerun)."""
+    return GhostlabStore.open(workspace=workspace())
 
 
 def stamp() -> str:
@@ -364,6 +372,10 @@ def render_case_workspace(dataset_dir: Path) -> None:
         for case_id, status in statuses.items():
             set_statuses(ds["manifest"], {case_id}, status)
         save_manifest(dataset_dir, ds["manifest"])
+        dataset_public = st.session_state.get("dataset_public_id")
+        if dataset_public:
+            with open_store() as store:
+                store.set_curation_status(dataset_public, statuses)
         st.success("Case statuses saved. Approved cases are ready to run.")
 
 
@@ -510,14 +522,26 @@ with tabs[0]:
                 with st.spinner("Connecting and mapping MCP capabilities..."):
                     result = inspect_target(target)
                 out_dir = workspace() / f"{stamp()}-{target_id}-inspect"
-                write_inspect_artifacts(result, out_dir)
+                json_path, md_path = write_inspect_artifacts(result, out_dir)
                 st.session_state["target"] = asdict(target)
                 st.session_state["inspect"] = asdict(result)
                 st.session_state["inspect_dir"] = str(out_dir)
                 # New MCP invalidates downstream artifacts.
                 st.session_state["profile"] = None
+                st.session_state["profile_public_id"] = None
                 st.session_state["dataset_dir"] = None
-                st.success(f"Inspected {result.server_info.get('name', '?')}@{result.server_info.get('version', '?')} → {out_dir}")
+                st.session_state["dataset_public_id"] = None
+                version = None
+                with open_store() as store:
+                    info = store.record_inspection(target, result)
+                    store.index_artifact("inspection", info["inspection_public_id"], "inspect.json", json_path)
+                    store.index_artifact("inspection", info["inspection_public_id"], "inspect.md", md_path)
+                    st.session_state["inspection_public_id"] = info["inspection_public_id"]
+                    version = info["version"]
+                st.success(
+                    f"Inspected {result.server_info.get('name', '?')}@{result.server_info.get('version', '?')} "
+                    f"— saved as version v{version}."
+                )
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Inspect failed: {exc}")
 
@@ -540,6 +564,55 @@ with tabs[0]:
                 """
             )
         st.info("After inspection, Ghostlab analyzes these capabilities so it can generate realistic personas and scenarios.")
+
+    with st.expander("📚 MCP history — reuse a past inspection", expanded=False):
+        st.caption(
+            "Every inspection is saved as a version of that MCP. Load one to reuse its "
+            "tools and capability profile without reconnecting."
+        )
+        with open_store() as history_store:
+            saved_targets = history_store.list_targets()
+            if not saved_targets:
+                st.info("No saved inspections yet. Inspect an MCP above to start building history.")
+            else:
+                target_labels = {
+                    t["public_id"]: f"{t['slug']} · {t['inspection_count']} version(s)"
+                    for t in saved_targets
+                }
+                chosen_target = st.selectbox(
+                    "Saved MCP",
+                    list(target_labels),
+                    format_func=lambda pid: target_labels[pid],
+                    key="history_target",
+                )
+                for insp_row in history_store.list_inspections(chosen_target):
+                    info_col, load_col = st.columns([4, 1])
+                    with info_col:
+                        st.markdown(
+                            f"**v{insp_row['version']}** · "
+                            f"`{insp_row['server_name'] or '?'}@{insp_row['server_version'] or '?'}` · "
+                            f"{insp_row['tool_count']} tools · {(insp_row['started_at'] or '')[:19]}"
+                        )
+                    with load_col:
+                        if st.button("Load", key=f"load-{insp_row['public_id']}"):
+                            full = history_store.get_inspection(insp_row["public_id"])
+                            raw = full["raw"]
+                            st.session_state["inspect"] = raw
+                            st.session_state["inspection_public_id"] = insp_row["public_id"]
+                            st.session_state["target"] = {
+                                "id": raw.get("target_id"),
+                                "transport": raw.get("transport"),
+                                "connection": {},
+                            }
+                            prof = history_store.latest_profile_for_inspection(insp_row["public_id"])
+                            st.session_state["profile"] = prof["profile"] if prof else None
+                            st.session_state["profile_public_id"] = (
+                                prof["profile_public_id"] if prof else None
+                            )
+                            st.session_state["dataset_dir"] = None
+                            st.session_state["dataset_public_id"] = None
+                            st.success(f"Loaded v{insp_row['version']}. Reuse its tools and profile below.")
+                            st.rerun()
 
     insp = st.session_state["inspect"]
     if insp:
@@ -565,8 +638,19 @@ with tabs[0]:
             try:
                 with st.spinner("Analyzing tools and inferring workflows..."):
                     profile = build_capability_profile(st.session_state["inspect"], backend())
-                write_profile_artifacts(profile, Path(st.session_state["inspect_dir"]))
+                prof_json, prof_md = write_profile_artifacts(profile, Path(st.session_state["inspect_dir"]))
                 st.session_state["profile"] = profile
+                inspection_public = st.session_state.get("inspection_public_id")
+                if inspection_public:
+                    with open_store() as store:
+                        info = store.record_profile(
+                            inspection_public, profile,
+                            model=st.session_state.get("model", "") or "codex default",
+                            prompt_text=profile_prompt(st.session_state["inspect"]),
+                        )
+                        store.index_artifact("profile", info["profile_public_id"], "capabilities.json", prof_json)
+                        store.index_artifact("profile", info["profile_public_id"], "capabilities.md", prof_md)
+                        st.session_state["profile_public_id"] = info["profile_public_id"]
                 st.success("MCP understood. You can now build test cases.")
             except CodexError as exc:
                 st.error(f"codex error: {exc}")
@@ -658,8 +742,21 @@ with tabs[1]:
                     )
                     generation_box.update(label="Test cases generated", state="complete")
                 out_dir = workspace() / "datasets" / name
-                write_dataset(dataset, out_dir)
+                manifest_path = write_dataset(dataset, out_dir)
                 st.session_state["dataset_dir"] = str(out_dir)
+                with open_store() as store:
+                    info = store.record_dataset(
+                        dataset,
+                        profile_public_id=st.session_state.get("profile_public_id"),
+                        model=st.session_state.get("model", "") or "codex default",
+                        params={
+                            "n_personas": int(n_personas),
+                            "scenarios_per_persona": int(spp),
+                            "seed": int(seed),
+                        },
+                    )
+                    store.index_artifact("dataset", info["dataset_public_id"], "dataset.json", manifest_path)
+                    st.session_state["dataset_public_id"] = info["dataset_public_id"]
                 st.success(f"Created {total_cases} runnable cases.")
             except CodexError as exc:
                 st.error(f"codex error: {exc}")
@@ -722,6 +819,19 @@ with tabs[2]:
             model = st.session_state.get("model", "")
             aut_cfg = codex_aut_runner(target, session=use_session, codex_bin=codex_bin, model=model)
             user_cfg = mock_runner() if user_mock else codex_user_runner(codex_bin=codex_bin, model=model)
+            run_store = open_store()
+            dataset_public = st.session_state.get("dataset_public_id")
+            case_pid_by_ext = (
+                {c["external_id"]: c["public_id"] for c in run_store.get_dataset_cases(dataset_public)}
+                if dataset_public
+                else {}
+            )
+            batch = run_store.create_run_batch(
+                asdict(target),
+                dataset_public_id=dataset_public,
+                profile_public_id=st.session_state.get("profile_public_id"),
+                selected_case_count=len(cases),
+            )
             results = []
             overall_progress = st.progress(0.0, text=f"0/{len(cases)} cases complete")
             with st.status(f"Running {len(cases)} case(s)…", expanded=True) as status:
@@ -774,6 +884,11 @@ with tabs[2]:
                             target=target, scenario=scenario, aut_runner_config=aut_cfg,
                             user_runner_config=user_cfg, output_dir=runs_dir, persona=persona,
                             event_callback=show_event,
+                            store=run_store,
+                            batch_id=batch["run_batch_id"],
+                            case_public_id=case_pid_by_ext.get(case["id"]),
+                            inspection_public_id=st.session_state.get("inspection_public_id"),
+                            profile_public_id=st.session_state.get("profile_public_id"),
                         )
                         row = {
                             "case": case["id"], "intent": case.get("intent", ""), "status": run.status,
@@ -782,7 +897,7 @@ with tabs[2]:
                         if do_eval:
                             case_progress.progress(1.0, text="Conversation complete · evaluating with codex judge")
                             st.write("   · evaluating trace and tool evidence…")
-                            verdict = evaluate_run(run.run_dir, backend(), st.session_state["profile"])
+                            verdict = evaluate_run(run.run_dir, backend(), st.session_state["profile"], store=run_store)
                             write_verdict_artifacts(verdict, run.run_dir)
                             row["verdict"] = verdict["verdict"]
                         results.append(row)
@@ -794,6 +909,8 @@ with tabs[2]:
                         text=f"{i}/{len(cases)} cases complete",
                     )
                 status.update(label=f"Done — ran {len(results)}/{len(cases)} case(s)", state="complete")
+            run_store.finish_run_batch(batch["run_batch_id"], "completed")
+            run_store.close()
             st.session_state["run_results"] = results
 
     if st.session_state["run_results"]:
@@ -818,66 +935,47 @@ with tabs[3]:
         """,
         unsafe_allow_html=True,
     )
-    runs_dir = workspace() / "runs"
-    run_dirs = sorted([p for p in runs_dir.glob("*") if (p / "events.jsonl").exists()], reverse=True) if runs_dir.exists() else []
-    if not run_dirs:
+    results_store = open_store()
+    all_runs = results_store.list_runs()
+    if not all_runs:
         st.info("No results yet. Run one or more cases first.")
     else:
-        run_index = []
-        for path in run_dirs:
-            indexed_run = read_run(path)
-            verdict_path = path / "verdict.json"
-            verdict_name = "not evaluated"
-            if verdict_path.exists():
-                verdict_name = json.loads(verdict_path.read_text(encoding="utf-8")).get("verdict", "unknown")
-            run_index.append(
-                {
-                    "path": path,
-                    "run": indexed_run,
-                    "target": indexed_run.get("target", {}).get("id", "unknown"),
-                    "status": indexed_run.get("status", "unknown"),
-                    "verdict": verdict_name,
-                    "scenario": indexed_run.get("scenario", {}).get("title")
-                    or indexed_run.get("scenario", {}).get("id", path.name),
-                }
-            )
-
         st.markdown("### Find a run")
         filter_col1, filter_col2, filter_col3 = st.columns(3)
-        targets = ["All targets", *sorted({item["target"] for item in run_index})]
-        statuses = ["All statuses", *sorted({item["status"] for item in run_index})]
-        verdicts = ["All verdicts", *sorted({item["verdict"] for item in run_index})]
+        targets = ["All targets", *sorted({r["target_slug"] for r in all_runs})]
+        statuses = ["All statuses", *sorted({r["status"] for r in all_runs})]
+        verdicts = ["All verdicts", *sorted({r["verdict"] for r in all_runs})]
         target_filter = filter_col1.selectbox("Target", targets)
         status_filter = filter_col2.selectbox("Run status", statuses)
         verdict_filter = filter_col3.selectbox("Verdict", verdicts)
         search = st.text_input("Search runs", placeholder="Scenario, target, or run id")
-        filtered_runs = [
-            item
-            for item in run_index
-            if (target_filter == "All targets" or item["target"] == target_filter)
-            and (status_filter == "All statuses" or item["status"] == status_filter)
-            and (verdict_filter == "All verdicts" or item["verdict"] == verdict_filter)
-            and (
-                not search
-                or search.lower() in f"{item['scenario']} {item['target']} {item['path'].name}".lower()
-            )
-        ]
-        st.caption(f"{len(filtered_runs)} of {len(run_index)} runs shown")
+        filtered_runs = results_store.list_runs(
+            {
+                "target": None if target_filter == "All targets" else target_filter,
+                "status": None if status_filter == "All statuses" else status_filter,
+                "verdict": None if verdict_filter == "All verdicts" else verdict_filter,
+                "search": search,
+            }
+        )
+        st.caption(f"{len(filtered_runs)} of {len(all_runs)} runs shown")
         if not filtered_runs:
             st.info("No runs match these filters.")
             st.stop()
+        run_by_pid = {r["public_id"]: r for r in filtered_runs}
         choice = st.selectbox(
             "Run",
-            [item["path"].name for item in filtered_runs],
-            format_func=lambda name: next(
-                f"{item['scenario']} · {item['target']} · {item['verdict']} · {name[:20]}"
-                for item in filtered_runs
-                if item["path"].name == name
+            list(run_by_pid),
+            format_func=lambda pid: (
+                f"{run_by_pid[pid]['scenario_title']} · {run_by_pid[pid]['target_slug']} · "
+                f"{run_by_pid[pid]['verdict']} · {pid[:20]}"
             ),
         )
-        selected = next(item for item in filtered_runs if item["path"].name == choice)
-        run_dir = selected["path"]
-        run = selected["run"]
+        run = results_store.get_run_trace(choice)
+        judgment = results_store.get_latest_judgment(choice)
+        results_store.close()
+        if not run:
+            st.info("This run has no recorded trace yet.")
+            st.stop()
 
         scenario = run["scenario"]
         persona = run.get("persona") or {}
@@ -965,9 +1063,8 @@ with tabs[3]:
                             st.error(call["error"])
 
         st.markdown("### Evaluation")
-        verdict_path = run_dir / "verdict.json"
-        if verdict_path.exists():
-            verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+        if judgment and judgment.get("raw"):
+            verdict = judgment["raw"]
             color = {"pass": "green", "partial": "orange", "fail": "red"}.get(verdict["verdict"], "gray")
             st.markdown(f"**Verdict:** :{color}[{verdict['verdict'].upper()}]")
             if verdict["gates"]:

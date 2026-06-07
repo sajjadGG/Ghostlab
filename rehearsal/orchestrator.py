@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .config import PersonaConfig, RunnerConfig, ScenarioConfig, TargetConfig
 from .logging import JsonlLogger
@@ -46,6 +46,11 @@ def run_scenario(
     output_dir: Path,
     persona: PersonaConfig | None = None,
     event_callback: Callable[[Event], None] | None = None,
+    store: "Any | None" = None,
+    batch_id: int | None = None,
+    case_public_id: str | None = None,
+    inspection_public_id: str | None = None,
+    profile_public_id: str | None = None,
 ) -> RunResult:
     run_id = build_run_id(target.id, scenario.id)
     run_dir = output_dir / run_id
@@ -54,6 +59,31 @@ def run_scenario(
     mcp_config_path = run_dir / "target.mcp.json"
     logger = JsonlLogger(event_log_path)
     write_mcp_servers_config(mcp_config_path, target)
+
+    aut_model = _runner_model(aut_runner_config)
+    user_model = _runner_model(user_runner_config)
+    # SQLite is the system of record, but a persistence hiccup must never abort a
+    # live run — the JSONL log and report are always written regardless.
+    run_db_id: int | None = None
+    if store is not None:
+        try:
+            run_db_id = store.start_run(
+                run_id,
+                target=target,
+                scenario=scenario,
+                persona=persona,
+                aut_runner=aut_runner_config,
+                user_runner=user_runner_config,
+                aut_model=aut_model,
+                user_model=user_model,
+                max_turns=scenario.max_turns,
+                batch_id=batch_id,
+                case_public_id=case_public_id,
+                inspection_public_id=inspection_public_id,
+                profile_public_id=profile_public_id,
+            )
+        except Exception:  # noqa: BLE001 — persistence is best-effort
+            run_db_id = None
 
     aut_runner_config = replace(
         aut_runner_config,
@@ -73,6 +103,11 @@ def run_scenario(
 
     def emit(event: Event) -> None:
         logger.write(event)
+        if run_db_id is not None:
+            try:
+                store.append_event(run_db_id, event)
+            except Exception:  # noqa: BLE001 — persistence is best-effort
+                pass
         if event_callback is not None:
             event_callback(event)
 
@@ -193,4 +228,9 @@ def run_scenario(
         report_path, target, scenario, transcript, status, event_log_path, tool_calls_by_turn
     )
     turns = sum(1 for turn in transcript if turn.role == "assistant")
+    if run_db_id is not None:
+        try:
+            store.finish_run(run_db_id, status=status, turns_completed=turns)
+        except Exception:  # noqa: BLE001 — persistence is best-effort
+            pass
     return RunResult(report_path=report_path, run_dir=run_dir, status=status, turns=turns)
