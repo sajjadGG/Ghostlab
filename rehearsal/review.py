@@ -149,14 +149,17 @@ def build_review(dataset: dict[str, Any], profile: dict[str, Any] | None = None)
                 "status": case.get("status", "pending"),
                 "intent": case.get("intent", ""),
                 "persona": case.get("persona"),
+                "scenario": case.get("scenario"),
                 "persona_summary": persona.get("summary", ""),
                 "persona_traits": persona.get("traits", []),
+                "scenario_title": scenario.get("title", ""),
                 "goal": scenario.get("goal", ""),
                 "situation": scenario.get("persona", ""),
                 "opening_message": scenario.get("opening_message", ""),
                 "success_criteria": scenario.get("success_criteria", []),
                 "failure_signals": scenario.get("failure_signals", []),
                 "exercises": scenario.get("exercises", []),
+                "max_turns": scenario.get("max_turns", case.get("max_turns")),
             }
         )
 

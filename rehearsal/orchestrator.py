@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any, Callable
 
 from .config import PersonaConfig, RunnerConfig, ScenarioConfig, TargetConfig
 from .logging import JsonlLogger
@@ -26,6 +27,16 @@ def build_run_id(target_id: str, scenario_id: str) -> str:
     return f"{timestamp}-{target_id}-{scenario_id}"
 
 
+def _runner_model(config: RunnerConfig) -> str:
+    """Return the model selected in a runner command, or the codex default."""
+    for flag in ("-m", "--model"):
+        if flag in config.command:
+            index = config.command.index(flag)
+            if index + 1 < len(config.command):
+                return config.command[index + 1]
+    return "codex default"
+
+
 def run_scenario(
     *,
     target: TargetConfig,
@@ -34,6 +45,12 @@ def run_scenario(
     user_runner_config: RunnerConfig,
     output_dir: Path,
     persona: PersonaConfig | None = None,
+    event_callback: Callable[[Event], None] | None = None,
+    store: "Any | None" = None,
+    batch_id: int | None = None,
+    case_public_id: str | None = None,
+    inspection_public_id: str | None = None,
+    profile_public_id: str | None = None,
 ) -> RunResult:
     run_id = build_run_id(target.id, scenario.id)
     run_dir = output_dir / run_id
@@ -42,6 +59,31 @@ def run_scenario(
     mcp_config_path = run_dir / "target.mcp.json"
     logger = JsonlLogger(event_log_path)
     write_mcp_servers_config(mcp_config_path, target)
+
+    aut_model = _runner_model(aut_runner_config)
+    user_model = _runner_model(user_runner_config)
+    # SQLite is the system of record, but a persistence hiccup must never abort a
+    # live run — the JSONL log and report are always written regardless.
+    run_db_id: int | None = None
+    if store is not None:
+        try:
+            run_db_id = store.start_run(
+                run_id,
+                target=target,
+                scenario=scenario,
+                persona=persona,
+                aut_runner=aut_runner_config,
+                user_runner=user_runner_config,
+                aut_model=aut_model,
+                user_model=user_model,
+                max_turns=scenario.max_turns,
+                batch_id=batch_id,
+                case_public_id=case_public_id,
+                inspection_public_id=inspection_public_id,
+                profile_public_id=profile_public_id,
+            )
+        except Exception:  # noqa: BLE001 — persistence is best-effort
+            run_db_id = None
 
     aut_runner_config = replace(
         aut_runner_config,
@@ -59,7 +101,17 @@ def run_scenario(
     tool_calls_by_turn: dict[int, list] = {}
     status = "completed"
 
-    logger.write(
+    def emit(event: Event) -> None:
+        logger.write(event)
+        if run_db_id is not None:
+            try:
+                store.append_event(run_db_id, event)
+            except Exception:  # noqa: BLE001 — persistence is best-effort
+                pass
+        if event_callback is not None:
+            event_callback(event)
+
+    emit(
         Event.create(
             "run_started",
             run_id=run_id,
@@ -68,6 +120,10 @@ def run_scenario(
             mcp_config_path=str(mcp_config_path),
             aut_runner=asdict(aut_runner_config),
             user_runner=asdict(user_runner_config),
+            models={
+                "agent_under_test": _runner_model(aut_runner_config),
+                "user_emulator": _runner_model(user_runner_config),
+            },
             persona=asdict(persona) if persona else None,
         )
     )
@@ -77,7 +133,7 @@ def run_scenario(
 
     for turn_index in range(1, scenario.max_turns + 1):
         transcript.append(TranscriptTurn(role="user", content=user_message))
-        logger.write(Event.create("user_message", turn=turn_index, content=user_message))
+        emit(Event.create("user_message", turn=turn_index, content=user_message))
 
         if aut_stateful and turn_index > 1:
             # The session already holds prior context; send only the new message.
@@ -90,6 +146,14 @@ def run_scenario(
                 user_message,
                 str(mcp_config_path.resolve()),
             )
+        emit(
+            Event.create(
+                "aut_prompt",
+                turn=turn_index,
+                prompt=aut_prompt,
+                stateful_resume=aut_stateful and turn_index > 1,
+            )
+        )
         aut_result = aut_runner.run_turn(aut_prompt)
         # The conversational message is stdout only, with known host noise
         # stripped; stderr is logged separately and never shown to the emulator.
@@ -103,7 +167,7 @@ def run_scenario(
             aut_message = redact_host_noise(aut_result.output)
             tool_calls = parse_tool_calls(aut_result.output, aut_result.stderr)
         tool_calls_by_turn[turn_index] = tool_calls
-        logger.write(
+        emit(
             Event.create(
                 "aut_result",
                 turn=turn_index,
@@ -124,9 +188,10 @@ def run_scenario(
         transcript.append(TranscriptTurn(role="assistant", content=aut_message))
 
         user_prompt = build_user_emulator_prompt(scenario, transcript, aut_message, persona)
+        emit(Event.create("user_emulator_prompt", turn=turn_index, prompt=user_prompt))
         user_result = user_runner.run_turn(user_prompt)
         user_message_out = redact_host_noise(user_result.output)
-        logger.write(
+        emit(
             Event.create(
                 "user_emulator_result",
                 turn=turn_index,
@@ -151,7 +216,7 @@ def run_scenario(
         status = "max_turns_reached"
 
     all_tool_calls = [call for turn in sorted(tool_calls_by_turn) for call in tool_calls_by_turn[turn]]
-    logger.write(
+    emit(
         Event.create(
             "run_finished",
             status=status,
@@ -163,4 +228,9 @@ def run_scenario(
         report_path, target, scenario, transcript, status, event_log_path, tool_calls_by_turn
     )
     turns = sum(1 for turn in transcript if turn.role == "assistant")
+    if run_db_id is not None:
+        try:
+            store.finish_run(run_db_id, status=status, turns_completed=turns)
+        except Exception:  # noqa: BLE001 — persistence is best-effort
+            pass
     return RunResult(report_path=report_path, run_dir=run_dir, status=status, turns=turns)
