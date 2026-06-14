@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .codex_backend import CodexBackend
+from .tool_capture import efficiency_metrics
 
 VERDICTS = ("pass", "partial", "fail")
 
@@ -102,6 +103,7 @@ def deterministic_checks(scenario: dict[str, Any], tool_calls: list[dict[str, An
         "exercises_missing": missing,
         "coverage": f"{len(expected) - len(missing)}/{len(expected)}" if expected else "n/a",
         "no_tool_calls": len(tool_calls) == 0,
+        "efficiency": efficiency_metrics(tool_calls),
     }
 
 
@@ -288,6 +290,17 @@ def write_verdict_artifacts(verdict: dict[str, Any], run_dir: Path) -> tuple[Pat
     return json_path, md_path
 
 
+def _efficiency_line(eff: dict[str, Any]) -> str:
+    parts = [
+        f"{eff.get('total_calls', 0)} calls",
+        f"{eff.get('unique_tools', 0)} unique",
+        f"{eff.get('redundant_calls', 0)} redundant",
+    ]
+    if "avg_duration_ms" in eff:
+        parts.append(f"avg {eff['avg_duration_ms']}ms")
+    return "- Tool efficiency: " + ", ".join(parts)
+
+
 def render_verdict_md(verdict: dict[str, Any]) -> str:
     judge = verdict.get("judge", {})
     det = verdict.get("deterministic", {})
@@ -299,6 +312,7 @@ def render_verdict_md(verdict: dict[str, Any]) -> str:
         f"- Tool coverage: {det.get('coverage', 'n/a')}"
         + (f" (missing: {', '.join(det['exercises_missing'])})" if det.get("exercises_missing") else ""),
         f"- Failed tool calls: {', '.join(det['tool_failures']) if det.get('tool_failures') else 'none'}",
+        _efficiency_line(det.get("efficiency", {})),
         "",
         f"**{judge.get('summary', '')}**",
         "",

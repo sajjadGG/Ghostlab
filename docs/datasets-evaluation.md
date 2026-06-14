@@ -41,6 +41,8 @@ ghostlab evaluate --run runs/<id> --capabilities runs/<id>-inspect/capabilities.
 Evaluation combines deterministic checks with a Codex LLM judge:
 
 - Failed tool calls.
+- Tool efficiency: total calls, unique tools, redundant calls (same tool with
+  identical arguments), and per-call latency when the capture provides it.
 - Expected-tool coverage from `exercises`.
 - Success criteria met or unmet.
 - Failure signals triggered or avoided.
