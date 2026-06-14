@@ -23,6 +23,7 @@ KNOWN_COMMANDS = {
     "evaluate",
     "critique",
     "compare",
+    "scorecard",
     "ui",
 }
 
@@ -213,6 +214,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare_parser.add_argument(
         "--output", type=Path, default=None, help="Where to write comparison.md (default: stdout only)."
+    )
+
+    scorecard_parser = sub.add_parser(
+        "scorecard", help="Roll a dataset run up into one MCP validation report."
+    )
+    scorecard_parser.add_argument(
+        "--results", required=True, type=Path, help="Summary dir or results.json from run-dataset."
+    )
+    scorecard_parser.add_argument(
+        "--output-dir", type=Path, default=None, help="Where to write scorecard.* (default: the summary dir)."
     )
 
     ui_parser = sub.add_parser("ui", help="Launch the Streamlit pipeline UI.")
@@ -572,6 +583,37 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_scorecard(args: argparse.Namespace) -> int:
+    from .scorecard import build_scorecard, load_summary, write_scorecard_artifacts
+
+    results_path = args.results
+    summary_file = results_path / "results.json" if results_path.is_dir() else results_path
+    if not summary_file.exists():
+        raise ConfigError(f"results.json not found: {summary_file}")
+
+    summary = load_summary(results_path)
+    base_dir = summary_file.parent
+    scorecard = build_scorecard(summary, base_dir)
+
+    out_dir = args.output_dir or base_dir
+    json_path, md_path = write_scorecard_artifacts(scorecard, out_dir)
+    totals = scorecard["totals"]
+    pass_rate = scorecard.get("pass_rate")
+    print(f"Scorecard for '{scorecard['dataset']}' ({totals['cases']} cases)")
+    print(f"  pass_rate={'n/a' if pass_rate is None else f'{pass_rate * 100:.0f}%'}"
+          f" hallucinated={len(scorecard['hallucinated_tools'])}"
+          f" golden_mismatches={scorecard['golden_mismatches']}")
+    worst = scorecard["per_tool"][:3]
+    for tool in worst:
+        if tool["failures"]:
+            print(f"  ! {tool['tool']}: {tool['failures']}/{tool['calls']} failed")
+    if scorecard["missing_runs"]:
+        print(f"  (missing run dirs for: {', '.join(scorecard['missing_runs'])})")
+    print(f"  wrote {md_path}")
+    print(f"  wrote {json_path}")
+    return 0
+
+
 def cmd_critique(args: argparse.Namespace) -> int:
     from .codex_backend import CodexBackend, CodexError
     from .critique import critique_run, write_critique_artifacts
@@ -676,6 +718,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_critique(args)
         if args.command == "compare":
             return cmd_compare(args)
+        if args.command == "scorecard":
+            return cmd_scorecard(args)
         if args.command == "ui":
             return cmd_ui(args)
     except ConfigError as exc:

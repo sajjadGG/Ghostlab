@@ -124,6 +124,18 @@ ghostlab compare --base runs/<base>-summary --candidate runs/<candidate>-summary
   --output comparison.md
 ```
 
+## scorecard
+
+Aggregate a whole dataset run into one MCP validation report (pass rate, per-tool
+reliability, hallucination/golden-mismatch counts, efficiency, and recurring
+tool-design recommendations). No model calls — it reads the per-case artifacts.
+
+```bash
+ghostlab scorecard --results runs/<id>-summary
+```
+
+Writes `scorecard.json` and `scorecard.md` into the summary directory.
+
 ## doctor
 
 Validate local agent and runner setup.

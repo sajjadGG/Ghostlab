@@ -83,6 +83,21 @@ ghostlab run-dataset --dataset datasets/cortex \
 
 Per-case verdicts are written into each run directory and aggregated into the dataset summary.
 
+## Scorecard A Dataset Run
+
+Roll a whole dataset run up into one MCP validation report:
+
+```bash
+ghostlab scorecard --results runs/<id>-summary
+```
+
+It reads each case's run directory (verdict, critique, and tool calls when
+present) and aggregates server-level signals — pass rate, average tool coverage,
+average tool-ergonomics score, per-tool failure rates, hallucinated-tool and
+golden-mismatch counts, efficiency, and recurring tool-design recommendations —
+into `scorecard.json` and `scorecard.md`. Run `evaluate` and `critique` on the
+cases first for the richest report.
+
 ## Compare Dataset Runs
 
 ```bash
