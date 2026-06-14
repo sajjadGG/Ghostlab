@@ -145,6 +145,8 @@ works and is treated as `run`):
 - `ghostlab run` — run a dual-agent E2E scenario.
 - `ghostlab evaluate` — score a run into a pass/fail verdict (codex judge).
 - `ghostlab compare` — diff two dataset runs for regressions.
+- `ghostlab apps-probe` — probe a target's MCP Apps (`ui://`) widgets: fetch resources + CSP diagnostics.
+- `ghostlab apps-render` — render a `ui://` widget in headless Chrome, drive it, and capture proof.
 - `ghostlab doctor` — check codex and validate runner presets.
 - `ghostlab ui` — launch the Streamlit pipeline UI.
 
@@ -157,19 +159,22 @@ pip install 'ghostlab[ui]'       # installs streamlit
 ghostlab ui                      # opens http://localhost:8501
 ```
 
-The app walks an MCP through the pipeline as tabs, each step feeding the next:
+The app walks an MCP through four user-facing stages:
 
-1. **Connect & Inspect** — enter the MCP URL (or stdio command) and introspect
-   it (tools, resources, lint findings).
-2. **Profile** — build the capability profile (codex).
-3. **Generate Dataset** — set the parameters (number of personas, scenarios per
-   persona, seed, name) and generate the persona × scenario matrix.
-4. **Review & Curate** — coverage matrix, flags, and per-case approve/reject.
-5. **Run & Evaluate** — run the cases (persistent session runner, optional mock
-   user, codex judge) and watch live progress.
-6. **Trace Viewer** — browse any run: the multi-turn transcript, every tool call
-   with its arguments and results, and the judge's verdict with per-criterion
-   evidence.
+1. **Inspect MCP** — connect to the MCP, verify its tools/resources, and analyze
+   its capabilities and likely workflows.
+2. **Build Test Cases** — generate personas and scenarios, pair them into
+   runnable cases, then review coverage, warnings, case selection, and the
+   resolved per-case prompts together.
+3. **Run & Evaluate** — run each selected persona + scenario case with the
+   agent-under-test and user emulator, then optionally evaluate it with a codex
+   judge. Generation and runs expose determinate progress and live turn activity.
+4. **Review Results** — browse each run's chronological conversation trace,
+   inline tool activity, exact runtime prompts, model/duration metadata, and
+   verdict evidence. Filter run history by target, status, verdict, or search.
+
+A **case** is the concrete runnable preset formed by pairing one persona with
+one scenario. Each selected case produces one run and one trace.
 
 The sidebar sets the **workspace dir**, the **codex binary**, and the **codex
 model** (applied to every codex-backed stage — generation, the AUT/user runners,
@@ -417,6 +422,67 @@ ghostlab compare --base runs/<base>-summary --candidate runs/<cand>-summary \
 It diffs case-by-case on verdict (falling back to run status), listing
 **regressions** (newly failing) first, then **fixes** (newly passing), then other
 changes. Exits non-zero when there are regressions, so it can gate CI.
+
+### Probe MCP Apps widgets: `apps-probe`
+
+Some MCPs ship **MCP Apps UI** resources — a tool's `_meta.ui.resourceUri` points
+to a `ui://…` HTML widget a compatible host is expected to render. The vanilla
+runner can confirm an agent *called* a UI-producing tool, but not that the widget
+rendered or that a user could interact with it (see
+`specs/cortex-mcp-apps-e2e.spec`, issue #13).
+
+`apps-probe` is the first increment of the MCP Apps host layer. It connects to a
+target, finds every UI-producing tool, fetches each `ui://` resource via
+`resources/read`, and reports render-readiness and CSP diagnostics:
+
+```bash
+ghostlab apps-probe --target targets/cortex-local.json
+# or restrict to specific widgets:
+ghostlab apps-probe --target targets/cortex-local.json --tool views_create_listening_practice
+```
+
+It writes `apps-probe.json` + `apps-probe.md` with the resource's MIME profile,
+HTML size, preferred frame hints, and CSP connect/resource domains. Diagnostics
+flag empty/unfetchable resources, non-`mcp-app` MIME types, and tools that accept
+remote media (`audio_url`, `image_url`, …) whose resource CSP would block it. The
+report reserves structured sections for the host-bridge transcript, interaction
+trace, render artifacts, and final app state — populated by `apps-render` below.
+The module also defines the **UI-intent contract**
+(`reorder`/`choose`/`type`/`reveal`/`submit`/`rate`/`mark`) the user emulator
+emits, and the host-bridge message vocabulary a renderer must implement.
+
+### Render & drive MCP Apps widgets: `apps-render`
+
+`apps-render` actually **renders** a `ui://` widget and proves a user can see and
+use it. It implements the MCP Apps host bridge (JSON-RPC over `postMessage`,
+protocol `2026-01-26`), mounts the widget in a sandboxed headless-Chrome iframe,
+completes the `ui/initialize` handshake, and feeds it the tool input + result so
+it renders real content. It then captures a screenshot, the visible DOM text, the
+host-bridge transcript, console/network errors, and runs app-aware assertions —
+and can execute a sequence of UI intents against the live widget.
+
+```bash
+pip install 'ghostlab[apps]' && playwright install chrome    # one-time
+ghostlab apps-render --target targets/cortex-local.json \
+  --tool views_generate_sentence_scramble \
+  --arguments '{"target_sentence":"The cat sat on the mat","shuffled_elements":["mat","The","on","sat","cat","the"]}' \
+  --intent '{"type":"reorder","value":["The","cat","sat","on","the","mat"]}' \
+  --intent '{"type":"reveal"}'
+```
+
+By default it **calls the tool** with `--arguments` to obtain the result the
+widget renders from (use `--no-call` to render from the arguments alone, or omit
+`--tool` to pick the first UI-producing tool). It writes `apps-render.json` +
+`apps-render.md`, a `widget.png` of the initial render, and a `widget-final.png`
+after the intents run. Exit status is non-zero if the render errored or any
+assertion failed, so it can gate CI. In the example above the reorder intent
+rebuilds the sentence and the widget confirms _"Nice work. Sentence is correct."_
+— proving both visibility and a completed interaction.
+
+This is the browser-backed increment of issue #13. Still ahead: richer per-widget
+assertions, the full request-side host bridge (`call-server-tool` proxying,
+`open-link`/`download-file` handling), and wiring the user emulator to emit UI
+intents during a live `run`.
 
 ### Session runner (one live agent across turns)
 

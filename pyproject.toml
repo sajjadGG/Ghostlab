@@ -39,6 +39,9 @@ docs = [
 ui = [
   "streamlit>=1.30",
 ]
+apps = [
+  "playwright>=1.40",
+]
 
 [project.scripts]
 ghostlab = "rehearsal.cli:main"

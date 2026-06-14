@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from .codex_backend import CodexBackend
+from .logging import JsonlLogger
 from .tool_capture import efficiency_metrics
+from .types import Event, utc_now
 
 VERDICTS = ("pass", "partial", "fail")
 
@@ -56,35 +58,118 @@ _JUDGE_SCHEMA: dict[str, Any] = {
 
 
 def read_run(run_dir: Path) -> dict[str, Any]:
-    """Reconstruct scenario, transcript, and tool calls from a run's events."""
-    scenario: dict[str, Any] = {}
-    persona: dict[str, Any] | None = None
-    transcript: list[dict[str, Any]] = []
-    tool_calls: list[dict[str, Any]] = []
-    status = "unknown"
-
+    """Reconstruct a run from its ``events.jsonl`` file."""
+    events: list[dict[str, Any]] = []
     for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if not line:
-            continue
-        event = json.loads(line)
+        if line:
+            events.append(json.loads(line))
+    return reconstruct_run(events)
+
+
+def reconstruct_run(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Reconstruct run setup, chronological trace, transcript, and tool calls.
+
+    Pure over an ordered list of ``{type,timestamp,data}`` events, so it works
+    the same whether events come from ``events.jsonl`` or the SQLite ledger.
+    """
+    scenario: dict[str, Any] = {}
+    persona: dict[str, Any] | None = None
+    target: dict[str, Any] = {}
+    transcript: list[dict[str, Any]] = []
+    trace: list[dict[str, Any]] = []
+    tool_calls: list[dict[str, Any]] = []
+    prompts: list[dict[str, Any]] = []
+    models: dict[str, str] = {}
+    started_at: str | None = None
+    finished_at: str | None = None
+    evaluation: dict[str, Any] = {}
+    status = "unknown"
+
+    for event in events:
         data = event.get("data", {})
         if event["type"] == "run_started":
             scenario = data.get("scenario", {})
             persona = data.get("persona")
+            target = data.get("target", {})
+            models = data.get("models", {})
+            if not models:
+                models = {
+                    "agent_under_test": _model_from_runner(data.get("aut_runner", {})),
+                    "user_emulator": _model_from_runner(data.get("user_runner", {})),
+                }
+            started_at = event.get("timestamp")
+        elif event["type"] in ("aut_prompt", "user_emulator_prompt"):
+            prompts.append(
+                {
+                    "type": event["type"],
+                    "turn": data.get("turn"),
+                    "prompt": data.get("prompt", ""),
+                    "stateful_resume": data.get("stateful_resume", False),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
+        elif event["type"] == "user_message":
+            trace.append(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "turn": data.get("turn"),
+                    "content": data.get("content", ""),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
         elif event["type"] == "aut_result":
-            tool_calls.extend(data.get("tool_calls", []))
+            turn_calls = data.get("tool_calls", [])
+            tool_calls.extend(turn_calls)
+            trace.append(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "turn": data.get("turn"),
+                    "content": data.get("output", ""),
+                    "tool_calls": turn_calls,
+                    "exit_code": data.get("exit_code"),
+                    "timed_out": data.get("timed_out", False),
+                    "timestamp": event.get("timestamp"),
+                }
+            )
         elif event["type"] == "run_finished":
             transcript = data.get("transcript", [])
             status = data.get("status", "unknown")
+            finished_at = event.get("timestamp")
+        elif event["type"] == "evaluation_started":
+            evaluation["started_at"] = event.get("timestamp")
+            evaluation["model"] = data.get("model")
+            evaluation["prompt"] = data.get("prompt", "")
+        elif event["type"] == "evaluation_finished":
+            evaluation["finished_at"] = event.get("timestamp")
+            evaluation["verdict"] = data.get("verdict")
 
     return {
+        "target": target,
         "scenario": scenario,
         "persona": persona,
         "transcript": transcript,
+        "trace": trace,
         "tool_calls": tool_calls,
+        "prompts": prompts,
+        "models": models,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "evaluation": evaluation,
         "status": status,
     }
+
+
+def _model_from_runner(runner: dict[str, Any]) -> str:
+    command = runner.get("command", [])
+    for flag in ("-m", "--model"):
+        if flag in command:
+            index = command.index(flag)
+            if index + 1 < len(command):
+                return str(command[index + 1])
+    return "codex default"
 
 
 def deterministic_checks(scenario: dict[str, Any], tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
@@ -253,7 +338,10 @@ def judge_prompt(run: dict[str, Any], capabilities: dict[str, Any] | None = None
 
 
 def evaluate_run(
-    run_dir: Path, backend: CodexBackend, capabilities: dict[str, Any] | None = None
+    run_dir: Path,
+    backend: CodexBackend,
+    capabilities: dict[str, Any] | None = None,
+    store: "Any | None" = None,
 ) -> dict[str, Any]:
     run = read_run(run_dir)
     deterministic = deterministic_checks(run["scenario"], run["tool_calls"])
@@ -268,10 +356,26 @@ def evaluate_run(
             names.extend(group)
         tool_names = names
 
-    judge = backend.generate_json(_build_judge_prompt(run, tool_names), _JUDGE_SCHEMA)
-    verdict, gates = combine_verdict(run["status"], deterministic, judge)
+    prompt = _build_judge_prompt(run, tool_names)
+    model = backend.model or "codex default"
+    logger = JsonlLogger(run_dir / "events.jsonl")
+    started_at = utc_now()
+    started_event = Event.create("evaluation_started", model=model, prompt=prompt)
+    logger.write(started_event)
 
-    return {
+    # SQLite persistence is best-effort: the verdict artifacts are always written.
+    run_db_id = None
+    if store is not None:
+        try:
+            run_db_id = store.run_id_by_public(run_dir.name)
+            if run_db_id is not None:
+                store.append_event(run_db_id, started_event)
+        except Exception:  # noqa: BLE001
+            run_db_id = None
+
+    judge = backend.generate_json(prompt, _JUDGE_SCHEMA)
+    verdict, gates = combine_verdict(run["status"], deterministic, judge)
+    result = {
         "run_dir": str(run_dir),
         "scenario": run["scenario"].get("id", "?"),
         "run_status": run["status"],
@@ -280,6 +384,37 @@ def evaluate_run(
         "deterministic": deterministic,
         "judge": judge,
     }
+    finished_event = Event.create("evaluation_finished", verdict=verdict, gates=gates)
+    logger.write(finished_event)
+    if run_db_id is not None:
+        try:
+            store.append_event(run_db_id, finished_event)
+            store.record_judgment(
+                run_dir.name, result, model=model, prompt_text=prompt,
+                started_at=started_at, finished_at=utc_now(),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return result
+
+
+def evidence_references(run: dict[str, Any], evidence: str) -> list[str]:
+    """Find likely trace turns and tool calls referenced by judge evidence."""
+    evidence_lower = evidence.lower()
+    references: list[str] = []
+    for item in run.get("trace", []):
+        turn = item.get("turn", "?")
+        content = str(item.get("content", "")).lower()
+        if content and any(token in content for token in evidence_lower.split() if len(token) > 7):
+            label = f"{item.get('role', '?')} turn {turn}"
+            if label not in references:
+                references.append(label)
+        for call in item.get("tool_calls", []):
+            tool = str(call.get("tool", ""))
+            full_name = f"{call.get('server', '?')}/{tool}"
+            if tool and tool.lower() in evidence_lower and f"{full_name} · turn {turn}" not in references:
+                references.append(f"{full_name} · turn {turn}")
+    return references[:5]
 
 
 def write_verdict_artifacts(verdict: dict[str, Any], run_dir: Path) -> tuple[Path, Path]:
