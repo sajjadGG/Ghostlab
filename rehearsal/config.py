@@ -46,6 +46,12 @@ class ScenarioConfig:
     # coverage measurement; ignored by the run loop.
     exercises: list[str] = field(default_factory=list)
     intent: str = ""
+    # Optional deterministic golden assertions, checked at evaluation time
+    # alongside the LLM judge. Keys: `must_include` / `must_not_include`
+    # (case-insensitive substrings in the final assistant turn) and
+    # `expected_tool_args` (a list of {tool, arguments} the run must contain).
+    # Ignored by the run loop; consumed by `evaluate`.
+    expected_outcome: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -115,7 +121,37 @@ def load_scenario(path: Path) -> ScenarioConfig:
         opening_message=str(data["opening_message"]),
         exercises=[str(item) for item in data.get("exercises", [])],
         intent=str(data.get("intent", "")),
+        expected_outcome=_load_expected_outcome(data.get("expected_outcome", {}), path),
     )
+
+
+def _load_expected_outcome(raw: Any, path: Path) -> dict[str, Any]:
+    """Validate and normalize a scenario's optional `expected_outcome` block."""
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"Scenario {path} `expected_outcome` must be an object")
+    outcome: dict[str, Any] = {}
+    for key in ("must_include", "must_not_include"):
+        if key in raw:
+            if not isinstance(raw[key], list):
+                raise ConfigError(f"Scenario {path} `expected_outcome.{key}` must be a list")
+            outcome[key] = [str(item) for item in raw[key]]
+    if "expected_tool_args" in raw:
+        items = raw["expected_tool_args"]
+        if not isinstance(items, list):
+            raise ConfigError(f"Scenario {path} `expected_outcome.expected_tool_args` must be a list")
+        normalized = []
+        for item in items:
+            if not isinstance(item, dict) or "tool" not in item:
+                raise ConfigError(
+                    f"Scenario {path} each expected_tool_args entry needs a `tool` key"
+                )
+            normalized.append(
+                {"tool": str(item["tool"]), "arguments": dict(item.get("arguments", {}))}
+            )
+        outcome["expected_tool_args"] = normalized
+    return outcome
 
 
 def load_persona(path: Path) -> PersonaConfig:

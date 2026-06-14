@@ -45,8 +45,30 @@ Evaluation combines deterministic checks with a Codex LLM judge:
 - Success criteria met or unmet.
 - Failure signals triggered or avoided.
 - Claimed tools not exposed by the server, when capabilities are supplied.
+- Golden assertions from a scenario's optional `expected_outcome`.
 
 The command writes `verdict.json` and `verdict.md`.
+
+### Golden assertions
+
+For scenarios with a known-correct answer, add an `expected_outcome` block to the
+scenario JSON for objective, judge-independent grading. A mismatch is a hard gate
+that forces an overall `fail`:
+
+```json
+"expected_outcome": {
+  "must_include": ["band score", "7.5"],
+  "must_not_include": ["error"],
+  "expected_tool_args": [
+    { "tool": "student_get_status", "arguments": { "id": "u1" } }
+  ]
+}
+```
+
+`must_include` / `must_not_include` are case-insensitive substrings checked
+against the final assistant turn. Each `expected_tool_args` entry passes when the
+run contains a call to that tool whose arguments include the given key/value pairs
+(a subset match). The LLM judge still scores the open-ended `success_criteria`.
 
 ## Evaluate A Dataset
 
