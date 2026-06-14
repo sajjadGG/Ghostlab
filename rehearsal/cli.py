@@ -23,6 +23,7 @@ KNOWN_COMMANDS = {
     "evaluate",
     "compare",
     "apps-probe",
+    "apps-render",
     "ui",
 }
 
@@ -216,6 +217,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir", type=Path, default=Path("runs"), help="Directory for app-probe artifacts."
     )
     apps_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Per-request timeout in seconds."
+    )
+
+    render_parser = sub.add_parser(
+        "apps-render",
+        help="Render an MCP Apps (ui://) widget in headless Chrome and capture proof.",
+    )
+    render_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
+    render_parser.add_argument(
+        "--tool", default=None, help="UI tool to render (default: first UI-producing tool)."
+    )
+    render_parser.add_argument(
+        "--arguments", default=None,
+        help="Tool-call arguments as JSON (inline or @file). Used to call the tool for its result.",
+    )
+    render_parser.add_argument(
+        "--no-call", action="store_true",
+        help="Don't call the tool; render from --arguments as tool-input only.",
+    )
+    render_parser.add_argument(
+        "--intent", action="append", default=None,
+        help="UI intent to execute after render, as JSON (repeatable).",
+    )
+    render_parser.add_argument(
+        "--output-dir", type=Path, default=Path("runs"), help="Directory for app-render artifacts."
+    )
+    render_parser.add_argument(
         "--timeout", type=float, default=30.0, help="Per-request timeout in seconds."
     )
 
@@ -613,6 +641,93 @@ def cmd_apps_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_json_arg(value: str | None) -> dict:
+    """Parse a JSON CLI argument given inline or as `@path/to/file.json`."""
+    if not value:
+        return {}
+    text = Path(value[1:]).read_text(encoding="utf-8") if value.startswith("@") else value
+    return json.loads(text)
+
+
+def cmd_apps_render(args: argparse.Namespace) -> int:
+    from .apps_host import renderer as _renderer
+    from .apps_host.assertions import assertions_for, evaluate_assertions
+    from .apps_host.report import build_render_report, first_ui_tool, render_report_md
+    from .mcp_apps import parse_app_resource, parse_ui_intent, ui_resource_uri
+    from .mcp_client import create_client
+
+    if not _renderer.render_available():
+        print(
+            "Playwright is not installed. Install the apps extra:\n"
+            "  pip install 'ghostlab[apps]'   (then: playwright install chrome)"
+        )
+        return 1
+
+    target = load_target(args.target)
+    arguments = _load_json_arg(args.arguments)
+    intents = [parse_ui_intent(json.loads(item)) for item in (args.intent or [])]
+
+    client = create_client(target, timeout=args.timeout)
+    try:
+        client.initialize()
+        tools = client.list_collection("tools/list", "tools")
+        tool = first_ui_tool(tools, args.tool)
+        if tool is None:
+            which = f" named {args.tool!r}" if args.tool else ""
+            raise ConfigError(f"no UI-producing tool{which} found on {target.id}")
+        tool_name = tool.get("name")
+        uri = ui_resource_uri(tool.get("_meta"))
+        resource = parse_app_resource(uri, client.read_resource(uri))
+        if not resource.renderable:
+            raise ConfigError(f"resource {uri} is not renderable: {resource.fetch_error or 'empty'}")
+        tool_result = None
+        if not args.no_call:
+            tool_result = client.call_tool(tool_name, arguments)
+    finally:
+        client.close()
+
+    timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
+    out_dir = args.output_dir / f"{timestamp}-{target.id}-render"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    screenshot = out_dir / "widget.png"
+
+    print(f"Rendering `{tool_name}` ({uri}) in headless Chrome...")
+    result = _renderer.render_widget(
+        uri=uri,
+        widget_html=resource.html,
+        tool_input=arguments,
+        tool_result=tool_result,
+        intents=intents,
+        screenshot_path=screenshot,
+    )
+    assertions = evaluate_assertions(assertions_for(uri), result.summary())
+    report = build_render_report(target.id, tool_name, result, assertions)
+
+    json_path = out_dir / "apps-render.json"
+    md_path = out_dir / "apps-render.md"
+    json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    md_path.write_text(render_report_md(report), encoding="utf-8")
+
+    summary = report["summary"]
+    if result.error:
+        print(f"  render error: {result.error}")
+    print(
+        f"  handshake={summary['handshake_completed']} "
+        f"interactive={summary['interactive_elements']} "
+        f"assertions={summary['assertions_passed']}/{summary['assertions_total']}"
+    )
+    for a in assertions:
+        if not a["passed"]:
+            print(f"  ! failed assertion: {a['name']} — {a['description']}")
+    if result.screenshot_path:
+        print(f"  screenshot {result.screenshot_path}")
+    if result.final_screenshot_path:
+        print(f"  final screenshot {result.final_screenshot_path}")
+    print(f"  wrote {json_path}")
+    print(f"  wrote {md_path}")
+    return 0 if (result.error is None and summary["assertions_passed"] == summary["assertions_total"]) else 1
+
+
 def cmd_ui(args: argparse.Namespace) -> int:
     import subprocess
     import sys
@@ -686,6 +801,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_compare(args)
         if args.command == "apps-probe":
             return cmd_apps_probe(args)
+        if args.command == "apps-render":
+            return cmd_apps_render(args)
         if args.command == "ui":
             return cmd_ui(args)
     except ConfigError as exc:

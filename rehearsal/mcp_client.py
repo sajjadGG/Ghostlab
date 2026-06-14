@@ -78,6 +78,15 @@ class McpClient:
         response = self._call("resources/read", {"uri": uri})
         return response.unwrap(f"resources/read {uri}")
 
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Invoke a tool via `tools/call` and return its result.
+
+        Used by the MCP Apps host layer to obtain the tool result a `ui://`
+        widget renders from.
+        """
+        response = self._call("tools/call", {"name": name, "arguments": arguments or {}})
+        return response.unwrap(f"tools/call {name}")
+
     def list_collection(self, method: str, key: str) -> list[dict[str, Any]]:
         """Page through a `*/list` method until the cursor is exhausted."""
         items: list[dict[str, Any]] = []
