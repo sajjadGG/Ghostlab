@@ -1,0 +1,61 @@
+# MCP Rehearsal / Ghostlab
+
+> A local, end-to-end testing lab for any Model Context Protocol (MCP) server.
+> Coding agents (Codex / Claude) role-play real users and drive a target MCP's
+> tools over multiple turns; the harness understands the server, generates
+> persona × scenario datasets, runs a dual-agent loop, scores outcomes, compares
+> runs for regressions, and can render and interact with MCP Apps `ui://` widgets
+> in a headless browser.
+
+The Python package is `rehearsal`; the installed CLI is `ghostlab` (alias
+`rehearsal`). It uses the stdlib for MCP transport (stdio / streamable-HTTP+SSE)
+and shells out to coding-agent CLIs as the agent backends. Pipeline:
+**understand → generate → run → evaluate**, with optional SQLite persistence, a
+Streamlit UI, and an MCP Apps render layer.
+
+## Documentation
+
+- [README](https://github.com/sajjadGG/Rehearsal/blob/main/README.md): full overview, install, and a worked example of every command.
+- [Docs wiki](https://sajjadgg.github.io/Rehearsal/): hosted MkDocs documentation.
+- [CONTRIBUTING](https://github.com/sajjadGG/Rehearsal/blob/main/CONTRIBUTING.md): how to set up, run tests, and open a PR (read this before contributing).
+
+## Architecture (key modules under `rehearsal/`)
+
+- [cli.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/cli.py): argparse entry point; one `cmd_*` per pipeline command.
+- [mcp_client.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/mcp_client.py): minimal stdlib MCP client (stdio + streamable-HTTP/SSE), `tools/list`, `resources/read`, `tools/call`.
+- [inspect.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/inspect.py) + [profile.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/profile.py): understand a target MCP and build a capability profile.
+- [generate.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/generate.py), [personas.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/personas.py), [dataset.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/dataset.py): scenario / persona / dataset generation (codex-backed).
+- [orchestrator.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/orchestrator.py) + [runners.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/runners.py): the dual-agent turn loop and agent-host adapters.
+- [tool_capture.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/tool_capture.py): structured MCP tool-call capture from agent output.
+- [evaluate.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/evaluate.py) + [compare.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/compare.py): deterministic + codex-judge verdicts and regression diffs.
+- [storage/](https://github.com/sajjadGG/Rehearsal/tree/main/rehearsal/storage): SQLite persistence (`GhostlabStore`).
+- [mcp_apps.py](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/mcp_apps.py) + [apps_host/](https://github.com/sajjadGG/Rehearsal/tree/main/rehearsal/apps_host): MCP Apps host layer — detect, diagnose, render, and drive `ui://` widgets.
+
+## Commands (the `ghostlab` CLI)
+
+- `inspect`: connect to a target MCP and capture tools/resources/prompts (+ lint).
+- `profile`: turn an `inspect.json` into a capability profile.
+- `generate-scenarios` / `generate-personas` / `generate-dataset`: build persona × scenario test data.
+- `review-dataset`: coverage, flags, and per-case approve/reject.
+- `run` / `run-dataset`: run the dual-agent E2E loop, one scenario or a whole dataset.
+- `evaluate` / `compare`: score a run and diff two runs for regressions.
+- `apps-probe` / `apps-render`: probe and render MCP Apps `ui://` widgets.
+- `db` / `ui`: SQLite history and the Streamlit pipeline UI.
+
+## Examples (config you can copy)
+
+- [targets/](https://github.com/sajjadGG/Rehearsal/tree/main/targets): target MCP connection configs (stdio / http).
+- [scenarios/](https://github.com/sajjadGG/Rehearsal/tree/main/scenarios): example scenario definitions.
+- [runners/](https://github.com/sajjadGG/Rehearsal/tree/main/runners): agent-runner presets (Codex process / session).
+- [specs/](https://github.com/sajjadGG/Rehearsal/tree/main/specs): end-to-end design specs (vanilla MCP + MCP Apps).
+
+## Contributing & issues
+
+- [Open issues](https://github.com/sajjadGG/Rehearsal/issues): good entry points are labeled by pipeline stage (`pipeline:run`, `pipeline:evaluate`, …).
+- [Tests](https://github.com/sajjadGG/Rehearsal/tree/main/tests): run `python -m pytest`; most logic is browser-free and unit-tested.
+- To contribute: fork or branch, keep changes Python 3.9-syntax-safe, add tests, and open a PR against `main`. See [CONTRIBUTING](https://github.com/sajjadGG/Rehearsal/blob/main/CONTRIBUTING.md).
+
+## Optional
+
+- [pyproject.toml](https://github.com/sajjadGG/Rehearsal/blob/main/pyproject.toml): packaging, optional extras (`ui`, `apps`, `dev`), console scripts.
+- [Streamlit UI](https://github.com/sajjadGG/Rehearsal/blob/main/rehearsal/ui/app.py): browser front-end over the pipeline.

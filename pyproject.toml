@@ -58,6 +58,9 @@ packages = ["rehearsal", "ghostlab"]
 [tool.hatch.build.targets.sdist]
 include = [
   "/README.md",
+  "/LICENSE",
+  "/CONTRIBUTING.md",
+  "/llms.txt",
   "/docs",
   "/mkdocs.yml",
   "/pyproject.toml",
