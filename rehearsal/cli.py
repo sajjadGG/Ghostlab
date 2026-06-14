@@ -23,7 +23,28 @@ KNOWN_COMMANDS = {
     "evaluate",
     "compare",
     "ui",
+    "db",
 }
+
+
+def _add_db_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="SQLite database path (default: ./ghostlab.sqlite3 or $GHOSTLAB_DB).",
+    )
+
+
+def _open_store(args: argparse.Namespace):
+    """Open the persistence store, or None if it can't be opened (best-effort)."""
+    from .storage import GhostlabStore
+
+    try:
+        return GhostlabStore.open(getattr(args, "db", None))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  (persistence disabled: {exc})")
+        return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--user-runner", type=Path, help="Path to user emulator runner JSON config.")
     run_parser.add_argument("--persona", type=Path, help="Optional persona JSON to drive the user emulator.")
     run_parser.add_argument("--output-dir", type=Path, default=Path("runs"), help="Directory for logs and reports.")
+    _add_db_arg(run_parser)
 
     inspect_parser = sub.add_parser("inspect", help="Introspect a target MCP server.")
     inspect_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
@@ -47,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument(
         "--timeout", type=float, default=30.0, help="Per-request timeout in seconds."
     )
+    _add_db_arg(inspect_parser)
 
     profile_parser = sub.add_parser(
         "profile", help="Build a capability profile from an inspect.json (uses codex)."
@@ -64,6 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
     profile_parser.add_argument("--model", default="", help="Model override for codex.")
+    _add_db_arg(profile_parser)
 
     gen_parser = sub.add_parser(
         "generate-scenarios", help="Generate scenarios from a capability profile (uses codex)."
@@ -121,6 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
     dataset_parser.add_argument("--model", default="", help="Model override for codex.")
+    _add_db_arg(dataset_parser)
 
     rundataset_parser = sub.add_parser("run-dataset", help="Run every case in a dataset.")
     rundataset_parser.add_argument(
@@ -148,6 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-bin", default="", help="Path to codex binary for evaluation (default: auto-detect)."
     )
     rundataset_parser.add_argument("--model", default="", help="Model override for the codex judge.")
+    _add_db_arg(rundataset_parser)
 
     review_parser = sub.add_parser(
         "review-dataset", help="Review and curate a dataset (coverage, previews, flags, approve/reject)."
@@ -163,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser.add_argument(
         "--needs-edit", nargs="*", default=None, dest="needs_edit", help="Case ids to mark needs-edit."
     )
+    _add_db_arg(review_parser)
 
     doctor_parser = sub.add_parser(
         "doctor", help="Check codex availability and validate runner presets."
@@ -188,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
     eval_parser.add_argument("--model", default="", help="Model override for codex.")
+    _add_db_arg(eval_parser)
 
     compare_parser = sub.add_parser(
         "compare", help="Diff two run-dataset result sets for regressions."
@@ -207,6 +235,12 @@ def build_parser() -> argparse.ArgumentParser:
     ui_parser.add_argument(
         "--server-address", default="localhost", help="Address Streamlit binds to."
     )
+
+    db_parser = sub.add_parser("db", help="Manage the SQLite persistence database.")
+    db_parser.add_argument(
+        "action", choices=["init", "verify"], help="init: apply migrations. verify: integrity check."
+    )
+    _add_db_arg(db_parser)
     return parser
 
 
@@ -216,14 +250,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     aut_runner = load_runner(args.aut_runner)
     user_runner = load_runner(args.user_runner)
     persona = load_persona(args.persona) if args.persona else None
-    result = run_scenario(
-        target=target,
-        scenario=scenario,
-        aut_runner_config=aut_runner,
-        user_runner_config=user_runner,
-        output_dir=args.output_dir,
-        persona=persona,
-    )
+    store = _open_store(args)
+    try:
+        result = run_scenario(
+            target=target,
+            scenario=scenario,
+            aut_runner_config=aut_runner,
+            user_runner_config=user_runner,
+            output_dir=args.output_dir,
+            persona=persona,
+            store=store,
+        )
+    finally:
+        if store is not None:
+            store.close()
     print(f"Rehearsal run {result.status} ({result.turns} turns)")
     print(f"  report: {result.report_path}")
     return 0
@@ -247,12 +287,22 @@ def cmd_inspect(args: argparse.Namespace) -> int:
             print(f"  ! {finding['referenced']} referenced in {finding['in']}")
     print(f"  wrote {json_path}")
     print(f"  wrote {md_path}")
+
+    store = _open_store(args)
+    if store is not None:
+        try:
+            info = store.record_inspection(target, result)
+            store.index_artifact("inspection", info["inspection_public_id"], "inspect.json", json_path)
+            store.index_artifact("inspection", info["inspection_public_id"], "inspect.md", md_path)
+            print(f"  saved as version v{info['version']} ({info['inspection_public_id']})")
+        finally:
+            store.close()
     return 0
 
 
 def cmd_profile(args: argparse.Namespace) -> int:
     from .codex_backend import CodexBackend, CodexError
-    from .profile import build_capability_profile, write_profile_artifacts
+    from .profile import build_capability_profile, profile_prompt, write_profile_artifacts
 
     inspect_path = args.inspect
     if not inspect_path.exists():
@@ -277,6 +327,24 @@ def cmd_profile(args: argparse.Namespace) -> int:
     )
     print(f"  wrote {json_path}")
     print(f"  wrote {md_path}")
+
+    store = _open_store(args)
+    if store is not None:
+        try:
+            inspection_public = store.find_inspection_by_mcp(profile.get("mcp", ""))
+            if inspection_public is None:
+                print("  (not persisted: no matching inspection in the database — run `inspect` first)")
+            else:
+                info = store.record_profile(
+                    inspection_public, profile,
+                    model=args.model or "codex default",
+                    prompt_text=profile_prompt(inspect_data),
+                )
+                store.index_artifact("profile", info["profile_public_id"], "capabilities.json", json_path)
+                store.index_artifact("profile", info["profile_public_id"], "capabilities.md", md_path)
+                print(f"  saved profile {info['profile_public_id']}")
+        finally:
+            store.close()
     return 0
 
 
@@ -366,6 +434,25 @@ def cmd_generate_dataset(args: argparse.Namespace) -> int:
     print(f"  personas={len(dataset['personas'])} scenarios={len(dataset['scenarios'])} cases={len(cases)}")
     for case in cases:
         print(f"  - {case['id']} [{case.get('intent', '?')}]")
+
+    store = _open_store(args)
+    if store is not None:
+        try:
+            profile_public = store.find_profile_by_mcp(profile.get("mcp", ""))
+            info = store.record_dataset(
+                dataset,
+                profile_public_id=profile_public,
+                model=args.model or "codex default",
+                params={
+                    "n_personas": args.personas,
+                    "scenarios_per_persona": args.scenarios_per_persona,
+                    "seed": args.seed,
+                },
+            )
+            store.index_artifact("dataset", info["dataset_public_id"], "dataset.json", manifest_path)
+            print(f"  saved dataset {info['dataset_public_id']}")
+        finally:
+            store.close()
     return 0
 
 
@@ -386,18 +473,24 @@ def cmd_run_dataset(args: argparse.Namespace) -> int:
                 raise ConfigError(f"capabilities.json not found: {args.capabilities}")
             capabilities = json.loads(args.capabilities.read_text(encoding="utf-8"))
 
-    summary_path = run_dataset(
-        args.dataset,
-        target_path=args.target,
-        aut_runner_path=args.aut_runner,
-        user_runner_path=args.user_runner,
-        output_dir=args.output_dir,
-        limit=args.limit,
-        approved_only=args.approved_only,
-        evaluate=args.evaluate,
-        capabilities=capabilities,
-        backend=backend,
-    )
+    store = _open_store(args)
+    try:
+        summary_path = run_dataset(
+            args.dataset,
+            target_path=args.target,
+            aut_runner_path=args.aut_runner,
+            user_runner_path=args.user_runner,
+            output_dir=args.output_dir,
+            limit=args.limit,
+            approved_only=args.approved_only,
+            evaluate=args.evaluate,
+            capabilities=capabilities,
+            backend=backend,
+            store=store,
+        )
+    finally:
+        if store is not None:
+            store.close()
     print(f"Dataset summary written to {summary_path}")
     return 0
 
@@ -538,11 +631,15 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 
     backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
     print(f"Evaluating {args.run} with codex judge ({backend._bin()})...")
+    store = _open_store(args)
     try:
-        verdict = evaluate_run(args.run, backend, capabilities)
+        verdict = evaluate_run(args.run, backend, capabilities, store=store)
     except CodexError as exc:
         print(f"codex backend error: {exc}")
         return 1
+    finally:
+        if store is not None:
+            store.close()
 
     json_path, md_path = write_verdict_artifacts(verdict, args.run)
     det = verdict["deterministic"]
@@ -557,6 +654,27 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     if verdict["verdict"] == "partial" and not args.strict:
         return 0
     return 1
+
+
+def cmd_db(args: argparse.Namespace) -> int:
+    from .storage import get_connection, integrity_check, resolve_db_path
+
+    path = resolve_db_path(args.db)
+    conn = get_connection(args.db)  # applies pending migrations
+    try:
+        if args.action == "init":
+            applied = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
+            print(f"Database ready at {path} ({applied} migration(s) applied).")
+            return 0
+        # verify
+        result = integrity_check(conn)
+        versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
+        print(f"Database: {path}")
+        print(f"  migrations: {versions or 'none'}")
+        print(f"  integrity_check: {result}")
+        return 0 if result == "ok" else 1
+    finally:
+        conn.close()
 
 
 def cmd_ui(args: argparse.Namespace) -> int:
@@ -630,6 +748,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_evaluate(args)
         if args.command == "compare":
             return cmd_compare(args)
+        if args.command == "db":
+            return cmd_db(args)
         if args.command == "ui":
             return cmd_ui(args)
     except ConfigError as exc:

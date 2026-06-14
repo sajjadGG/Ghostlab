@@ -81,6 +81,12 @@ class ReviewTest(unittest.TestCase):
         review = build_review(_dataset(), None)
         self.assertEqual(review["coverage"], {})
 
+    def test_case_preview_keeps_pairing_identifiers(self) -> None:
+        review = build_review(_dataset(), PROFILE)
+        case = review["cases"][0]
+        self.assertEqual(case["persona"], "p1")
+        self.assertEqual(case["scenario"], "s1")
+
 
 if __name__ == "__main__":
     unittest.main()
