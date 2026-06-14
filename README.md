@@ -1,8 +1,52 @@
-# MCP Rehearsal
+# MCP Rehearsal / Ghostlab
 
-A local end-to-end testing harness for **any MCP-exposed app** where coding agents role-play real users.
+> A local, end-to-end **testing lab for any MCP server** — coding agents role-play
+> real users, drive your tools over multiple turns, and the harness captures
+> traces, scores outcomes, and even **renders and clicks through MCP Apps UI
+> widgets**.
 
-Documentation wiki: https://sajjadgg.github.io/Rehearsal/
+[![CI](https://github.com/sajjadGG/Rehearsal/actions/workflows/ci.yml/badge.svg)](https://github.com/sajjadGG/Rehearsal/actions)
+[![Docs](https://img.shields.io/badge/docs-wiki-blue)](https://sajjadgg.github.io/Rehearsal/)
+[![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![llms.txt](https://img.shields.io/badge/llms.txt-✓-purple)](llms.txt)
+
+**Test your MCP server the way it's actually used** — not with unit tests against
+the protocol, but with a real coding agent (Codex / Claude) that picks tools,
+makes mistakes, and tries to accomplish goals, while a second agent plays the
+user. Ghostlab understands a target MCP, generates persona × scenario datasets,
+runs the dual-agent loop, scores each run, and compares runs for regressions.
+
+📖 **Docs wiki:** https://sajjadgg.github.io/Rehearsal/ · 🤖 **For agents:** [`llms.txt`](llms.txt) · 🛠 **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md)
+
+## Quickstart
+
+```bash
+python3.13 -m venv .venv
+.venv/bin/pip install -e .            # add '.[ui]' for the web UI, '.[apps]' for widget rendering
+
+# 1. Understand a target MCP
+ghostlab inspect --target targets/cortex-local.json
+
+# 2. Drive it with two agents (one under test, one emulating a user)
+ghostlab run --target targets/cortex-local.json --scenario scenarios/cortex-onboarding-status.json
+
+# 3. Render and click through an MCP Apps ui:// widget (needs '.[apps]')
+ghostlab apps-render --target targets/cortex-local.json --tool views_generate_sentence_scramble \
+  --arguments '{"target_sentence":"The cat sat on the mat","shuffled_elements":["mat","The","on","sat","cat","the"]}' \
+  --intent '{"type":"reorder","value":["The","cat","sat","on","the","mat"]}'
+```
+
+## What it does
+
+| Stage | Commands | What you get |
+| --- | --- | --- |
+| **Understand** | `inspect`, `profile` | Tool/resource/prompt dump + a capability profile, with lint findings |
+| **Generate** | `generate-scenarios`, `generate-personas`, `generate-dataset`, `review-dataset` | Reusable persona × scenario datasets you can curate |
+| **Run** | `run`, `run-dataset` | Multi-turn dual-agent transcripts with structured tool-call capture |
+| **Evaluate** | `evaluate`, `compare` | Pass/fail verdicts (codex judge) and regression diffs between runs |
+| **MCP Apps** | `apps-probe`, `apps-render` | Fetch/diagnose `ui://` widgets, then render + interact with them in headless Chrome |
+| **Persist & explore** | `db`, `ui` | SQLite run history + a Streamlit UI over the whole pipeline |
 
 ## Goal
 
@@ -187,6 +231,15 @@ per-case progress.
 Artifacts are written under the workspace directory (default
 `ghostlab_workspace/`) so runs persist and can also be opened with the CLI.
 
+## Install from PyPI
+
+Once published, install the released package directly:
+
+```bash
+pip install ghostlab            # add [ui] and/or [apps] for those extras
+ghostlab --help
+```
+
 ## Packaging & Release
 
 Build and validate distributions locally:
@@ -198,11 +251,19 @@ Build and validate distributions locally:
 ```
 
 CI runs tests on Python 3.10 through 3.13 and verifies that the package builds.
-The release workflow publishes to PyPI when a `v*.*.*` tag is pushed, using
-PyPI Trusted Publishing. To enable it, create a PyPI project named
-`ghostlab` and add a trusted publisher for this repository, workflow
-`.github/workflows/release.yml`, environment `pypi`. No PyPI username or token
-needs to be committed.
+Releases are automated: the **`publish.yml`** workflow builds the sdist + wheel,
+publishes them to PyPI via **Trusted Publishing**, and attaches them to the
+GitHub Release — triggered when you **publish a GitHub Release** (or run the
+workflow manually). Cut a release like:
+
+```bash
+# bump rehearsal/__init__.py __version__ first, then:
+gh release create v0.1.0 --generate-notes
+```
+
+To enable publishing, create the PyPI project **`ghostlab`** and add a Trusted
+Publisher for this repository, workflow `.github/workflows/publish.yml`,
+environment `pypi`. No PyPI username or token is committed.
 
 The Pages workflow builds the docs wiki with MkDocs and deploys it to GitHub
 Pages on pushes to `main`, `v*.*.*` release tags, and manual workflow runs. In
