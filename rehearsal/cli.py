@@ -21,6 +21,7 @@ KNOWN_COMMANDS = {
     "review-dataset",
     "doctor",
     "evaluate",
+    "critique",
     "compare",
     "ui",
 }
@@ -188,6 +189,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
     eval_parser.add_argument("--model", default="", help="Model override for codex.")
+
+    critique_parser = sub.add_parser(
+        "critique", help="Critique an MCP's tool usability from a run (uses codex)."
+    )
+    critique_parser.add_argument("--run", required=True, type=Path, help="Path to a run directory.")
+    critique_parser.add_argument(
+        "--inspect", type=Path, help="Optional inspect.json so the judge can see tool definitions."
+    )
+    critique_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
+    )
+    critique_parser.add_argument("--model", default="", help="Model override for codex.")
 
     compare_parser = sub.add_parser(
         "compare", help="Diff two run-dataset result sets for regressions."
@@ -559,6 +572,37 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_critique(args: argparse.Namespace) -> int:
+    from .codex_backend import CodexBackend, CodexError
+    from .critique import critique_run, write_critique_artifacts
+
+    if not (args.run / "events.jsonl").exists():
+        raise ConfigError(f"No events.jsonl in {args.run}")
+    inspect = None
+    if args.inspect:
+        if not args.inspect.exists():
+            raise ConfigError(f"inspect.json not found: {args.inspect}")
+        inspect = json.loads(args.inspect.read_text(encoding="utf-8"))
+
+    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    print(f"Critiquing tool usability in {args.run} with codex ({backend._bin()})...")
+    try:
+        critique = critique_run(args.run, backend, inspect)
+    except CodexError as exc:
+        print(f"codex backend error: {exc}")
+        return 1
+
+    json_path, md_path = write_critique_artifacts(critique, args.run)
+    judged = critique["critique"]
+    print(f"Tool-ergonomics score: {judged.get('overall_score', '?')}/5 ({critique['scenario']})")
+    print(f"  exercised tools: {', '.join(critique['exercised_tools']) or 'none'}")
+    for rec in judged.get("top_recommendations", []):
+        print(f"  -> {rec}")
+    print(f"  wrote {md_path}")
+    print(f"  wrote {json_path}")
+    return 0
+
+
 def cmd_ui(args: argparse.Namespace) -> int:
     import subprocess
     import sys
@@ -628,6 +672,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_doctor(args)
         if args.command == "evaluate":
             return cmd_evaluate(args)
+        if args.command == "critique":
+            return cmd_critique(args)
         if args.command == "compare":
             return cmd_compare(args)
         if args.command == "ui":

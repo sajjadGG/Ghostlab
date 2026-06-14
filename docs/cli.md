@@ -101,6 +101,20 @@ Score a completed run into a pass, partial, or fail verdict.
 ghostlab evaluate --run runs/<id> --capabilities runs/<id>-inspect/capabilities.json
 ```
 
+## critique
+
+Critique the MCP server's tool usability from a completed run. Where `evaluate`
+asks "did the scenario pass?", `critique` asks "how do I improve this MCP?": it
+grades the naming, descriptions, parameter clarity, and error quality of the
+tools the agent actually exercised, with concrete suggestions. Pass `--inspect`
+so the judge can see the real tool definitions.
+
+```bash
+ghostlab critique --run runs/<id> --inspect runs/<id>-inspect/inspect.json
+```
+
+Writes `critique.json` and `critique.md` into the run directory.
+
 ## compare
 
 Diff two dataset result sets for regressions.
