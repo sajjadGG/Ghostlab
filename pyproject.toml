@@ -5,24 +5,42 @@ build-backend = "hatchling.build"
 [project]
 name = "ghostlab"
 dynamic = ["version"]
-description = "A local dual-agent end-to-end testing harness for MCP-exposed apps."
+description = "Local end-to-end testing lab for any MCP server: coding agents role-play real users, drive your tools over multiple turns, score runs, and render/interact with MCP Apps ui:// widgets."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
   { name = "Sajjad Gholamzadeh" }
 ]
-keywords = ["mcp", "testing", "cli", "agents", "evaluation"]
+keywords = [
+  "mcp",
+  "model-context-protocol",
+  "testing",
+  "end-to-end-testing",
+  "cli",
+  "agents",
+  "ai-agents",
+  "llm",
+  "llm-evaluation",
+  "evaluation",
+  "codex",
+  "claude",
+  "mcp-apps",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Testing",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = []
 
@@ -48,6 +66,8 @@ rehearsal = "rehearsal.cli:main"
 Documentation = "https://sajjadgg.github.io/Rehearsal/"
 Homepage = "https://github.com/sajjadGG/Rehearsal"
 Repository = "https://github.com/sajjadGG/Rehearsal"
+Issues = "https://github.com/sajjadGG/Rehearsal/issues"
+Changelog = "https://github.com/sajjadGG/Rehearsal/releases"
 
 [tool.hatch.version]
 path = "rehearsal/__init__.py"

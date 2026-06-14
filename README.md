@@ -226,6 +226,15 @@ per-case progress.
 Artifacts are written under the workspace directory (default
 `ghostlab_workspace/`) so runs persist and can also be opened with the CLI.
 
+## Install from PyPI
+
+Once published, install the released package directly:
+
+```bash
+pip install ghostlab            # add [ui] and/or [apps] for those extras
+ghostlab --help
+```
+
 ## Packaging & Release
 
 Build and validate distributions locally:
@@ -237,11 +246,19 @@ Build and validate distributions locally:
 ```
 
 CI runs tests on Python 3.10 through 3.13 and verifies that the package builds.
-The release workflow publishes to PyPI when a `v*.*.*` tag is pushed, using
-PyPI Trusted Publishing. To enable it, create a PyPI project named
-`ghostlab` and add a trusted publisher for this repository, workflow
-`.github/workflows/release.yml`, environment `pypi`. No PyPI username or token
-needs to be committed.
+Releases are automated: the **`publish.yml`** workflow builds the sdist + wheel,
+publishes them to PyPI via **Trusted Publishing**, and attaches them to the
+GitHub Release — triggered when you **publish a GitHub Release** (or run the
+workflow manually). Cut a release like:
+
+```bash
+# bump rehearsal/__init__.py __version__ first, then:
+gh release create v0.1.0 --generate-notes
+```
+
+To enable publishing, create the PyPI project **`ghostlab`** and add a Trusted
+Publisher for this repository, workflow `.github/workflows/publish.yml`,
+environment `pypi`. No PyPI username or token is committed.
 
 The Pages workflow builds the docs wiki with MkDocs and deploys it to GitHub
 Pages on pushes to `main`, `v*.*.*` release tags, and manual workflow runs. In
