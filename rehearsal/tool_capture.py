@@ -109,17 +109,21 @@ def parse_codex_output(jsonl_text: str) -> dict[str, Any]:
             status = item.get("status") or ("failed" if error else "completed")
             if status not in ("completed", "failed"):
                 status = "failed" if error else "completed"
-            calls.append(
-                {
-                    "index": len(calls) + 1,
-                    "server": item.get("server", "?"),
-                    "tool": item.get("tool", "?"),
-                    "status": status,
-                    "arguments": item.get("arguments"),
-                    "result": item.get("result"),
-                    "error": error,
-                }
-            )
+            record: dict[str, Any] = {
+                "index": len(calls) + 1,
+                "server": item.get("server", "?"),
+                "tool": item.get("tool", "?"),
+                "status": status,
+                "arguments": item.get("arguments"),
+                "result": item.get("result"),
+                "error": error,
+            }
+            # Capture per-call latency when the stream provides it (forward
+            # compatible: absent in current codex output, so simply omitted).
+            duration = item.get("duration_ms")
+            if isinstance(duration, (int, float)):
+                record["duration_ms"] = duration
+            calls.append(record)
     return {"message": "\n".join(messages).strip(), "tool_calls": calls}
 
 
@@ -132,3 +136,48 @@ def summarize_tool_calls(calls: list[dict[str, Any]]) -> dict[str, Any]:
         by_tool[name] = by_tool.get(name, 0) + 1
         by_status[call["status"]] = by_status.get(call["status"], 0) + 1
     return {"total": len(calls), "by_tool": by_tool, "by_status": by_status}
+
+
+def _args_key(arguments: Any) -> str:
+    try:
+        return json.dumps(arguments, sort_keys=True)
+    except TypeError:
+        return repr(arguments)
+
+
+def efficiency_metrics(calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """Deterministic efficiency signals over a run's tool calls.
+
+    Beyond raw counts, this flags two tool-design smells: `redundant_calls`
+    (the same tool invoked again with identical arguments — useful work is rarely
+    repeated verbatim) and `max_calls_to_one_tool` (hammering a single tool, often
+    a sign of an unclear schema or missing capability). Per-call latency is
+    aggregated only when the capture provided `duration_ms`.
+    """
+    by_tool: dict[str, int] = {}
+    seen: set[tuple[Any, Any, str]] = set()
+    redundant = 0
+    durations: list[float] = []
+    for call in calls:
+        name = f"{call.get('server', '?')}/{call.get('tool', '?')}"
+        by_tool[name] = by_tool.get(name, 0) + 1
+        args = call.get("arguments")
+        if args is not None:  # args unknown on the text parser; can't judge repeats
+            key = (call.get("server"), call.get("tool"), _args_key(args))
+            if key in seen:
+                redundant += 1
+            seen.add(key)
+        duration = call.get("duration_ms")
+        if isinstance(duration, (int, float)):
+            durations.append(duration)
+
+    metrics: dict[str, Any] = {
+        "total_calls": len(calls),
+        "unique_tools": len(by_tool),
+        "redundant_calls": redundant,
+        "max_calls_to_one_tool": max(by_tool.values()) if by_tool else 0,
+    }
+    if durations:
+        metrics["total_duration_ms"] = round(sum(durations), 1)
+        metrics["avg_duration_ms"] = round(sum(durations) / len(durations), 1)
+    return metrics

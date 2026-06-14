@@ -101,6 +101,20 @@ Score a completed run into a pass, partial, or fail verdict.
 ghostlab evaluate --run runs/<id> --capabilities runs/<id>-inspect/capabilities.json
 ```
 
+## critique
+
+Critique the MCP server's tool usability from a completed run. Where `evaluate`
+asks "did the scenario pass?", `critique` asks "how do I improve this MCP?": it
+grades the naming, descriptions, parameter clarity, and error quality of the
+tools the agent actually exercised, with concrete suggestions. Pass `--inspect`
+so the judge can see the real tool definitions.
+
+```bash
+ghostlab critique --run runs/<id> --inspect runs/<id>-inspect/inspect.json
+```
+
+Writes `critique.json` and `critique.md` into the run directory.
+
 ## compare
 
 Diff two dataset result sets for regressions.
@@ -109,6 +123,18 @@ Diff two dataset result sets for regressions.
 ghostlab compare --base runs/<base>-summary --candidate runs/<candidate>-summary \
   --output comparison.md
 ```
+
+## scorecard
+
+Aggregate a whole dataset run into one MCP validation report (pass rate, per-tool
+reliability, hallucination/golden-mismatch counts, efficiency, and recurring
+tool-design recommendations). No model calls — it reads the per-case artifacts.
+
+```bash
+ghostlab scorecard --results runs/<id>-summary
+```
+
+Writes `scorecard.json` and `scorecard.md` into the summary directory.
 
 ## doctor
 

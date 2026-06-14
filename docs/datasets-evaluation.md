@@ -41,12 +41,36 @@ ghostlab evaluate --run runs/<id> --capabilities runs/<id>-inspect/capabilities.
 Evaluation combines deterministic checks with a Codex LLM judge:
 
 - Failed tool calls.
+- Tool efficiency: total calls, unique tools, redundant calls (same tool with
+  identical arguments), and per-call latency when the capture provides it.
 - Expected-tool coverage from `exercises`.
 - Success criteria met or unmet.
 - Failure signals triggered or avoided.
 - Claimed tools not exposed by the server, when capabilities are supplied.
+- Golden assertions from a scenario's optional `expected_outcome`.
 
 The command writes `verdict.json` and `verdict.md`.
+
+### Golden assertions
+
+For scenarios with a known-correct answer, add an `expected_outcome` block to the
+scenario JSON for objective, judge-independent grading. A mismatch is a hard gate
+that forces an overall `fail`:
+
+```json
+"expected_outcome": {
+  "must_include": ["band score", "7.5"],
+  "must_not_include": ["error"],
+  "expected_tool_args": [
+    { "tool": "student_get_status", "arguments": { "id": "u1" } }
+  ]
+}
+```
+
+`must_include` / `must_not_include` are case-insensitive substrings checked
+against the final assistant turn. Each `expected_tool_args` entry passes when the
+run contains a call to that tool whose arguments include the given key/value pairs
+(a subset match). The LLM judge still scores the open-ended `success_criteria`.
 
 ## Evaluate A Dataset
 
@@ -58,6 +82,21 @@ ghostlab run-dataset --dataset datasets/cortex \
 ```
 
 Per-case verdicts are written into each run directory and aggregated into the dataset summary.
+
+## Scorecard A Dataset Run
+
+Roll a whole dataset run up into one MCP validation report:
+
+```bash
+ghostlab scorecard --results runs/<id>-summary
+```
+
+It reads each case's run directory (verdict, critique, and tool calls when
+present) and aggregates server-level signals — pass rate, average tool coverage,
+average tool-ergonomics score, per-tool failure rates, hallucinated-tool and
+golden-mismatch counts, efficiency, and recurring tool-design recommendations —
+into `scorecard.json` and `scorecard.md`. Run `evaluate` and `critique` on the
+cases first for the richest report.
 
 ## Compare Dataset Runs
 

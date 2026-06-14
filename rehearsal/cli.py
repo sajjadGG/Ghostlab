@@ -21,7 +21,9 @@ KNOWN_COMMANDS = {
     "review-dataset",
     "doctor",
     "evaluate",
+    "critique",
     "compare",
+    "scorecard",
     "apps-probe",
     "apps-render",
     "ui",
@@ -219,6 +221,18 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument("--model", default="", help="Model override for codex.")
     _add_db_arg(eval_parser)
 
+    critique_parser = sub.add_parser(
+        "critique", help="Critique an MCP's tool usability from a run (uses codex)."
+    )
+    critique_parser.add_argument("--run", required=True, type=Path, help="Path to a run directory.")
+    critique_parser.add_argument(
+        "--inspect", type=Path, help="Optional inspect.json so the judge can see tool definitions."
+    )
+    critique_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
+    )
+    critique_parser.add_argument("--model", default="", help="Model override for codex.")
+
     compare_parser = sub.add_parser(
         "compare", help="Diff two run-dataset result sets for regressions."
     )
@@ -230,6 +244,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare_parser.add_argument(
         "--output", type=Path, default=None, help="Where to write comparison.md (default: stdout only)."
+    )
+
+    scorecard_parser = sub.add_parser(
+        "scorecard", help="Roll a dataset run up into one MCP validation report."
+    )
+    scorecard_parser.add_argument(
+        "--results", required=True, type=Path, help="Summary dir or results.json from run-dataset."
+    )
+    scorecard_parser.add_argument(
+        "--output-dir", type=Path, default=None, help="Where to write scorecard.* (default: the summary dir)."
     )
 
     apps_parser = sub.add_parser(
@@ -701,6 +725,68 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_scorecard(args: argparse.Namespace) -> int:
+    from .scorecard import build_scorecard, load_summary, write_scorecard_artifacts
+
+    results_path = args.results
+    summary_file = results_path / "results.json" if results_path.is_dir() else results_path
+    if not summary_file.exists():
+        raise ConfigError(f"results.json not found: {summary_file}")
+
+    summary = load_summary(results_path)
+    base_dir = summary_file.parent
+    scorecard = build_scorecard(summary, base_dir)
+
+    out_dir = args.output_dir or base_dir
+    json_path, md_path = write_scorecard_artifacts(scorecard, out_dir)
+    totals = scorecard["totals"]
+    pass_rate = scorecard.get("pass_rate")
+    print(f"Scorecard for '{scorecard['dataset']}' ({totals['cases']} cases)")
+    print(f"  pass_rate={'n/a' if pass_rate is None else f'{pass_rate * 100:.0f}%'}"
+          f" hallucinated={len(scorecard['hallucinated_tools'])}"
+          f" golden_mismatches={scorecard['golden_mismatches']}")
+    worst = scorecard["per_tool"][:3]
+    for tool in worst:
+        if tool["failures"]:
+            print(f"  ! {tool['tool']}: {tool['failures']}/{tool['calls']} failed")
+    if scorecard["missing_runs"]:
+        print(f"  (missing run dirs for: {', '.join(scorecard['missing_runs'])})")
+    print(f"  wrote {md_path}")
+    print(f"  wrote {json_path}")
+    return 0
+
+
+def cmd_critique(args: argparse.Namespace) -> int:
+    from .codex_backend import CodexBackend, CodexError
+    from .critique import critique_run, write_critique_artifacts
+
+    if not (args.run / "events.jsonl").exists():
+        raise ConfigError(f"No events.jsonl in {args.run}")
+    inspect = None
+    if args.inspect:
+        if not args.inspect.exists():
+            raise ConfigError(f"inspect.json not found: {args.inspect}")
+        inspect = json.loads(args.inspect.read_text(encoding="utf-8"))
+
+    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    print(f"Critiquing tool usability in {args.run} with codex ({backend._bin()})...")
+    try:
+        critique = critique_run(args.run, backend, inspect)
+    except CodexError as exc:
+        print(f"codex backend error: {exc}")
+        return 1
+
+    json_path, md_path = write_critique_artifacts(critique, args.run)
+    judged = critique["critique"]
+    print(f"Tool-ergonomics score: {judged.get('overall_score', '?')}/5 ({critique['scenario']})")
+    print(f"  exercised tools: {', '.join(critique['exercised_tools']) or 'none'}")
+    for rec in judged.get("top_recommendations", []):
+        print(f"  -> {rec}")
+    print(f"  wrote {md_path}")
+    print(f"  wrote {json_path}")
+    return 0
+
+
 def cmd_apps_probe(args: argparse.Namespace) -> int:
     from .mcp_apps import build_app_report, probe_ui_tools, render_app_report_md
     from .mcp_client import create_client
@@ -915,8 +1001,12 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_doctor(args)
         if args.command == "evaluate":
             return cmd_evaluate(args)
+        if args.command == "critique":
+            return cmd_critique(args)
         if args.command == "compare":
             return cmd_compare(args)
+        if args.command == "scorecard":
+            return cmd_scorecard(args)
         if args.command == "apps-probe":
             return cmd_apps_probe(args)
         if args.command == "apps-render":

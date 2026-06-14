@@ -6,7 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rehearsal.evaluate import combine_verdict, deterministic_checks, evidence_references, read_run
+from rehearsal.evaluate import (
+    check_expected_outcome,
+    combine_verdict,
+    deterministic_checks,
+    evidence_references,
+    read_run,
+)
 
 SCENARIO = {"exercises": ["memory_get", "student_get_status", "views_create_writing_task"]}
 TOOL_CALLS = [
@@ -64,6 +70,69 @@ class CombineVerdictTest(unittest.TestCase):
         judge = {"verdict": "weird", "failure_signals": [], "hallucinated_tools": []}
         verdict, _ = combine_verdict("completed", {}, judge)
         self.assertEqual(verdict, "fail")
+
+    def test_golden_mismatch_forces_fail(self) -> None:
+        judge = {"verdict": "pass", "failure_signals": [], "hallucinated_tools": []}
+        det = {"expected_outcome": {"defined": True, "passed": False}}
+        verdict, gates = combine_verdict("completed", det, judge)
+        self.assertEqual(verdict, "fail")
+        self.assertIn("golden_mismatch", gates)
+
+    def test_golden_pass_does_not_gate(self) -> None:
+        judge = {"verdict": "pass", "failure_signals": [], "hallucinated_tools": []}
+        det = {"expected_outcome": {"defined": True, "passed": True}}
+        verdict, gates = combine_verdict("completed", det, judge)
+        self.assertEqual(verdict, "pass")
+        self.assertEqual(gates, [])
+
+
+class ExpectedOutcomeTest(unittest.TestCase):
+    TRANSCRIPT = [
+        {"role": "user", "content": "what's my band score?"},
+        {"role": "assistant", "content": "Your IELTS band score is 7.5 overall."},
+    ]
+    CALLS = [
+        {"server": "cortex", "tool": "student_get_status",
+         "status": "completed", "arguments": {"id": "u1", "verbose": True}},
+    ]
+
+    def test_undefined_when_no_expectations(self) -> None:
+        result = check_expected_outcome({}, self.TRANSCRIPT, self.CALLS)
+        self.assertEqual(result, {"defined": False})
+
+    def test_must_include_passes_case_insensitively(self) -> None:
+        scenario = {"expected_outcome": {"must_include": ["BAND SCORE", "7.5"]}}
+        result = check_expected_outcome(scenario, self.TRANSCRIPT, self.CALLS)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["missing_substrings"], [])
+
+    def test_must_include_missing_fails(self) -> None:
+        scenario = {"expected_outcome": {"must_include": ["band 9"]}}
+        result = check_expected_outcome(scenario, self.TRANSCRIPT, self.CALLS)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["missing_substrings"], ["band 9"])
+
+    def test_must_not_include_present_fails(self) -> None:
+        scenario = {"expected_outcome": {"must_not_include": ["error"]}}
+        transcript = [{"role": "assistant", "content": "An error occurred."}]
+        result = check_expected_outcome(scenario, transcript, [])
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["forbidden_present"], ["error"])
+
+    def test_expected_tool_args_subset_match(self) -> None:
+        scenario = {"expected_outcome": {
+            "expected_tool_args": [{"tool": "student_get_status", "arguments": {"id": "u1"}}]
+        }}
+        result = check_expected_outcome(scenario, self.TRANSCRIPT, self.CALLS)
+        self.assertTrue(result["passed"])
+
+    def test_expected_tool_args_mismatch_fails(self) -> None:
+        scenario = {"expected_outcome": {
+            "expected_tool_args": [{"tool": "student_get_status", "arguments": {"id": "WRONG"}}]
+        }}
+        result = check_expected_outcome(scenario, self.TRANSCRIPT, self.CALLS)
+        self.assertFalse(result["passed"])
+        self.assertEqual(len(result["tool_arg_mismatches"]), 1)
 
 
 class ReadRunTest(unittest.TestCase):

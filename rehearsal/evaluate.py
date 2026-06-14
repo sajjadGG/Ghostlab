@@ -14,6 +14,7 @@ from typing import Any
 
 from .codex_backend import CodexBackend
 from .logging import JsonlLogger
+from .tool_capture import efficiency_metrics
 from .types import Event, utc_now
 
 VERDICTS = ("pass", "partial", "fail")
@@ -187,6 +188,61 @@ def deterministic_checks(scenario: dict[str, Any], tool_calls: list[dict[str, An
         "exercises_missing": missing,
         "coverage": f"{len(expected) - len(missing)}/{len(expected)}" if expected else "n/a",
         "no_tool_calls": len(tool_calls) == 0,
+        "efficiency": efficiency_metrics(tool_calls),
+    }
+
+
+def _final_assistant_turn(transcript: list[dict[str, Any]]) -> str:
+    for turn in reversed(transcript):
+        if turn.get("role") == "assistant":
+            return turn.get("content", "") or ""
+    return ""
+
+
+def _args_match(expected: dict[str, Any], actual: Any) -> bool:
+    """True if every expected key/value is present and equal in the actual args."""
+    if not isinstance(actual, dict):
+        return not expected  # no captured args can only satisfy an empty expectation
+    return all(actual.get(key) == value for key, value in expected.items())
+
+
+def check_expected_outcome(
+    scenario: dict[str, Any],
+    transcript: list[dict[str, Any]],
+    tool_calls: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate a scenario's optional deterministic golden assertions.
+
+    Returns ``{"defined": False}`` when the scenario declares no expectations.
+    Otherwise reports each unmet assertion and an overall ``passed`` flag, giving
+    objective, judge-independent grading for scenarios with a known-correct answer.
+    """
+    outcome = scenario.get("expected_outcome") or {}
+    if not outcome:
+        return {"defined": False}
+
+    final = _final_assistant_turn(transcript).lower()
+    missing = [s for s in outcome.get("must_include", []) if s.lower() not in final]
+    forbidden = [s for s in outcome.get("must_not_include", []) if s.lower() in final]
+
+    arg_mismatches: list[str] = []
+    for expected in outcome.get("expected_tool_args", []):
+        tool = expected.get("tool")
+        want = expected.get("arguments", {})
+        ok = any(
+            call.get("tool") == tool and _args_match(want, call.get("arguments"))
+            for call in tool_calls
+        )
+        if not ok:
+            arg_mismatches.append(f"{tool}({json.dumps(want)})")
+
+    passed = not (missing or forbidden or arg_mismatches)
+    return {
+        "defined": True,
+        "passed": passed,
+        "missing_substrings": missing,
+        "forbidden_present": forbidden,
+        "tool_arg_mismatches": arg_mismatches,
     }
 
 
@@ -253,6 +309,9 @@ def combine_verdict(
     gates: list[str] = []
     if status in ("aut_failed", "user_emulator_failed"):
         gates.append(f"run_status:{status}")
+    outcome = deterministic.get("expected_outcome", {})
+    if outcome.get("defined") and not outcome.get("passed"):
+        gates.append("golden_mismatch")
     triggered = [s for s in judge.get("failure_signals", []) if s.get("triggered")]
     if triggered:
         gates.append(f"failure_signals_triggered:{len(triggered)}")
@@ -286,6 +345,9 @@ def evaluate_run(
 ) -> dict[str, Any]:
     run = read_run(run_dir)
     deterministic = deterministic_checks(run["scenario"], run["tool_calls"])
+    deterministic["expected_outcome"] = check_expected_outcome(
+        run["scenario"], run["transcript"], run["tool_calls"]
+    )
 
     tool_names: list[str] | None = None
     if capabilities:
@@ -363,6 +425,17 @@ def write_verdict_artifacts(verdict: dict[str, Any], run_dir: Path) -> tuple[Pat
     return json_path, md_path
 
 
+def _efficiency_line(eff: dict[str, Any]) -> str:
+    parts = [
+        f"{eff.get('total_calls', 0)} calls",
+        f"{eff.get('unique_tools', 0)} unique",
+        f"{eff.get('redundant_calls', 0)} redundant",
+    ]
+    if "avg_duration_ms" in eff:
+        parts.append(f"avg {eff['avg_duration_ms']}ms")
+    return "- Tool efficiency: " + ", ".join(parts)
+
+
 def render_verdict_md(verdict: dict[str, Any]) -> str:
     judge = verdict.get("judge", {})
     det = verdict.get("deterministic", {})
@@ -374,6 +447,7 @@ def render_verdict_md(verdict: dict[str, Any]) -> str:
         f"- Tool coverage: {det.get('coverage', 'n/a')}"
         + (f" (missing: {', '.join(det['exercises_missing'])})" if det.get("exercises_missing") else ""),
         f"- Failed tool calls: {', '.join(det['tool_failures']) if det.get('tool_failures') else 'none'}",
+        _efficiency_line(det.get("efficiency", {})),
         "",
         f"**{judge.get('summary', '')}**",
         "",
@@ -389,5 +463,16 @@ def render_verdict_md(verdict: dict[str, Any]) -> str:
         lines.append(f"- [{mark}] ({item.get('index')}) {item.get('evidence', '')}")
     if judge.get("hallucinated_tools"):
         lines += ["", "## Hallucinated tools", "", ", ".join(judge["hallucinated_tools"])]
+
+    outcome = det.get("expected_outcome", {})
+    if outcome.get("defined"):
+        lines += ["", "## Golden assertions", ""]
+        lines.append(f"- Result: {'PASS' if outcome.get('passed') else 'FAIL'}")
+        if outcome.get("missing_substrings"):
+            lines.append(f"- Missing required text: {', '.join(outcome['missing_substrings'])}")
+        if outcome.get("forbidden_present"):
+            lines.append(f"- Forbidden text present: {', '.join(outcome['forbidden_present'])}")
+        if outcome.get("tool_arg_mismatches"):
+            lines.append(f"- Unmet tool-arg expectations: {', '.join(outcome['tool_arg_mismatches'])}")
     lines.append("")
     return "\n".join(lines)

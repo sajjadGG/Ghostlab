@@ -4,7 +4,12 @@ from __future__ import annotations
 import unittest
 
 from rehearsal.runners import redact_host_noise
-from rehearsal.tool_capture import parse_codex_output, parse_tool_calls, summarize_tool_calls
+from rehearsal.tool_capture import (
+    efficiency_metrics,
+    parse_codex_output,
+    parse_tool_calls,
+    summarize_tool_calls,
+)
 
 # Real codex stderr shape observed in prior cortex runs.
 STDERR = """\
@@ -93,6 +98,61 @@ class CodexJsonParseTest(unittest.TestCase):
         summary = summarize_tool_calls(parse_codex_output(CODEX_JSONL)["tool_calls"])
         self.assertEqual(summary["total"], 1)
         self.assertEqual(summary["by_status"], {"completed": 1})
+
+
+class EfficiencyMetricsTest(unittest.TestCase):
+    def test_counts_and_uniques(self) -> None:
+        calls = [
+            {"server": "s", "tool": "a", "arguments": {"x": 1}},
+            {"server": "s", "tool": "b", "arguments": {"x": 1}},
+            {"server": "s", "tool": "a", "arguments": {"x": 2}},
+        ]
+        eff = efficiency_metrics(calls)
+        self.assertEqual(eff["total_calls"], 3)
+        self.assertEqual(eff["unique_tools"], 2)
+        self.assertEqual(eff["redundant_calls"], 0)
+        self.assertEqual(eff["max_calls_to_one_tool"], 2)
+
+    def test_redundant_identical_args(self) -> None:
+        calls = [
+            {"server": "s", "tool": "a", "arguments": {"x": 1, "y": 2}},
+            {"server": "s", "tool": "a", "arguments": {"y": 2, "x": 1}},  # same, key order differs
+            {"server": "s", "tool": "a", "arguments": {"x": 9}},
+        ]
+        eff = efficiency_metrics(calls)
+        self.assertEqual(eff["redundant_calls"], 1)
+
+    def test_missing_args_not_counted_redundant(self) -> None:
+        # Text-parser calls carry no arguments; repeats can't be judged.
+        calls = [{"server": "s", "tool": "a"}, {"server": "s", "tool": "a"}]
+        eff = efficiency_metrics(calls)
+        self.assertEqual(eff["redundant_calls"], 0)
+
+    def test_duration_aggregated_when_present(self) -> None:
+        calls = [
+            {"server": "s", "tool": "a", "arguments": {}, "duration_ms": 100},
+            {"server": "s", "tool": "b", "arguments": {}, "duration_ms": 300},
+        ]
+        eff = efficiency_metrics(calls)
+        self.assertEqual(eff["total_duration_ms"], 400)
+        self.assertEqual(eff["avg_duration_ms"], 200)
+
+    def test_no_duration_keys_when_absent(self) -> None:
+        eff = efficiency_metrics([{"server": "s", "tool": "a", "arguments": {}}])
+        self.assertNotIn("avg_duration_ms", eff)
+
+    def test_empty(self) -> None:
+        eff = efficiency_metrics([])
+        self.assertEqual(eff["total_calls"], 0)
+        self.assertEqual(eff["max_calls_to_one_tool"], 0)
+
+    def test_parse_captures_duration_when_provided(self) -> None:
+        jsonl = (
+            '{"type":"item.completed","item":{"type":"mcp_tool_call","server":"s",'
+            '"tool":"t","arguments":{},"status":"completed","duration_ms":42}}'
+        )
+        call = parse_codex_output(jsonl)["tool_calls"][0]
+        self.assertEqual(call["duration_ms"], 42)
 
 
 class RedactionTest(unittest.TestCase):
