@@ -22,6 +22,7 @@ KNOWN_COMMANDS = {
     "doctor",
     "evaluate",
     "compare",
+    "apps-probe",
     "ui",
 }
 
@@ -200,6 +201,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare_parser.add_argument(
         "--output", type=Path, default=None, help="Where to write comparison.md (default: stdout only)."
+    )
+
+    apps_parser = sub.add_parser(
+        "apps-probe",
+        help="Probe a target's MCP Apps (ui://) widgets: fetch resources + CSP diagnostics.",
+    )
+    apps_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
+    apps_parser.add_argument(
+        "--tool", action="append", default=None,
+        help="Restrict to specific UI tool(s) by name (repeatable).",
+    )
+    apps_parser.add_argument(
+        "--output-dir", type=Path, default=Path("runs"), help="Directory for app-probe artifacts."
+    )
+    apps_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Per-request timeout in seconds."
     )
 
     ui_parser = sub.add_parser("ui", help="Launch the Streamlit pipeline UI.")
@@ -559,6 +576,43 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_apps_probe(args: argparse.Namespace) -> int:
+    from .mcp_apps import build_app_report, probe_ui_tools, render_app_report_md
+    from .mcp_client import create_client
+
+    target = load_target(args.target)
+    client = create_client(target, timeout=args.timeout)
+    try:
+        client.initialize()
+        tools = client.list_collection("tools/list", "tools")
+        only = set(args.tool) if args.tool else None
+        probes = probe_ui_tools(client, tools, only=only)
+    finally:
+        client.close()
+
+    report = build_app_report(target.id, probes)
+    timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
+    out_dir = args.output_dir / f"{timestamp}-{target.id}-apps"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "apps-probe.json"
+    md_path = out_dir / "apps-probe.md"
+    json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    md_path.write_text(render_app_report_md(report), encoding="utf-8")
+
+    summary = report["summary"]
+    print(
+        f"Probed {summary['ui_tools']} UI tool(s): "
+        f"{summary['renderable_resources']} renderable, "
+        f"{summary['diagnostic_findings']} finding(s)"
+    )
+    for probe in probes:
+        for finding in probe.diagnostics:
+            print(f"  ! [{finding['severity']}] {probe.tool}: {finding['message']}")
+    print(f"  wrote {json_path}")
+    print(f"  wrote {md_path}")
+    return 0
+
+
 def cmd_ui(args: argparse.Namespace) -> int:
     import subprocess
     import sys
@@ -630,6 +684,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_evaluate(args)
         if args.command == "compare":
             return cmd_compare(args)
+        if args.command == "apps-probe":
+            return cmd_apps_probe(args)
         if args.command == "ui":
             return cmd_ui(args)
     except ConfigError as exc:

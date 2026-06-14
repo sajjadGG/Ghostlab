@@ -69,6 +69,15 @@ class McpClient:
         self._notify("notifications/initialized", None)
         return result
 
+    def read_resource(self, uri: str) -> dict[str, Any]:
+        """Fetch a single resource via `resources/read`.
+
+        Returns the raw result (typically `{"contents": [...]}`). Used by the
+        MCP Apps host layer to fetch `ui://` widget resources for diagnostics.
+        """
+        response = self._call("resources/read", {"uri": uri})
+        return response.unwrap(f"resources/read {uri}")
+
     def list_collection(self, method: str, key: str) -> list[dict[str, Any]]:
         """Page through a `*/list` method until the cursor is exhausted."""
         items: list[dict[str, Any]] = []

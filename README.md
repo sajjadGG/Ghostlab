@@ -145,6 +145,7 @@ works and is treated as `run`):
 - `ghostlab run` — run a dual-agent E2E scenario.
 - `ghostlab evaluate` — score a run into a pass/fail verdict (codex judge).
 - `ghostlab compare` — diff two dataset runs for regressions.
+- `ghostlab apps-probe` — probe a target's MCP Apps (`ui://`) widgets: fetch resources + CSP diagnostics.
 - `ghostlab doctor` — check codex and validate runner presets.
 - `ghostlab ui` — launch the Streamlit pipeline UI.
 
@@ -417,6 +418,35 @@ ghostlab compare --base runs/<base>-summary --candidate runs/<cand>-summary \
 It diffs case-by-case on verdict (falling back to run status), listing
 **regressions** (newly failing) first, then **fixes** (newly passing), then other
 changes. Exits non-zero when there are regressions, so it can gate CI.
+
+### Probe MCP Apps widgets: `apps-probe`
+
+Some MCPs ship **MCP Apps UI** resources — a tool's `_meta.ui.resourceUri` points
+to a `ui://…` HTML widget a compatible host is expected to render. The vanilla
+runner can confirm an agent *called* a UI-producing tool, but not that the widget
+rendered or that a user could interact with it (see
+`specs/cortex-mcp-apps-e2e.spec`, issue #13).
+
+`apps-probe` is the first increment of the MCP Apps host layer. It connects to a
+target, finds every UI-producing tool, fetches each `ui://` resource via
+`resources/read`, and reports render-readiness and CSP diagnostics:
+
+```bash
+ghostlab apps-probe --target targets/cortex-local.json
+# or restrict to specific widgets:
+ghostlab apps-probe --target targets/cortex-local.json --tool views_create_listening_practice
+```
+
+It writes `apps-probe.json` + `apps-probe.md` with the resource's MIME profile,
+HTML size, preferred frame hints, and CSP connect/resource domains. Diagnostics
+flag empty/unfetchable resources, non-`mcp-app` MIME types, and tools that accept
+remote media (`audio_url`, `image_url`, …) whose resource CSP would block it. The
+report reserves structured sections for the host-bridge transcript, interaction
+trace, render artifacts, and final app state — marked _pending_ until the
+browser-backed render/interaction increment lands. The module also defines the
+**UI-intent contract** (`reorder`/`choose`/`type`/`reveal`/`submit`/`rate`/`mark`)
+the user emulator will emit, and the host-bridge message vocabulary a renderer
+must implement.
 
 ### Session runner (one live agent across turns)
 
