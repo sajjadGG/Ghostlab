@@ -152,6 +152,18 @@ class UiMetadataLintTest(unittest.TestCase):
         kinds = _kinds(lint_ui_metadata(tool, {"ui://w/v1.html"}))
         self.assertIn("unknown_ui_visibility", kinds)
 
+    def test_visibility_audience_list_is_accepted(self) -> None:
+        # Cortex-style: visibility is an array of audiences, e.g. ["app"].
+        tool = {
+            "name": "w",
+            "_meta": {"ui": {"resourceUri": "ui://w/v1.html", "visibility": ["app"]}},
+        }
+        kinds = _kinds(lint_ui_metadata(tool, {"ui://w/v1.html"}))
+        self.assertNotIn("unknown_ui_visibility", kinds)
+        tool["_meta"]["ui"]["visibility"] = ["app", "sideways"]
+        kinds = _kinds(lint_ui_metadata(tool, {"ui://w/v1.html"}))
+        self.assertIn("unknown_ui_visibility", kinds)
+
 
 class BuildContractTest(unittest.TestCase):
     def _inspect_data(self) -> dict:

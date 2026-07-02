@@ -162,25 +162,75 @@ class DirectMcpHost(HostAdapter):
         if not resource.renderable:
             return done("fail", f"resource {uri} is not renderable: {resource.fetch_error or 'empty'}")
 
+        tool_input, tool_result, shell_reason = self._safe_tool_result_for_render(tool)
+
         out_dir.mkdir(parents=True, exist_ok=True)
         screenshot = out_dir / f"{case['id']}.png"
         render = _renderer.render_widget(
             uri=uri,
             widget_html=resource.html,
-            tool_input={},
-            tool_result=None,
+            tool_input=tool_input,
+            tool_result=tool_result,
             intents=[],
             screenshot_path=screenshot,
         )
         if render.error:
             return done("fail", f"render error: {render.error}")
-        assertions = evaluate_assertions(assertions_for(uri), render.summary())
-        failed = [a for a in assertions if not a["passed"]]
+
+        assertions = assertions_for(uri)
+        if tool_result is None:
+            # Shell render: without tool data a widget legitimately shows no
+            # controls or content-specific text. Keep only render-integrity
+            # checks (handshake, body, console); data-driven assertions need
+            # the full app loop (Phase A5) or a fixture-backed tool result.
+            integrity = {"handshake_completed", "body_rendered", "no_console_errors"}
+            assertions = [a for a in assertions if a.name in integrity]
+        evaluated = evaluate_assertions(assertions, render.summary())
+        failed = [a for a in evaluated if not a["passed"]]
         artifacts = {"screenshot": str(screenshot)} if render.screenshot_path else {}
+        mode = f"shell render ({shell_reason})" if tool_result is None else "full render"
         if failed:
             return done(
                 "fail",
-                "; ".join(f"{a['name']}: {a['description']}" for a in failed[:3]),
+                f"{mode}: " + "; ".join(f"{a['name']}: {a['description']}" for a in failed[:3]),
                 **artifacts,
             )
-        return done("pass", f"{len(assertions)} assertion(s) passed", **artifacts)
+        return done("pass", f"{mode}: {len(evaluated)} assertion(s) passed", **artifacts)
+
+    def _safe_tool_result_for_render(
+        self, tool_name: str
+    ) -> tuple[dict[str, Any], Optional[dict[str, Any]], str]:
+        """A real tool result to hydrate the widget — only when calling is safe.
+
+        Returns (tool_input, tool_result, reason-if-shell). Mirrors the
+        sampling safety model: read-only classification plus generatable
+        arguments; anything else renders as a shell.
+        """
+        from ..contract import classify_tool_risk
+        from ..sampling import ArgGenerationError, generate_arguments
+
+        tool = self._tool_by_name(tool_name)
+        if tool is None:
+            return {}, None, f"tool {tool_name!r} not found in tools/list"
+        risk = classify_tool_risk(tool)
+        if risk.get("read_only") is not True:
+            return {}, None, "no tool result: tool is not classified read-only"
+        try:
+            arguments = generate_arguments(tool)
+        except ArgGenerationError as exc:
+            return {}, None, f"no tool result: {exc}"
+        try:
+            result = self.client.call_tool(tool_name, arguments)
+        except McpClientError as exc:
+            return {}, None, f"no tool result: call failed ({exc})"
+        if isinstance(result, dict) and result.get("isError"):
+            return {}, None, "no tool result: tool returned isError"
+        return arguments, result, ""
+
+    def _tool_by_name(self, name: str) -> Optional[dict[str, Any]]:
+        if not hasattr(self, "_tools_cache"):
+            self._tools_cache = {
+                tool.get("name"): tool
+                for tool in self.client.list_collection("tools/list", "tools")
+            }
+        return self._tools_cache.get(name)

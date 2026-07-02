@@ -117,6 +117,13 @@ class BuildPlanTest(unittest.TestCase):
         ])
         self.assertEqual(two["suites"]["host-compat"]["cases"], 2)
 
+    def test_fixture_arguments_beat_generated_ones_in_smoke(self) -> None:
+        fixtures = [{"tool": "notes_list", "arguments": {"lang": "fr", "limit": 3}}]
+        plan = _plan(fixtures=fixtures)
+        case = next(c for c in plan["cases"] if c["id"] == "smoke-call-notes-list")
+        self.assertEqual(case["execution"]["arguments"], {"lang": "fr", "limit": 3})
+        self.assertEqual(case["execution"]["source"], "fixture")
+
     def test_prior_statuses_survive_regeneration(self) -> None:
         prior = _plan()
         set_case_statuses(prior, {"smoke-discovery"}, "approved")

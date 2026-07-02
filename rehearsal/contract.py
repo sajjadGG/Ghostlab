@@ -54,7 +54,10 @@ _SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 # tool-calling schemas.
 _HOST_UNFRIENDLY_KEYWORDS = ("$ref", "$defs", "definitions", "patternProperties", "if", "then", "else")
 
-_KNOWN_VISIBILITY = {"visible", "hidden"}
+# `_meta.ui.visibility` declares which audiences may see/invoke the tool.
+# The MCP Apps direction uses an array (e.g. ["app"], ["model", "app"]); a
+# bare string is tolerated as a single-audience shorthand.
+_KNOWN_VISIBILITY = {"model", "app", "user"}
 
 _MIN_TOOL_DESCRIPTION = 20  # chars; below this a model has little to go on
 
@@ -350,12 +353,15 @@ def lint_ui_metadata(
 
     ui_meta = meta.get("ui") if isinstance(meta.get("ui"), dict) else {}
     visibility = ui_meta.get("visibility")
-    if visibility is not None and visibility not in _KNOWN_VISIBILITY:
-        findings.append(_finding(
-            "unknown_ui_visibility", "warning", where,
-            f"_meta.ui.visibility is {visibility!r}; expected one of "
-            f"{sorted(_KNOWN_VISIBILITY)}",
-        ))
+    if visibility is not None:
+        values = visibility if isinstance(visibility, list) else [visibility]
+        unknown = [value for value in values if value not in _KNOWN_VISIBILITY]
+        if unknown or not values:
+            findings.append(_finding(
+                "unknown_ui_visibility", "warning", where,
+                f"_meta.ui.visibility {visibility!r} contains unknown audience(s) "
+                f"{unknown or '(empty)'}; expected from {sorted(_KNOWN_VISIBILITY)}",
+            ))
     return findings
 
 

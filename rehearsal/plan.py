@@ -87,8 +87,11 @@ def _case(
 # Suite builders
 # --------------------------------------------------------------------------- #
 def _smoke_cases(
-    contract: dict[str, Any], tools_by_name: dict[str, dict[str, Any]]
+    contract: dict[str, Any],
+    tools_by_name: dict[str, dict[str, Any]],
+    fixtures: Optional[dict[str, dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
+    fixtures = fixtures or {}
     cases = [
         _case(
             "smoke-discovery",
@@ -105,6 +108,27 @@ def _smoke_cases(
         name = entry["name"]
         tool = tools_by_name.get(name)
         if tool is None:
+            continue
+        if name in fixtures:
+            # User-provided arguments beat generated ones: opaque paths/ids
+            # can't be guessed, and the fixture is the curated answer.
+            cases.append(
+                _case(
+                    f"smoke-call-{_slug(name)}",
+                    "smoke",
+                    "protocol",
+                    f"Call `{name}` once with fixture arguments",
+                    f"tool_coverage:{name}",
+                    tools=[name],
+                    execution={
+                        "type": "tool_call",
+                        "tool": name,
+                        "arguments": fixtures[name],
+                        "source": "fixture",
+                        "expect": {"no_error": True},
+                    },
+                )
+            )
             continue
         try:
             arguments = generate_arguments(tool)
@@ -400,12 +424,18 @@ def build_test_plan(
     samples: Optional[dict[str, Any]] = None,
     prior_plan: Optional[dict[str, Any]] = None,
     contract_ref: str = "",
+    fixtures: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Assemble the deterministic test plan document."""
     tools_by_name = {tool.get("name"): tool for tool in tools if tool.get("name")}
+    fixture_by_tool = {
+        str(fixture["tool"]): dict(fixture.get("arguments") or {})
+        for fixture in fixtures or []
+        if isinstance(fixture, dict) and fixture.get("tool")
+    }
 
     cases: list[dict[str, Any]] = []
-    cases += _smoke_cases(contract, tools_by_name)
+    cases += _smoke_cases(contract, tools_by_name, fixture_by_tool)
     cases += _semantic_cases(contract)
     cases += _edge_cases(tools_by_name)
     cases += _error_recovery_cases(samples)

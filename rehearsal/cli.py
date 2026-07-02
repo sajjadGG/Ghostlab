@@ -728,6 +728,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         samples=samples,
         prior_plan=prior_plan,
         contract_ref=generated_from,
+        fixtures=(spec.setup or {}).get("fixtures"),
     )
     write_test_plan(plan, plan_path)
     md_path = plan_path.with_suffix(".md")
