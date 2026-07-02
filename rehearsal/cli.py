@@ -115,6 +115,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Curate only: mark case ids rejected (no ids = all cases).",
     )
 
+    test_parser = sub.add_parser(
+        "test", help="Execute the test plan across the spec's host adapters."
+    )
+    test_parser.add_argument(
+        "--spec", type=Path, default=Path("ghostlab.yaml"), help="Path to the ghostlab spec."
+    )
+    test_parser.add_argument(
+        "--plan", type=Path, default=None,
+        help="Plan file (default: test-plan.yaml next to the spec).",
+    )
+    test_parser.add_argument(
+        "--suite", action="append", default=None,
+        help="Only run these suite(s) (repeatable, e.g. --suite smoke --suite edge).",
+    )
+    test_parser.add_argument(
+        "--hosts", default=None,
+        help="Comma-separated host ids to use (default: all configured hosts).",
+    )
+    test_parser.add_argument(
+        "--approved-only", action="store_true",
+        help="Run only cases curated to status=approved.",
+    )
+    test_parser.add_argument(
+        "--skip-setup", action="store_true",
+        help="Skip the spec's setup commands/health checks (target already running).",
+    )
+    test_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Per-request timeout in seconds."
+    )
+    test_parser.add_argument(
+        "--strict", action="store_true",
+        help="Exit non-zero when review gates (e.g. min_pass_rate) fail.",
+    )
+
     run_parser = sub.add_parser("run", help="Run a dual-agent E2E scenario.")
     run_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
     run_parser.add_argument("--scenario", required=True, type=Path, help="Path to scenario JSON config.")
@@ -697,6 +731,84 @@ def cmd_plan(args: argparse.Namespace) -> int:
     print(f"  wrote {md_path}")
     print(f"  updated {args.spec} (test_plan)")
     print("  next: review statuses, then `ghostlab plan --approve` to approve all")
+    return 0
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    from .hosts import build_hosts
+    from .plan import load_test_plan
+    from .setup_runtime import SetupError, SetupRuntime
+    from .spec import load_spec
+    from .testrun import evaluate_gates, execute_plan, render_results_md
+
+    spec = load_spec(args.spec)
+    plan_path = args.plan or args.spec.resolve().parent / "test-plan.yaml"
+    if not plan_path.exists():
+        raise ConfigError(f"No plan at {plan_path}; run `ghostlab plan --spec {args.spec}` first.")
+    plan = load_test_plan(plan_path)
+
+    hosts = build_hosts(spec, args.spec, timeout=args.timeout)
+    if args.hosts:
+        wanted = {part.strip() for part in args.hosts.split(",") if part.strip()}
+        unknown = wanted - {host.id for host in hosts}
+        if unknown:
+            raise ConfigError(f"Unknown host id(s): {', '.join(sorted(unknown))}")
+        hosts = [host for host in hosts if host.id in wanted]
+
+    timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
+    out_dir = spec.workspace_dir(args.spec) / "test" / f"{timestamp}-{spec.id}"
+    print(
+        f"Testing '{spec.id}' with host(s): {', '.join(host.id for host in hosts)}"
+        + (f" (suites: {', '.join(args.suite)})" if args.suite else "")
+    )
+
+    runtime = SetupRuntime({} if args.skip_setup else spec.setup, out_dir)
+    try:
+        if runtime.declared:
+            try:
+                runtime.start()
+            except SetupError as exc:
+                print(f"  setup failed: {exc}")
+                runtime.write_status()
+                return 1
+            if not runtime.wait_healthy():
+                print("  target is not healthy; aborting test run")
+                runtime.write_status()
+                return 1
+        results = execute_plan(
+            plan, hosts, out_dir, suites=args.suite, approved_only=args.approved_only
+        )
+    finally:
+        runtime.teardown()
+        if runtime.declared:
+            runtime.write_status()
+
+    results_json = out_dir / "results.json"
+    results_md = out_dir / "results.md"
+    results_json.write_text(
+        json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    results_md.write_text(render_results_md(results), encoding="utf-8")
+
+    totals = results["totals"]
+    rate = results["pass_rate"]
+    print(
+        f"  executed {results['executed']} case-run(s): "
+        f"{totals['pass']} pass, {totals['fail']} fail, {totals['error']} error "
+        f"({totals['skip']} skipped)"
+    )
+    print(f"  pass rate: {'n/a' if rate is None else f'{rate:.0%}'}")
+    for entry in results["results"]:
+        if entry["status"] in ("fail", "error"):
+            print(f"  ! {entry['case']} [{entry['host']}] {entry['status']}: {entry.get('detail', '')}")
+    print(f"  wrote {results_json}")
+    print(f"  wrote {results_md}")
+
+    gate_failures = evaluate_gates(results, (spec.review or {}).get("gates", {}))
+    for failure in gate_failures:
+        print(f"  GATE FAILED: {failure}")
+    if args.strict and gate_failures:
+        return 1
     return 0
 
 
@@ -1356,6 +1468,7 @@ _HANDLERS.update(
         "init": cmd_init,
         "discover": cmd_discover,
         "plan": cmd_plan,
+        "test": cmd_test,
         "run": cmd_run,
         "inspect": cmd_inspect,
         "profile": cmd_profile,

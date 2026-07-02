@@ -91,6 +91,15 @@ class McpClient:
         response = self._call("tools/call", {"name": name, "arguments": arguments or {}})
         return response.unwrap(f"tools/call {name}")
 
+    def call_tool_raw(self, name: str, arguments: dict[str, Any] | None = None) -> McpResponse:
+        """Invoke a tool and return the raw response without unwrapping.
+
+        Lets callers distinguish a *graceful* failure (JSON-RPC error object or
+        `isError: true` result) from a transport crash — the difference between
+        an edge-case test passing and failing.
+        """
+        return self._call("tools/call", {"name": name, "arguments": arguments or {}})
+
     def list_collection(self, method: str, key: str) -> list[dict[str, Any]]:
         """Page through a `*/list` method until the cursor is exhausted."""
         items: list[dict[str, Any]] = []

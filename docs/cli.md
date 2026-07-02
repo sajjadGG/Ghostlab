@@ -98,6 +98,34 @@ Case ids are deterministic, so `status` curation (`proposed` / `approved` /
 `rejected`) survives regeneration after a re-discover. A `test-plan.md`
 companion and the spec's `test_plan` summary are refreshed on every run.
 
+## test
+
+Execute the test plan across the spec's host adapters and write a results
+bundle under `<workspace>/test/<timestamp>-<id>/` (`results.json` +
+`results.md`, host/version fingerprints included).
+
+```bash
+ghostlab test --spec ghostlab.yaml
+ghostlab test --spec ghostlab.yaml --suite smoke --suite edge   # CI-able subset
+ghostlab test --spec ghostlab.yaml --hosts direct-mcp --approved-only --strict
+```
+
+Every case runs on each capable host (one result per case × host). The
+built-in `direct-mcp` host executes protocol cases deterministically — no
+model, no variance: `discovery` must list tools, `tool_call` with
+`expect.no_error` must succeed without `isError`, and `expect.graceful_error`
+passes only when the server rejects bad input *in protocol* (JSON-RPC error or
+`isError: true`) rather than crashing. `app_render` cases render through the
+Playwright apps host when `ghostlab[apps]` is installed (skip with a reason
+otherwise). Runner-backed hosts (`codex-session`, `process` kinds in
+`hosts`) execute conversational cases that carry a concrete
+`execution.scenario`; generation seeds skip with instructions. Cases no host
+can execute surface as explicit skips, never silence.
+
+The spec's `setup` section runs before and tears down after, exactly as in
+`discover`. With `--strict`, `review.gates.min_pass_rate` fails the run when
+the executed pass rate drops below it.
+
 ## inspect
 
 Introspect a target MCP server.

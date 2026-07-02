@@ -194,6 +194,50 @@ class CliSpecFlowTest(unittest.TestCase):
         statuses = {case["id"]: case["status"] for case in plan["cases"]}
         self.assertEqual(statuses["smoke-discovery"], "approved")
 
+    def test_full_pipeline_through_test_command(self) -> None:
+        main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["plan", "--spec", str(self.spec_path)])
+
+        # edge: notes_delete with {} -> fake server answers isError -> graceful pass.
+        # semantic: conversational seeds -> skipped by the direct host with reasons.
+        code = main(
+            [
+                "test",
+                "--spec", str(self.spec_path),
+                "--suite", "edge", "--suite", "semantic",
+            ]
+        )
+        self.assertEqual(code, 0)
+
+        spec = load_spec(self.spec_path)
+        test_root = self.spec_path.parent / spec.workspace / "test"
+        results_files = sorted(test_root.glob("*/results.json"))
+        self.assertTrue(results_files)
+        results = json.loads(results_files[-1].read_text(encoding="utf-8"))
+        by_case = {entry["case"]: entry for entry in results["results"]}
+        self.assertEqual(by_case["edge-notes-delete-missing-required"]["status"], "pass")
+        self.assertEqual(by_case["semantic-notes-workflow"]["status"], "skip")
+        self.assertEqual(results["totals"]["fail"], 0)
+        self.assertEqual(results["pass_rate"], 1.0)
+        self.assertIn("fingerprint", results)
+
+        # Strict mode passes here (100% >= 0.9 gate from the starter spec).
+        code = main(
+            [
+                "test",
+                "--spec", str(self.spec_path),
+                "--suite", "edge",
+                "--strict",
+            ]
+        )
+        self.assertEqual(code, 0)
+
+    def test_test_command_requires_plan(self) -> None:
+        main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
+        with self.assertRaises(SystemExit):
+            main(["test", "--spec", str(self.spec_path)])
+
     def test_plan_without_discover_errors(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
         with self.assertRaises(SystemExit):  # ConfigError -> parser.error
