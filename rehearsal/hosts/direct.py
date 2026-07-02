@@ -82,6 +82,7 @@ class DirectMcpHost(HostAdapter):
                 suite=case.get("suite", "?"),
                 host=self.id,
                 status=status,
+                kind=case.get("kind", ""),
                 detail=detail,
                 duration_ms=(time.monotonic() - started) * 1000,
                 artifacts=dict(artifacts),

@@ -42,7 +42,7 @@ ghostlab apps-render --target targets/cortex-local.json --tool views_generate_se
 
 | Stage | Commands | What you get |
 | --- | --- | --- |
-| **Spec** | `init`, `discover`, `plan`, `test` | A curated `ghostlab.yaml` per MCP, a deterministic `contract.json` (schema lint, risk labels, MCP Apps metadata checks), a coverage-driven `test-plan.yaml`, and gated multi-host execution results |
+| **Spec** | `init`, `discover`, `plan`, `test`, `review` | A curated `ghostlab.yaml` per MCP, a deterministic `contract.json` (schema lint, risk labels, MCP Apps metadata checks), a coverage-driven `test-plan.yaml`, gated multi-host execution results, and a readiness report with prioritized repairs |
 | **Understand** | `inspect`, `profile` | Tool/resource/prompt dump + a capability profile, with lint findings |
 | **Generate** | `generate-scenarios`, `generate-personas`, `generate-dataset`, `review-dataset` | Reusable persona × scenario datasets you can curate |
 | **Run** | `run`, `run-dataset` | Multi-turn dual-agent transcripts with structured tool-call capture |

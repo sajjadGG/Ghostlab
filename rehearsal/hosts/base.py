@@ -25,6 +25,7 @@ class CaseResult:
     suite: str
     host: str
     status: str  # pass | fail | skip | error
+    kind: str = ""  # protocol | conversational | ui
     detail: str = ""
     duration_ms: float = 0.0
     artifacts: dict[str, str] = field(default_factory=dict)
@@ -33,6 +34,7 @@ class CaseResult:
         out: dict[str, Any] = {
             "case": self.case_id,
             "suite": self.suite,
+            "kind": self.kind,
             "host": self.host,
             "status": self.status,
         }

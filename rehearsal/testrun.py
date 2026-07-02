@@ -71,7 +71,8 @@ def execute_plan(
             if not capable:
                 results.append(CaseResult(
                     case_id=case["id"], suite=case.get("suite", "?"),
-                    host="-", status="skip", detail=skip_reason,
+                    host="-", status="skip", kind=case.get("kind", ""),
+                    detail=skip_reason,
                 ))
                 continue
             for host in capable:
@@ -80,7 +81,8 @@ def execute_plan(
                 except Exception as exc:  # noqa: BLE001 — isolate case crashes
                     results.append(CaseResult(
                         case_id=case["id"], suite=case.get("suite", "?"),
-                        host=host.id, status="error", detail=str(exc),
+                        host=host.id, status="error", kind=case.get("kind", ""),
+                        detail=str(exc),
                     ))
     finally:
         for host in hosts:

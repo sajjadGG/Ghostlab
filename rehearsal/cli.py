@@ -149,6 +149,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit non-zero when review gates (e.g. min_pass_rate) fail.",
     )
 
+    review_spec_parser = sub.add_parser(
+        "review",
+        help="Readiness report over discover + plan + test artifacts (release gate).",
+    )
+    review_spec_parser.add_argument(
+        "--spec", type=Path, default=Path("ghostlab.yaml"), help="Path to the ghostlab spec."
+    )
+    review_spec_parser.add_argument(
+        "--results", type=Path, default=None,
+        help="Test results dir or results.json (default: latest under the workspace).",
+    )
+    review_spec_parser.add_argument(
+        "--strict", action="store_true",
+        help="Exit non-zero unless the verdict is 'ready'.",
+    )
+
     run_parser = sub.add_parser("run", help="Run a dual-agent E2E scenario.")
     run_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
     run_parser.add_argument("--scenario", required=True, type=Path, help="Path to scenario JSON config.")
@@ -812,6 +828,74 @@ def cmd_test(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_spec(args: argparse.Namespace) -> int:
+    from .plan import load_test_plan
+    from .readiness import build_readiness, render_readiness_md
+    from .spec import load_spec
+
+    spec = load_spec(args.spec)
+    spec_dir = args.spec.resolve().parent
+
+    contract = None
+    generated_from = (spec.capabilities or {}).get("generated_from", "")
+    if generated_from and (spec_dir / generated_from).exists():
+        contract = json.loads((spec_dir / generated_from).read_text(encoding="utf-8"))
+
+    plan = None
+    plan_path = spec_dir / (spec.test_plan or {}).get("plan_file", "test-plan.yaml")
+    if plan_path.exists():
+        plan = load_test_plan(plan_path)
+
+    results = None
+    results_file: Path | None = None
+    if args.results:
+        results_file = args.results / "results.json" if args.results.is_dir() else args.results
+        if not results_file.exists():
+            raise ConfigError(f"results.json not found: {results_file}")
+    else:
+        candidates = sorted(spec.workspace_dir(args.spec).glob("test/*/results.json"))
+        results_file = candidates[-1] if candidates else None
+    if results_file is not None:
+        results = json.loads(results_file.read_text(encoding="utf-8"))
+
+    readiness = build_readiness(
+        spec.id,
+        (spec.review or {}).get("gates", {}),
+        contract=contract,
+        plan=plan,
+        results=results,
+    )
+
+    out_dir = results_file.parent if results_file is not None else spec.workspace_dir(args.spec)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "readiness.json"
+    md_path = out_dir / "readiness.md"
+    json_path.write_text(
+        json.dumps(readiness, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    md_path.write_text(render_readiness_md(readiness), encoding="utf-8")
+
+    print(f"Readiness for '{spec.id}': {readiness['verdict'].upper()}")
+    for gate in readiness["gates"]:
+        marker = {"pass": "ok", "fail": "!!", "not-evaluated": "--"}[gate["status"]]
+        print(f"  [{marker}] {gate['gate']}: {gate['detail']}")
+    if readiness["failures"]:
+        print(f"  failure clusters: {len(readiness['failures'])}")
+        for cluster in readiness["failures"][:3]:
+            print(f"  ! {cluster['category']} x{cluster['count']}: {cluster['signature']}")
+    if readiness["repairs"]:
+        top = readiness["repairs"][0]
+        print(f"  repairs: {len(readiness['repairs'])} (start with P{top['priority']} {top['kind']})")
+    for note in readiness["coverage_notes"][:3]:
+        print(f"  note: {note}")
+    print(f"  wrote {json_path}")
+    print(f"  wrote {md_path}")
+
+    if args.strict and readiness["verdict"] != "ready":
+        return 1
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     target = load_target(args.target)
     scenario = load_scenario(args.scenario)
@@ -1469,6 +1553,7 @@ _HANDLERS.update(
         "discover": cmd_discover,
         "plan": cmd_plan,
         "test": cmd_test,
+        "review": cmd_review_spec,
         "run": cmd_run,
         "inspect": cmd_inspect,
         "profile": cmd_profile,

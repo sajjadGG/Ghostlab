@@ -126,6 +126,32 @@ The spec's `setup` section runs before and tears down after, exactly as in
 `discover`. With `--strict`, `review.gates.min_pass_rate` fails the run when
 the executed pass rate drops below it.
 
+## review
+
+Readiness report over everything the pipeline produced — the release-gate
+answer to "is this MCP ready, and if not, what do I fix first?".
+
+```bash
+ghostlab review --spec ghostlab.yaml            # uses the latest test results
+ghostlab review --spec ghostlab.yaml --strict   # exit 1 unless verdict is 'ready'
+```
+
+Writes `readiness.json` / `readiness.md` next to the test results:
+
+- **Gates** — the spec's `review.gates` evaluated against evidence
+  (`min_pass_rate` vs executed results, `no_tool_schema_errors` vs contract
+  findings, `no_ui_console_errors` vs apps cases, `no_high_security_findings`
+  vs security cases), each pass / fail / not-evaluated with a reason.
+- **Failure clusters** — failed cases grouped by category (ui-render,
+  input-validation, tool-runtime, transport-protocol, host-compatibility,
+  security) and detail signature, so repeats of one root cause read as one
+  problem.
+- **Repairs** — prioritized, concrete recommendations mapped from finding
+  kinds (P1 "fix `inputSchema.required`" before P4 "add param descriptions"),
+  with the tools they apply to.
+- **Verdict** — `not-ready` (a gate failed), `needs-work` (failures, error
+  findings, coverage gaps, or planned suites nothing executed), or `ready`.
+
 ## inspect
 
 Introspect a target MCP server.

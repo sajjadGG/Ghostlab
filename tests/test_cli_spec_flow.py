@@ -233,6 +233,32 @@ class CliSpecFlowTest(unittest.TestCase):
         )
         self.assertEqual(code, 0)
 
+    def test_review_after_full_pipeline(self) -> None:
+        main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["plan", "--spec", str(self.spec_path)])
+        main(["test", "--spec", str(self.spec_path), "--suite", "edge"])
+
+        code = main(["review", "--spec", str(self.spec_path)])
+        self.assertEqual(code, 0)
+
+        spec = load_spec(self.spec_path)
+        results_dirs = sorted((self.spec_path.parent / spec.workspace / "test").glob("*"))
+        readiness = json.loads(
+            (results_dirs[-1] / "readiness.json").read_text(encoding="utf-8")
+        )
+        # The fake server ships a schema error (undefined required param), so
+        # the schema gate fails and the verdict is not-ready.
+        self.assertEqual(readiness["verdict"], "not-ready")
+        by_gate = {gate["gate"]: gate["status"] for gate in readiness["gates"]}
+        self.assertEqual(by_gate["no_tool_schema_errors"], "fail")
+        self.assertEqual(by_gate["min_pass_rate"], "pass")  # edge suite passed
+        kinds = {repair["kind"] for repair in readiness["repairs"]}
+        self.assertIn("required_param_undefined", kinds)
+
+        # --strict turns not-ready into a failing exit code.
+        self.assertEqual(main(["review", "--spec", str(self.spec_path), "--strict"]), 1)
+
     def test_test_command_requires_plan(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
         with self.assertRaises(SystemExit):
