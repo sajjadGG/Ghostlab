@@ -162,6 +162,43 @@ class CliSpecFlowTest(unittest.TestCase):
         code = main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
         self.assertEqual(code, 1)
 
+    def test_plan_after_discover_and_curation(self) -> None:
+        main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+
+        code = main(["plan", "--spec", str(self.spec_path)])
+        self.assertEqual(code, 0)
+        plan_path = self.spec_path.parent / "test-plan.yaml"
+        self.assertTrue(plan_path.exists())
+
+        from rehearsal.plan import load_test_plan
+
+        plan = load_test_plan(plan_path)
+        self.assertTrue(plan["cases"])
+        self.assertTrue(all(case["reason"] for case in plan["cases"]))
+        # notes_delete is destructive -> a security case exists for it.
+        self.assertIn(
+            "security-destructive-notes-delete",
+            {case["id"] for case in plan["cases"]},
+        )
+        # Spec's test_plan section was refreshed.
+        spec = load_spec(self.spec_path)
+        self.assertEqual(spec.test_plan["plan_file"], "test-plan.yaml")
+        self.assertEqual(spec.test_plan["cases"], len(plan["cases"]))
+
+        # Curate, then regenerate: status must survive.
+        code = main(["plan", "--spec", str(self.spec_path), "--approve", "smoke-discovery"])
+        self.assertEqual(code, 0)
+        main(["plan", "--spec", str(self.spec_path)])
+        plan = load_test_plan(plan_path)
+        statuses = {case["id"]: case["status"] for case in plan["cases"]}
+        self.assertEqual(statuses["smoke-discovery"], "approved")
+
+    def test_plan_without_discover_errors(self) -> None:
+        main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
+        with self.assertRaises(SystemExit):  # ConfigError -> parser.error
+            main(["plan", "--spec", str(self.spec_path)])
+
     def test_init_refuses_overwrite_without_force(self) -> None:
         args = ["init", "--target", str(self.target_path), "--out", str(self.spec_path)]
         self.assertEqual(main(args), 0)

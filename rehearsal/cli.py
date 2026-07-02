@@ -95,6 +95,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_db_arg(discover_parser)
 
+    plan_parser = sub.add_parser(
+        "plan",
+        help="Generate (or curate) a coverage-driven test plan from discover artifacts.",
+    )
+    plan_parser.add_argument(
+        "--spec", type=Path, default=Path("ghostlab.yaml"), help="Path to the ghostlab spec."
+    )
+    plan_parser.add_argument(
+        "--out", type=Path, default=None,
+        help="Plan file to write (default: test-plan.yaml next to the spec).",
+    )
+    plan_parser.add_argument(
+        "--approve", nargs="*", default=None,
+        help="Curate only: mark case ids approved (no ids = all cases).",
+    )
+    plan_parser.add_argument(
+        "--reject", nargs="*", default=None,
+        help="Curate only: mark case ids rejected (no ids = all cases).",
+    )
+
     run_parser = sub.add_parser("run", help="Run a dual-agent E2E scenario.")
     run_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
     run_parser.add_argument("--scenario", required=True, type=Path, help="Path to scenario JSON config.")
@@ -593,6 +613,91 @@ def _update_spec_capabilities(spec, contract, contract_path: Path, spec_path: Pa
             {entry["ui_resource"] for entry in contract["tools"] if entry["ui_resource"]}
         ),
     }
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    from .plan import (
+        build_test_plan,
+        load_test_plan,
+        render_plan_md,
+        set_case_statuses,
+        write_test_plan,
+    )
+    from .spec import load_spec, save_spec
+
+    spec = load_spec(args.spec)
+    plan_path = args.out or args.spec.resolve().parent / "test-plan.yaml"
+
+    # Curation-only mode: --approve / --reject touch statuses, no regeneration.
+    if args.approve is not None or args.reject is not None:
+        if not plan_path.exists():
+            raise ConfigError(f"No plan to curate at {plan_path}; run `ghostlab plan` first.")
+        plan = load_test_plan(plan_path)
+        for status, ids in (("approved", args.approve), ("rejected", args.reject)):
+            if ids is None:
+                continue
+            updated = set_case_statuses(plan, set(ids), status)
+            print(f"Marked {len(updated)} case(s) {status}.")
+        write_test_plan(plan, plan_path)
+        print(f"  wrote {plan_path}")
+        return 0
+
+    generated_from = (spec.capabilities or {}).get("generated_from", "")
+    if not generated_from:
+        raise ConfigError(
+            f"Spec {args.spec} has no discovered capabilities; run `ghostlab discover` first."
+        )
+    discover_dir = (args.spec.resolve().parent / generated_from).parent
+    contract_path = discover_dir / "contract.json"
+    inspect_path = discover_dir / "inspect.json"
+    for required in (contract_path, inspect_path):
+        if not required.exists():
+            raise ConfigError(f"Missing discover artifact: {required}; re-run `ghostlab discover`.")
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    inspect_data = json.loads(inspect_path.read_text(encoding="utf-8"))
+    samples = None
+    samples_path = discover_dir / "samples.json"
+    if samples_path.exists():
+        samples = json.loads(samples_path.read_text(encoding="utf-8"))
+
+    prior_plan = load_test_plan(plan_path) if plan_path.exists() else None
+    plan = build_test_plan(
+        spec.id,
+        contract,
+        inspect_data.get("tools", []),
+        hosts=spec.hosts,
+        samples=samples,
+        prior_plan=prior_plan,
+        contract_ref=generated_from,
+    )
+    write_test_plan(plan, plan_path)
+    md_path = plan_path.with_suffix(".md")
+    md_path.write_text(render_plan_md(plan), encoding="utf-8")
+
+    spec.test_plan = {
+        "plan_file": plan_path.name,
+        "generated_at": plan["generated_at"],
+        "cases": len(plan["cases"]),
+        "suites": {suite: entry["cases"] for suite, entry in plan["suites"].items() if entry["cases"]},
+    }
+    save_spec(spec, args.spec)
+
+    print(f"Planned {len(plan['cases'])} case(s) for '{spec.id}'")
+    for suite, entry in plan["suites"].items():
+        if entry["cases"]:
+            print(f"  {suite}: {entry['cases']}")
+    gaps = plan["coverage"]["gaps"]
+    if gaps:
+        print(f"  coverage gaps: {len(gaps)}")
+        for gap in gaps[:5]:
+            print(f"  ! {gap}")
+    for note in plan["notes"]:
+        print(f"  note: {note}")
+    print(f"  wrote {plan_path}")
+    print(f"  wrote {md_path}")
+    print(f"  updated {args.spec} (test_plan)")
+    print("  next: review statuses, then `ghostlab plan --approve` to approve all")
+    return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -1250,6 +1355,7 @@ _HANDLERS.update(
     {
         "init": cmd_init,
         "discover": cmd_discover,
+        "plan": cmd_plan,
         "run": cmd_run,
         "inspect": cmd_inspect,
         "profile": cmd_profile,

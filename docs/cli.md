@@ -69,6 +69,35 @@ take precedence over name heuristics), and MCP Apps metadata compatibility
 `no_tool_schema_errors: true` fails the run when any error-severity finding
 exists.
 
+## plan
+
+Generate a coverage-driven `test-plan.yaml` from the latest discover
+artifacts. Unlike `generate-scenarios` (model-imagined stories), the plan is
+deterministic: every case exists for a stated `reason` (tool coverage,
+workflow coverage, UI coverage, risk coverage, or a specific finding), so the
+plan doubles as a coverage report and lists untested tools/widgets as gaps.
+
+```bash
+ghostlab plan --spec ghostlab.yaml            # generate / regenerate
+ghostlab plan --spec ghostlab.yaml --approve  # curate: approve all cases
+ghostlab plan --spec ghostlab.yaml --reject security-resource-injection
+```
+
+Suites follow the roadmap taxonomy: `smoke` (protocol discovery + one minimal
+call per read-only tool + first-widget render — executable without a model),
+`semantic` (one conversational seed per tool family, marked
+`needs_generation` for scenario generation), `edge` (missing-required and
+invalid-enum probes derived from schemas), `error-recovery` (seeded from
+sampling failures), `apps` (render + interact per `ui://` resource),
+`security` (hallucinated-tool, destructive-approval, credential-handling, and
+resource-injection probes derived from contract risk labels), `host-compat`
+(smoke slice per configured host when the spec declares several), and
+`regression` (reserved for run-history failures).
+
+Case ids are deterministic, so `status` curation (`proposed` / `approved` /
+`rejected`) survives regeneration after a re-discover. A `test-plan.md`
+companion and the spec's `test_plan` summary are refreshed on every run.
+
 ## inspect
 
 Introspect a target MCP server.
