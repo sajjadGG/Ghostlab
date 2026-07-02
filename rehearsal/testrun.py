@@ -111,6 +111,72 @@ def execute_plan(
     }
 
 
+def execute_plan_repeated(
+    plan: dict[str, Any],
+    hosts: list[HostAdapter],
+    out_dir: Path,
+    *,
+    repeat: int = 1,
+    suites: Optional[list[str]] = None,
+    approved_only: bool = False,
+) -> dict[str, Any]:
+    """Run the plan ``repeat`` times and aggregate variance (roadmap A7).
+
+    Model-backed hosts are nondeterministic; repeating the same plan is how a
+    "failure" separates into *broken* (fails every attempt) vs *flaky* (mixed
+    outcomes). With ``repeat=1`` this is exactly :func:`execute_plan`. Hosts
+    re-open lazily between attempts, so each attempt gets a fresh session.
+    """
+    if repeat <= 1:
+        return execute_plan(plan, hosts, out_dir, suites=suites, approved_only=approved_only)
+
+    attempts: list[dict[str, Any]] = []
+    for attempt in range(1, repeat + 1):
+        result = execute_plan(
+            plan, hosts, out_dir, suites=suites, approved_only=approved_only
+        )
+        for entry in result["results"]:
+            entry["attempt"] = attempt
+        attempts.append(result)
+
+    merged: list[dict[str, Any]] = [entry for result in attempts for entry in result["results"]]
+    totals = {"pass": 0, "fail": 0, "skip": 0, "error": 0}
+    for entry in merged:
+        totals[entry["status"]] = totals.get(entry["status"], 0) + 1
+    executed = totals["pass"] + totals["fail"] + totals["error"]
+
+    per_case: dict[tuple, dict[str, Any]] = {}
+    for entry in merged:
+        key = (entry["case"], entry["host"])
+        stats = per_case.setdefault(
+            key,
+            {"case": entry["case"], "host": entry["host"], "suite": entry["suite"],
+             "runs": 0, "pass": 0, "fail": 0, "error": 0, "skip": 0},
+        )
+        stats["runs"] += 1
+        stats[entry["status"]] += 1
+    for stats in per_case.values():
+        stats["flaky"] = stats["pass"] > 0 and (stats["fail"] + stats["error"]) > 0
+    variance_cases = sorted(per_case.values(), key=lambda s: (not s["flaky"], s["case"]))
+    flaky = [f"{stats['case']}@{stats['host']}" for stats in variance_cases if stats["flaky"]]
+
+    aggregate = dict(attempts[-1])
+    aggregate.update({
+        "generated_at": utc_now(),
+        "attempts": repeat,
+        "totals": totals,
+        "executed": executed,
+        "pass_rate": round(totals["pass"] / executed, 4) if executed else None,
+        "results": merged,
+        "variance": {
+            "attempt_pass_rates": [result["pass_rate"] for result in attempts],
+            "per_case": variance_cases,
+            "flaky_cases": flaky,
+        },
+    })
+    return aggregate
+
+
 def evaluate_gates(results: dict[str, Any], gates: dict[str, Any]) -> list[str]:
     """Return gate-failure messages (empty = all gates pass)."""
     failures = []

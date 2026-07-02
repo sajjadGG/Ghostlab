@@ -145,6 +145,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout", type=float, default=30.0, help="Per-request timeout in seconds."
     )
     test_parser.add_argument(
+        "--repeat", type=int, default=1,
+        help="Run the plan N times and report per-case variance / flaky cases.",
+    )
+    test_parser.add_argument(
+        "--profile", choices=["smoke", "nightly", "release"], default=None,
+        help="CI preset: smoke = smoke+edge suites; nightly = all suites; "
+             "release = all suites, repeat 3, strict gates. Explicit flags override.",
+    )
+    test_parser.add_argument(
         "--strict", action="store_true",
         help="Exit non-zero when review gates (e.g. min_pass_rate) fail.",
     )
@@ -755,7 +764,15 @@ def cmd_test(args: argparse.Namespace) -> int:
     from .plan import load_test_plan
     from .setup_runtime import SetupError, SetupRuntime
     from .spec import load_spec
-    from .testrun import evaluate_gates, execute_plan, render_results_md
+    from .testrun import evaluate_gates, execute_plan_repeated, render_results_md
+
+    # CI profile presets; explicit flags win.
+    if args.profile == "smoke" and not args.suite:
+        args.suite = ["smoke", "edge"]
+    elif args.profile == "release":
+        if args.repeat == 1:
+            args.repeat = 3
+        args.strict = True
 
     spec = load_spec(args.spec)
     plan_path = args.plan or args.spec.resolve().parent / "test-plan.yaml"
@@ -791,8 +808,11 @@ def cmd_test(args: argparse.Namespace) -> int:
                 print("  target is not healthy; aborting test run")
                 runtime.write_status()
                 return 1
-        results = execute_plan(
-            plan, hosts, out_dir, suites=args.suite, approved_only=args.approved_only
+        results = execute_plan_repeated(
+            plan, hosts, out_dir,
+            repeat=max(1, args.repeat),
+            suites=args.suite,
+            approved_only=args.approved_only,
         )
     finally:
         runtime.teardown()
@@ -813,10 +833,23 @@ def cmd_test(args: argparse.Namespace) -> int:
         f"{totals['pass']} pass, {totals['fail']} fail, {totals['error']} error "
         f"({totals['skip']} skipped)"
     )
-    print(f"  pass rate: {'n/a' if rate is None else f'{rate:.0%}'}")
+    print(f"  pass rate: {'n/a' if rate is None else f'{rate:.0%}'}"
+          + (f" across {results['attempts']} attempts" if results.get("attempts") else ""))
+    reported: set[str] = set()
     for entry in results["results"]:
-        if entry["status"] in ("fail", "error"):
+        if entry["status"] in ("fail", "error") and entry["case"] not in reported:
+            reported.add(entry["case"])
             print(f"  ! {entry['case']} [{entry['host']}] {entry['status']}: {entry.get('detail', '')}")
+    flaky = results.get("variance", {}).get("flaky_cases", [])
+    if flaky:
+        print(f"  FLAKY: {', '.join(flaky)}")
+    if results.get("variance"):
+        variance_path = out_dir / "variance.json"
+        variance_path.write_text(
+            json.dumps(results["variance"], indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print(f"  wrote {variance_path}")
     print(f"  wrote {results_json}")
     print(f"  wrote {results_md}")
 

@@ -215,6 +215,8 @@ def _coverage_notes(plan: Optional[dict[str, Any]], results: Optional[dict[str, 
         }
         for suite in sorted(planned_suites - executed_suites):
             notes.append(f"suite '{suite}' has planned cases but nothing executed")
+        for flaky in results.get("variance", {}).get("flaky_cases", []):
+            notes.append(f"flaky: {flaky} passed some attempts and failed others")
     return notes
 
 

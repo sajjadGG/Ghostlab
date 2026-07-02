@@ -178,6 +178,51 @@ class ExecutePlanTest(unittest.TestCase):
         self.assertEqual(results["results"][0]["status"], "error")
         self.assertIn("kaboom", results["results"][0]["detail"])
 
+    def test_repeat_aggregates_variance_and_detects_flakes(self) -> None:
+        from rehearsal.testrun import execute_plan_repeated
+
+        class FlakyHost(StubHost):
+            def __init__(self):
+                super().__init__("f", HostCapabilities(executes_protocol=True))
+                self.calls = 0
+
+            def execute(self, case, out_dir):
+                self.calls += 1
+                status = "pass" if self.calls % 2 == 1 else "fail"
+                return CaseResult(case_id=case["id"], suite=case["suite"],
+                                  host=self.id, status=status)
+
+        plan = _plan([_case("c", "smoke", "protocol", {"type": "discovery"})])
+        results = execute_plan_repeated(plan, [FlakyHost()], self.out, repeat=4)
+        self.assertEqual(results["attempts"], 4)
+        self.assertEqual(results["totals"], {"pass": 2, "fail": 2, "skip": 0, "error": 0})
+        self.assertEqual(results["pass_rate"], 0.5)
+        variance = results["variance"]
+        self.assertEqual(variance["flaky_cases"], ["c@f"])
+        stats = variance["per_case"][0]
+        self.assertEqual((stats["runs"], stats["pass"], stats["fail"]), (4, 2, 2))
+        self.assertTrue(stats["flaky"])
+        # Every merged result knows which attempt produced it.
+        self.assertEqual({entry["attempt"] for entry in results["results"]}, {1, 2, 3, 4})
+
+    def test_repeat_one_keeps_single_run_shape(self) -> None:
+        from rehearsal.testrun import execute_plan_repeated
+
+        host = StubHost("p", HostCapabilities(executes_protocol=True))
+        plan = _plan([_case("c", "smoke", "protocol", {})])
+        results = execute_plan_repeated(plan, [host], self.out, repeat=1)
+        self.assertNotIn("attempts", results)
+        self.assertNotIn("variance", results)
+
+    def test_stable_results_are_not_flaky(self) -> None:
+        from rehearsal.testrun import execute_plan_repeated
+
+        host = StubHost("p", HostCapabilities(executes_protocol=True), status="fail")
+        plan = _plan([_case("c", "smoke", "protocol", {})])
+        results = execute_plan_repeated(plan, [host], self.out, repeat=3)
+        self.assertEqual(results["variance"]["flaky_cases"], [])
+        self.assertEqual(results["pass_rate"], 0.0)
+
     def test_evaluate_gates(self) -> None:
         results = {"executed": 10, "pass_rate": 0.8,
                    "totals": {"pass": 8, "fail": 2, "error": 0, "skip": 0}}

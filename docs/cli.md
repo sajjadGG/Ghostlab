@@ -126,6 +126,24 @@ The spec's `setup` section runs before and tears down after, exactly as in
 `discover`. With `--strict`, `review.gates.min_pass_rate` fails the run when
 the executed pass rate drops below it.
 
+`--repeat N` runs the plan N times and writes `variance.json`: per-case status
+distribution across attempts, with **flaky** cases (passed some attempts,
+failed others) called out separately from broken ones — the difference matters
+once model-backed hosts join the matrix. `--profile` bundles CI presets:
+`smoke` (smoke+edge suites), `nightly` (all suites), `release` (all suites,
+`--repeat 3`, strict gates). Explicit flags override the preset.
+
+A minimal GitHub Actions job:
+
+```yaml
+- name: MCP smoke tests
+  run: |
+    pip install ghostlab
+    ghostlab discover --spec ghostlab.yaml --strict
+    ghostlab test --spec ghostlab.yaml --profile smoke --strict
+    ghostlab review --spec ghostlab.yaml --strict
+```
+
 ## review
 
 Readiness report over everything the pipeline produced — the release-gate
