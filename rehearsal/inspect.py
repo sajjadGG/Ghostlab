@@ -78,6 +78,7 @@ def _collect_candidates(
 def lint_missing_tool_refs(
     tools: list[dict[str, Any]],
     resources: list[dict[str, Any]],
+    instructions: str = "",
 ) -> list[dict[str, Any]]:
     """Flag backticked identifiers in descriptions that aren't exposed tools.
 
@@ -87,6 +88,9 @@ def lint_missing_tool_refs(
     at least one strong reference but is not the prefix of any real tool. This
     catches coordinated mentions like "via `kb_find` and `kb_read`" without
     flagging schema fields such as `expected_version` or `correct_index`.
+
+    Server ``instructions`` are linted too — they steer the host model just as
+    hard as tool descriptions do.
     """
     tool_names = {t.get("name", "") for t in tools if t.get("name")}
     real_prefixes = {_prefix(name) for name in tool_names}
@@ -96,6 +100,8 @@ def lint_missing_tool_refs(
         sources.append((f"tool:{tool.get('name', '?')}", tool.get("description", "") or ""))
     for resource in resources:
         sources.append((f"resource:{resource.get('uri', '?')}", resource.get("description", "") or ""))
+    if instructions:
+        sources.append(("instructions", instructions))
 
     candidates = _collect_candidates(sources, tool_names)
     suspect_families = {
@@ -139,7 +145,7 @@ def inspect_target(target: TargetConfig, timeout: float = 30.0) -> InspectResult
     finally:
         client.close()
 
-    lint = lint_missing_tool_refs(tools, resources)
+    lint = lint_missing_tool_refs(tools, resources, instructions=client.instructions)
     return InspectResult(
         target_id=target.id,
         transport=target.transport,

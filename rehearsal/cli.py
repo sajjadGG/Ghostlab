@@ -10,25 +10,10 @@ from .inspect import inspect_target, write_inspect_artifacts
 from .orchestrator import run_scenario
 from .types import utc_now
 
-KNOWN_COMMANDS = {
-    "run",
-    "inspect",
-    "profile",
-    "generate-scenarios",
-    "generate-personas",
-    "generate-dataset",
-    "run-dataset",
-    "review-dataset",
-    "doctor",
-    "evaluate",
-    "critique",
-    "compare",
-    "scorecard",
-    "apps-probe",
-    "apps-render",
-    "ui",
-    "db",
-}
+# Command -> handler registry; populated after the cmd_* definitions below.
+# `KNOWN_COMMANDS` is derived from it so the two can never drift apart, and a
+# test asserts the registry matches the subparsers declared in build_parser().
+_HANDLERS: "dict[str, object]" = {}
 
 
 def _add_db_arg(parser: argparse.ArgumentParser) -> None:
@@ -55,6 +40,60 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ghostlab", description="Rehearsal / MCP Ghostlab.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
+
+    init_parser = sub.add_parser(
+        "init", help="Create a ghostlab.yaml spec from an existing target JSON."
+    )
+    init_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
+    init_parser.add_argument(
+        "--out", type=Path, default=Path("ghostlab.yaml"),
+        help="Spec file to write (.yaml or .json; default: ghostlab.yaml).",
+    )
+    init_parser.add_argument("--name", default="", help="Human-readable name for the MCP under test.")
+    init_parser.add_argument(
+        "--workspace", default=None,
+        help="Artifact workspace dir, relative to the spec (default: .ghostlab).",
+    )
+    init_parser.add_argument(
+        "--force", action="store_true", help="Overwrite an existing spec file."
+    )
+
+    discover_parser = sub.add_parser(
+        "discover",
+        help="Inspect the spec's target, lint its contract, and refresh spec capabilities.",
+    )
+    discover_parser.add_argument(
+        "--spec", type=Path, default=Path("ghostlab.yaml"), help="Path to the ghostlab spec."
+    )
+    discover_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="Per-request timeout in seconds."
+    )
+    discover_parser.add_argument(
+        "--skip-apps", action="store_true",
+        help="Skip probing ui:// resources even when UI-producing tools exist.",
+    )
+    discover_parser.add_argument(
+        "--sample", choices=["off", "safe", "fixture"], default="off",
+        help="Call tools once for real: 'safe' = read-only tools with generated "
+             "args; 'fixture' also runs setup.fixtures entries (approval-gated).",
+    )
+    discover_parser.add_argument(
+        "--approve-mutations", action="store_true",
+        help="Allow fixture sampling of state-mutating (non-destructive) tools.",
+    )
+    discover_parser.add_argument(
+        "--approve-destructive", action="store_true",
+        help="Allow fixture sampling of destructive tools. Use with care.",
+    )
+    discover_parser.add_argument(
+        "--skip-setup", action="store_true",
+        help="Skip the spec's setup commands/health checks (target already running).",
+    )
+    discover_parser.add_argument(
+        "--strict", action="store_true",
+        help="Exit non-zero when the spec's review gates fail (e.g. schema errors).",
+    )
+    _add_db_arg(discover_parser)
 
     run_parser = sub.add_parser("run", help="Run a dual-agent E2E scenario.")
     run_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
@@ -311,6 +350,249 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_db_arg(db_parser)
     return parser
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    from .spec import DEFAULT_WORKSPACE, save_spec, spec_from_target
+
+    target = load_target(args.target)
+    if args.out.exists() and not args.force:
+        print(f"{args.out} already exists; use --force to overwrite.")
+        return 1
+    spec = spec_from_target(
+        target,
+        source_target=str(args.target),
+        name=args.name,
+        workspace=args.workspace or DEFAULT_WORKSPACE,
+    )
+    path = save_spec(spec, args.out)
+    print(f"Initialized spec for '{spec.id}' at {path}")
+    print(f"  transport={target.transport} workspace={spec.workspace}")
+    print("  next: ghostlab discover --spec " + str(path))
+    return 0
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from .setup_runtime import SetupError, SetupRuntime
+    from .spec import load_spec
+
+    spec = load_spec(args.spec)
+    target = spec.target_config()
+    timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
+    out_dir = spec.workspace_dir(args.spec) / "discover" / f"{timestamp}-{spec.id}"
+
+    print(f"Discovering '{spec.id}' ({target.transport})...")
+    runtime = SetupRuntime({} if args.skip_setup else spec.setup, out_dir)
+    try:
+        if runtime.declared:
+            try:
+                runtime.start()
+            except SetupError as exc:
+                print(f"  setup failed: {exc}")
+                print(f"  see {runtime.log_path}")
+                runtime.write_status()
+                return 1
+            healthy = runtime.wait_healthy()
+            checks = runtime.status()["health"]
+            if checks:
+                print(f"  health: {sum(1 for c in checks if c['ok'])}/{len(checks)} check(s) ok")
+            if not healthy:
+                print("  target is not healthy; aborting discover")
+                print(f"  see {runtime.log_path}")
+                runtime.write_status()
+                return 1
+        return _discover_inspect(args, spec, target, out_dir, runtime)
+    finally:
+        runtime.teardown()
+        if runtime.declared:
+            runtime.write_status()  # capture teardown results in setup.json
+
+
+def _discover_inspect(args, spec, target, out_dir: Path, runtime) -> int:
+    """Inspect + contract + sampling + apps probe, once the target is up."""
+    from dataclasses import asdict
+
+    from .contract import build_contract, merge_findings, render_contract_md
+    from .spec import save_spec
+
+    result = inspect_target(target, timeout=args.timeout)
+    inspect_json, inspect_md = write_inspect_artifacts(result, out_dir)
+
+    contract = build_contract(asdict(result))
+    sample_report = None
+    if args.sample != "off":
+        sample_report = _sample_tools_for_discover(
+            args, spec, target, contract, result.tools, out_dir, runtime
+        )
+        if sample_report is not None:
+            merge_findings(contract, sample_report["findings"])
+
+    contract_json = out_dir / "contract.json"
+    contract_md = out_dir / "contract.md"
+    contract_json.write_text(
+        json.dumps(contract, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    contract_md.write_text(render_contract_md(contract), encoding="utf-8")
+    runtime.write_status(result.server_info)
+
+    apps_report = None
+    ui_tool_count = contract["counts"]["ui_tools"]
+    if ui_tool_count and not args.skip_apps:
+        apps_report = _probe_apps_for_discover(target, result.tools, out_dir, args.timeout)
+
+    _update_spec_capabilities(spec, contract, contract_json, args.spec)
+    save_spec(spec, args.spec)
+
+    severities = contract["summary"]["findings_by_severity"]
+    server = result.server_info or {}
+    print(f"  server {server.get('name', '?')}@{server.get('version', '?')}")
+    print(
+        f"  tools={contract['counts']['tools']} (ui={ui_tool_count}) "
+        f"resources={contract['counts']['resources']} prompts={contract['counts']['prompts']}"
+    )
+    print(
+        f"  contract findings: {severities['error']} error(s), "
+        f"{severities['warning']} warning(s), {severities['info']} info"
+    )
+    for finding in contract["findings"]:
+        if finding["severity"] == "error":
+            print(f"  ! [{finding['kind']}] {finding['in']}: {finding['message']}")
+    if apps_report is not None:
+        summary = apps_report["summary"]
+        print(
+            f"  apps: {summary['renderable_resources']}/{summary['ui_tools']} renderable, "
+            f"{summary['diagnostic_findings']} finding(s)"
+        )
+    if sample_report is not None:
+        sample_summary = sample_report["summary"]
+        print(
+            f"  samples: {sample_summary['called']} called "
+            f"({sample_summary['failed']} failed), {sample_summary['skipped']} skipped"
+        )
+        for sample in sample_report["samples"]:
+            if sample["status"] in ("error", "tool_error"):
+                detail = sample.get("error") or sample.get("result", {}).get("first_text", "")
+                print(f"  ! sample {sample['tool']}: {sample['status']} — {detail[:160]}")
+    print(f"  wrote {inspect_json}")
+    print(f"  wrote {contract_json}")
+    print(f"  wrote {contract_md}")
+    print(f"  updated {args.spec} (capabilities)")
+
+    store = _open_store(args)
+    if store is not None:
+        try:
+            info = store.record_inspection(target, result)
+            public_id = info["inspection_public_id"]
+            store.index_artifact("inspection", public_id, "inspect.json", inspect_json)
+            store.index_artifact("inspection", public_id, "inspect.md", inspect_md)
+            store.index_artifact("inspection", public_id, "contract.json", contract_json)
+            store.index_artifact("inspection", public_id, "contract.md", contract_md)
+            for extra in ("setup.json", "samples.json", "apps-probe.json"):
+                extra_path = out_dir / extra
+                if extra_path.exists():
+                    store.index_artifact("inspection", public_id, extra, extra_path)
+            print(f"  saved as version v{info['version']} ({public_id})")
+        finally:
+            store.close()
+
+    gates = (spec.review or {}).get("gates", {})
+    if args.strict and gates.get("no_tool_schema_errors") and severities["error"]:
+        print(f"  GATE FAILED: no_tool_schema_errors ({severities['error']} error finding(s))")
+        return 1
+    return 0
+
+
+def _sample_tools_for_discover(args, spec, target, contract, tools, out_dir: Path, runtime):
+    """Live tool sampling during discover (best-effort, safety-gated)."""
+    from .mcp_client import McpClientError, create_client
+    from .sampling import plan_samples, run_samples
+
+    plan = plan_samples(
+        contract,
+        tools,
+        mode=args.sample,
+        fixtures=(spec.setup or {}).get("fixtures"),
+        approve_mutations=args.approve_mutations,
+        approve_destructive=args.approve_destructive,
+    )
+    if not plan:
+        return None
+
+    mutated = any("skipped" not in entry and entry["source"] == "fixture" for entry in plan)
+    try:
+        client = create_client(target, timeout=args.timeout)
+        try:
+            client.initialize()
+            report = run_samples(client, plan, tools)
+            # Fixture samples may have written state; restore it while we still
+            # hold a connected client for `tool`-type reset hooks.
+            if mutated and (spec.setup or {}).get("reset"):
+                if not runtime.run_reset(client):
+                    report["findings"].append({
+                        "kind": "reset_failed", "severity": "error", "in": "setup:reset",
+                        "message": "state reset failed after fixture sampling; "
+                                   "the target may be left dirty",
+                    })
+        finally:
+            client.close()
+    except McpClientError as exc:
+        print(f"  (sampling skipped: {exc})")
+        return None
+
+    (out_dir / "samples.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return report
+
+
+def _probe_apps_for_discover(target, tools, out_dir: Path, timeout: float):
+    """Fetch + diagnose ui:// resources during discover (best-effort)."""
+    from .mcp_apps import build_app_report, probe_ui_tools, render_app_report_md
+    from .mcp_client import McpClientError, create_client
+
+    try:
+        client = create_client(target, timeout=timeout)
+        try:
+            client.initialize()
+            probes = probe_ui_tools(client, tools)
+        finally:
+            client.close()
+    except McpClientError as exc:
+        print(f"  (apps probe skipped: {exc})")
+        return None
+
+    report = build_app_report(target.id, probes)
+    (out_dir / "apps-probe.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    (out_dir / "apps-probe.md").write_text(render_app_report_md(report), encoding="utf-8")
+    return report
+
+
+def _update_spec_capabilities(spec, contract, contract_path: Path, spec_path: Path) -> None:
+    """Refresh the spec's `capabilities` section from a freshly built contract."""
+    try:
+        generated_from = str(contract_path.resolve().relative_to(spec_path.resolve().parent))
+    except ValueError:  # workspace outside the spec's directory
+        generated_from = str(contract_path)
+    spec.capabilities = {
+        "generated_from": generated_from,
+        "discovered_at": contract["generated_at"],
+        "mcp": contract["mcp"],
+        "tools": [
+            {
+                "name": entry["name"],
+                "labels": entry["risk"]["labels"],
+                "produces_ui": entry["risk"]["produces_ui"],
+            }
+            for entry in contract["tools"]
+        ],
+        "ui_resources": sorted(
+            {entry["ui_resource"] for entry in contract["tools"] if entry["ui_resource"]}
+        ),
+    }
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -964,6 +1246,32 @@ def cmd_ui(args: argparse.Namespace) -> int:
     return subprocess.call(command)
 
 
+_HANDLERS.update(
+    {
+        "init": cmd_init,
+        "discover": cmd_discover,
+        "run": cmd_run,
+        "inspect": cmd_inspect,
+        "profile": cmd_profile,
+        "generate-scenarios": cmd_generate_scenarios,
+        "generate-personas": cmd_generate_personas,
+        "generate-dataset": cmd_generate_dataset,
+        "run-dataset": cmd_run_dataset,
+        "review-dataset": cmd_review_dataset,
+        "doctor": cmd_doctor,
+        "evaluate": cmd_evaluate,
+        "critique": cmd_critique,
+        "compare": cmd_compare,
+        "scorecard": cmd_scorecard,
+        "apps-probe": cmd_apps_probe,
+        "apps-render": cmd_apps_render,
+        "db": cmd_db,
+        "ui": cmd_ui,
+    }
+)
+KNOWN_COMMANDS = frozenset(_HANDLERS)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     # Backward compatibility: bare `--target ... --scenario ...` defaults to `run`.
@@ -976,51 +1284,15 @@ def main(argv: list[str] | None = None) -> int:
         raw = ["run", *raw]
 
     args = parser.parse_args(raw)
-    if args.command is None:
+    handler = _HANDLERS.get(args.command or "")
+    if handler is None:
         parser.print_help()
         return 2
-
     try:
-        if args.command == "run":
-            return cmd_run(args)
-        if args.command == "inspect":
-            return cmd_inspect(args)
-        if args.command == "profile":
-            return cmd_profile(args)
-        if args.command == "generate-scenarios":
-            return cmd_generate_scenarios(args)
-        if args.command == "generate-personas":
-            return cmd_generate_personas(args)
-        if args.command == "generate-dataset":
-            return cmd_generate_dataset(args)
-        if args.command == "run-dataset":
-            return cmd_run_dataset(args)
-        if args.command == "review-dataset":
-            return cmd_review_dataset(args)
-        if args.command == "doctor":
-            return cmd_doctor(args)
-        if args.command == "evaluate":
-            return cmd_evaluate(args)
-        if args.command == "critique":
-            return cmd_critique(args)
-        if args.command == "compare":
-            return cmd_compare(args)
-        if args.command == "scorecard":
-            return cmd_scorecard(args)
-        if args.command == "apps-probe":
-            return cmd_apps_probe(args)
-        if args.command == "apps-render":
-            return cmd_apps_render(args)
-        if args.command == "db":
-            return cmd_db(args)
-        if args.command == "ui":
-            return cmd_ui(args)
+        return handler(args)
     except ConfigError as exc:
         parser.error(str(exc))
         return 2
-
-    parser.print_help()
-    return 2
 
 
 if __name__ == "__main__":

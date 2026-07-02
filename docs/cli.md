@@ -2,6 +2,73 @@
 
 Ghostlab installs two equivalent console scripts, `ghostlab` and `rehearsal`. New examples use `ghostlab`.
 
+## init
+
+Create a `ghostlab.yaml` spec — the canonical, human-editable description of the
+MCP under test — from an existing target JSON. The spec is the entry point for
+the project flow (`init` → `discover` → future `plan`/`test`/`review` stages);
+every other command keeps accepting raw target/scenario JSON as before.
+
+```bash
+ghostlab init --target targets/cortex-local.json          # writes ghostlab.yaml
+ghostlab init --target targets/cortex-local.json --out cortex.ghostlab.json
+```
+
+Options: `--name` (display name), `--workspace` (artifact directory, default
+`.ghostlab/` next to the spec), `--force` (overwrite an existing spec). Specs
+can be YAML or JSON by extension; the built-in YAML reader covers everything
+ghostlab emits, and an installed PyYAML is picked up automatically for full
+YAML syntax in hand-edited specs.
+
+## discover
+
+Connect to the spec's target, capture the inventory (`inspect.json`), lint the
+contract into `contract.json`/`contract.md`, probe `ui://` widget resources
+when the server exposes MCP Apps tools, and refresh the spec's `capabilities`
+section (tool risk labels, UI resources, artifact provenance). Artifacts land
+under `<workspace>/discover/<timestamp>-<id>/`.
+
+```bash
+ghostlab discover --spec ghostlab.yaml
+ghostlab discover --spec ghostlab.yaml --strict          # exit 1 when review gates fail
+ghostlab discover --spec ghostlab.yaml --sample safe     # also call read-only tools once
+```
+
+If the spec declares a `setup` section, discover executes it first and tears it
+down afterwards: `setup.commands` run in order (`background: true` for the
+server process itself — it is terminated at teardown), `setup.health` probes
+(`http`, `tcp`, or `command`) are polled until they pass or time out, and
+`setup.teardown` always runs. Logs land in `setup.log`, and `setup.json`
+records per-step status plus a version fingerprint (ghostlab/python/platform/
+server versions). `--skip-setup` bypasses all of it when the target is already
+running.
+
+`--sample` calls tools for real, under an explicit safety model:
+
+- `safe` — only tools classified **read-only** (MCP `annotations` first,
+  heuristics second), with arguments generated from each required parameter's
+  schema (`default` → `examples` → `enum` head → type zero-value). Tools whose
+  arguments can't be generated are skipped with a reason, never guessed.
+- `fixture` — additionally calls tools listed in `setup.fixtures`
+  (`- {tool: name, arguments: {...}}`) with those arguments. A mutating
+  fixture still requires `--approve-mutations`; a destructive one requires
+  `--approve-destructive`. After mutating samples, `setup.reset` hooks
+  (`tool` or `command`) restore state.
+
+Sample outcomes are written to `samples.json` and folded into the contract as
+findings (failed calls, `isError` results, declared `outputSchema` without
+`structuredContent`, UI tools that return nothing model-visible).
+
+Contract findings are deterministic (no model calls): schema quality
+(undocumented/untyped params, `required` names that don't exist, `$ref`-heavy
+schemas hosts translate poorly), risk classification (read-only vs mutating vs
+destructive, credential-bearing params, UI-producing — MCP tool `annotations`
+take precedence over name heuristics), and MCP Apps metadata compatibility
+(standard `_meta.ui.resourceUri` vs the `openai/outputTemplate` alias, dangling
+`ui://` references). With `--strict`, the spec's `review.gates` get teeth:
+`no_tool_schema_errors: true` fails the run when any error-severity finding
+exists.
+
 ## inspect
 
 Introspect a target MCP server.

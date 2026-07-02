@@ -8,7 +8,11 @@ the `initialize` handshake plus `*/list` methods.
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
+import threading
+import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
@@ -113,17 +117,47 @@ class McpClient:
 # --------------------------------------------------------------------------- #
 # Streamable HTTP transport
 # --------------------------------------------------------------------------- #
-def _parse_sse(body: str) -> dict[str, Any]:
-    """Extract the JSON payload from an SSE `data:` framed response."""
-    data_lines = [
-        line[len("data:"):].strip()
-        for line in body.splitlines()
-        if line.startswith("data:")
-    ]
-    payload = "\n".join(data_lines).strip()
-    if not payload:
+def _parse_sse_messages(body: str) -> list[dict[str, Any]]:
+    """Parse every JSON message in an SSE stream, one per event block.
+
+    Events are separated by blank lines; `data:` lines *within* one event are
+    joined (a single JSON payload may span several data lines).
+    """
+    messages: list[dict[str, Any]] = []
+    for block in body.split("\n\n"):
+        data_lines = [
+            line[len("data:"):].strip()
+            for line in block.splitlines()
+            if line.startswith("data:")
+        ]
+        payload = "\n".join(data_lines).strip()
+        if not payload:
+            continue
+        try:
+            messages.append(json.loads(payload))
+        except json.JSONDecodeError as exc:
+            raise McpClientError(f"Bad SSE JSON payload: {payload!r}") from exc
+    return messages
+
+
+def _parse_sse(body: str, expected_id: int | None = None) -> dict[str, Any]:
+    """Pick the JSON-RPC *response* out of an SSE-framed body.
+
+    A streamable-HTTP server may interleave notifications (log messages,
+    progress) with the response on the same stream; select the message whose
+    `id` matches, falling back to the last response-shaped message.
+    """
+    messages = _parse_sse_messages(body)
+    if not messages:
         raise McpClientError(f"Empty SSE body: {body!r}")
-    return json.loads(payload)
+    if expected_id is not None:
+        for message in messages:
+            if message.get("id") == expected_id:
+                return message
+    for message in reversed(messages):
+        if "result" in message or "error" in message:
+            return message
+    return messages[-1]
 
 
 class HttpMcpClient(McpClient):
@@ -166,9 +200,11 @@ class HttpMcpClient(McpClient):
         except urllib.error.URLError as exc:  # type: ignore[attr-defined]
             raise McpClientError(f"Cannot reach {self.url}: {exc.reason}") from exc
 
-    def _decode(self, raw: str, meta: dict[str, str]) -> dict[str, Any]:
+    def _decode(
+        self, raw: str, meta: dict[str, str], expected_id: int | None = None
+    ) -> dict[str, Any]:
         if "text/event-stream" in meta.get("content_type", ""):
-            return _parse_sse(raw)
+            return _parse_sse(raw, expected_id=expected_id)
         if not raw.strip():
             return {}
         return json.loads(raw)
@@ -179,7 +215,7 @@ class HttpMcpClient(McpClient):
         if params is not None:
             payload["params"] = params
         raw, meta = self._request(payload)
-        message = self._decode(raw, meta)
+        message = self._decode(raw, meta, expected_id=self._next_id)
         return McpResponse(result=message.get("result"), error=message.get("error"))
 
     def _notify(self, method: str, params: dict[str, Any] | None) -> None:
@@ -218,6 +254,20 @@ class StdioMcpClient(McpClient):
             text=True,
             bufsize=1,
         )
+        # stdout is drained on a daemon thread so reads can time out; a bare
+        # readline() would hang the whole pipeline on an unresponsive server.
+        self._lines: "queue.Queue[str | None]" = queue.Queue()
+        self._reader = threading.Thread(target=self._pump_stdout, daemon=True)
+        self._reader.start()
+
+    def _pump_stdout(self) -> None:
+        assert self.proc.stdout is not None
+        try:
+            for line in self.proc.stdout:
+                self._lines.put(line)
+        except ValueError:  # stream closed under us during shutdown
+            pass
+        self._lines.put(None)  # EOF sentinel
 
     def _send(self, payload: dict[str, Any]) -> None:
         assert self.proc.stdin is not None
@@ -225,11 +275,22 @@ class StdioMcpClient(McpClient):
         self.proc.stdin.flush()
 
     def _read_for_id(self, expected_id: int) -> dict[str, Any]:
-        assert self.proc.stdout is not None
+        deadline = time.monotonic() + self.timeout
         while True:
-            line = self.proc.stdout.readline()
-            if not line:
-                stderr = self.proc.stderr.read() if self.proc.stderr else ""
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise McpClientError(
+                    f"stdio server did not answer request id={expected_id} "
+                    f"within {self.timeout:g}s"
+                )
+            try:
+                line = self._lines.get(timeout=remaining)
+            except queue.Empty:
+                continue  # deadline check above raises
+            if line is None:
+                stderr = ""
+                if self.proc.stderr is not None and self.proc.poll() is not None:
+                    stderr = self.proc.stderr.read() or ""
                 raise McpClientError(f"stdio server closed unexpectedly. stderr:\n{stderr}")
             line = line.strip()
             if not line:
