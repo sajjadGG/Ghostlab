@@ -110,6 +110,48 @@ class RepairsTest(unittest.TestCase):
         self.assertEqual(readiness["verdict"], "needs-work")
 
 
+class McpFeedbackTest(unittest.TestCase):
+    def _critique(self, score: int, recs: list[str], tools: list[dict]) -> dict:
+        return {"critique": {"overall_score": score, "top_recommendations": recs, "tools": tools}}
+
+    def test_no_critiques_omits_feedback_section(self) -> None:
+        readiness = build_readiness("t", {})
+        self.assertIsNone(readiness["mcp_feedback"])
+
+    def test_aggregates_score_and_dedupes_recommendations(self) -> None:
+        critiques = [
+            self._critique(4, ["shorten descriptions", "add examples"],
+                           [{"name": "notes_list", "name_clarity": 5, "suggestions": []}]),
+            self._critique(2, ["add examples", "fix kb_read schema"],
+                           [{"name": "notes_list", "name_clarity": 3, "suggestions": ["rename"]}]),
+        ]
+        readiness = build_readiness("t", {}, critiques=critiques)
+        feedback = readiness["mcp_feedback"]
+        self.assertEqual(feedback["runs_critiqued"], 2)
+        self.assertEqual(feedback["avg_overall_score"], 3.0)
+        self.assertEqual(
+            feedback["top_recommendations"],
+            ["shorten descriptions", "add examples", "fix kb_read schema"],
+        )
+
+    def test_per_tool_averages_and_dedupes_suggestions(self) -> None:
+        critiques = [
+            self._critique(4, [], [{"name": "notes_list", "name_clarity": 5, "suggestions": ["a"]}]),
+            self._critique(4, [], [{"name": "notes_list", "name_clarity": 1, "suggestions": ["a", "b"]}]),
+        ]
+        readiness = build_readiness("t", {}, critiques=critiques)
+        per_tool = {e["tool"]: e for e in readiness["mcp_feedback"]["per_tool"]}
+        self.assertEqual(per_tool["notes_list"]["avg_name_clarity"], 3.0)
+        self.assertEqual(per_tool["notes_list"]["suggestions"], ["a", "b"])
+
+    def test_feedback_renders_in_markdown(self) -> None:
+        critiques = [self._critique(3, ["do X"], [{"name": "t", "name_clarity": 2, "suggestions": []}])]
+        md = render_readiness_md(build_readiness("t", {}, critiques=critiques))
+        self.assertIn("MCP feedback", md)
+        self.assertIn("do X", md)
+        self.assertIn("`t`", md)
+
+
 class RenderTest(unittest.TestCase):
     def test_markdown_renders_all_sections(self) -> None:
         contract = {"findings": [

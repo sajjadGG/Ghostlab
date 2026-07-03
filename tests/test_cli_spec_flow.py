@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from rehearsal.cli import _HANDLERS, build_parser, main
 from rehearsal.spec import load_spec
@@ -166,7 +167,7 @@ class CliSpecFlowTest(unittest.TestCase):
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
         main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
 
-        code = main(["plan", "--spec", str(self.spec_path)])
+        code = main(["plan", "--spec", str(self.spec_path), "--no-generate"])
         self.assertEqual(code, 0)
         plan_path = self.spec_path.parent / "test-plan.yaml"
         self.assertTrue(plan_path.exists())
@@ -187,9 +188,9 @@ class CliSpecFlowTest(unittest.TestCase):
         self.assertEqual(spec.test_plan["cases"], len(plan["cases"]))
 
         # Curate, then regenerate: status must survive.
-        code = main(["plan", "--spec", str(self.spec_path), "--approve", "smoke-discovery"])
+        code = main(["plan", "--spec", str(self.spec_path), "--no-generate", "--approve", "smoke-discovery"])
         self.assertEqual(code, 0)
-        main(["plan", "--spec", str(self.spec_path)])
+        main(["plan", "--spec", str(self.spec_path), "--no-generate"])
         plan = load_test_plan(plan_path)
         statuses = {case["id"]: case["status"] for case in plan["cases"]}
         self.assertEqual(statuses["smoke-discovery"], "approved")
@@ -197,7 +198,7 @@ class CliSpecFlowTest(unittest.TestCase):
     def test_full_pipeline_through_test_command(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
         main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
-        main(["plan", "--spec", str(self.spec_path)])
+        main(["plan", "--spec", str(self.spec_path), "--no-generate"])
 
         # edge: notes_delete with {} -> fake server answers isError -> graceful pass.
         # semantic: conversational seeds -> skipped by the direct host with reasons.
@@ -236,7 +237,7 @@ class CliSpecFlowTest(unittest.TestCase):
     def test_review_after_full_pipeline(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
         main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
-        main(["plan", "--spec", str(self.spec_path)])
+        main(["plan", "--spec", str(self.spec_path), "--no-generate"])
         main(["test", "--spec", str(self.spec_path), "--suite", "edge"])
 
         code = main(["review", "--spec", str(self.spec_path)])
@@ -259,6 +260,65 @@ class CliSpecFlowTest(unittest.TestCase):
         # --strict turns not-ready into a failing exit code.
         self.assertEqual(main(["review", "--spec", str(self.spec_path), "--strict"]), 1)
 
+    @patch("rehearsal.plan_generate.build_dataset")
+    @patch("rehearsal.plan_generate.build_capability_profile")
+    @patch("rehearsal.codex_backend.CodexBackend._bin", return_value="codex")
+    def test_plan_generate_produces_real_conversational_cases(
+        self, _bin_mock, profile_mock, dataset_mock
+    ) -> None:
+        main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+
+        profile_mock.return_value = {"mcp": "fake-notes@0.0.1"}
+        dataset_mock.return_value = {
+            "manifest": {"name": "fake-notes", "cases": [
+                {"id": "alice--happy", "persona": "alice", "scenario": "alice--happy",
+                 "intent": "happy_path", "exercises": ["notes_list"]},
+                {"id": "bob--adv", "persona": "bob", "scenario": "bob--adv",
+                 "intent": "adversarial", "exercises": ["notes_delete"]},
+            ]},
+            "personas": [
+                {"id": "alice", "name": "Alice", "summary": "s"},
+                {"id": "bob", "name": "Bob", "summary": "s"},
+            ],
+            "scenarios": [
+                {"id": "alice--happy", "title": "t", "persona": "alice", "goal": "g",
+                 "max_turns": 4, "opening_message": "hi", "intent": "happy_path",
+                 "exercises": ["notes_list"]},
+                {"id": "bob--adv", "title": "t2", "persona": "bob", "goal": "g2",
+                 "max_turns": 4, "opening_message": "hi2", "intent": "adversarial",
+                 "exercises": ["notes_delete"]},
+            ],
+        }
+
+        code = main(["plan", "--spec", str(self.spec_path)])  # --generate is the default
+        self.assertEqual(code, 0)
+        dataset_mock.assert_called_once()
+        self.assertEqual(dataset_mock.call_args.kwargs["n_personas"], 2)
+        self.assertEqual(dataset_mock.call_args.kwargs["scenarios_per_persona"], 2)
+
+        from rehearsal.plan import load_test_plan
+
+        plan = load_test_plan(self.spec_path.parent / "test-plan.yaml")
+        ids = {case["id"] for case in plan["cases"]}
+        self.assertIn("semantic-gen-alice--happy", ids)
+        self.assertIn("security-gen-bob--adv", ids)
+        # Inert per-family seeds are dropped once real generation exists.
+        self.assertFalse(any(cid.startswith("semantic-notes") for cid in ids))
+
+        spec = load_spec(self.spec_path)
+        generated_dir = self.spec_path.parent / spec.test_plan["generated_dataset"]
+        self.assertTrue((generated_dir / "dataset.json").exists())
+        self.assertTrue((generated_dir / "personas" / "alice.json").exists())
+
+        # Re-plan reuses the cached dataset: zero further codex calls.
+        main(["plan", "--spec", str(self.spec_path)])
+        dataset_mock.assert_called_once()
+
+        # --regenerate forces a fresh call.
+        main(["plan", "--spec", str(self.spec_path), "--regenerate"])
+        self.assertEqual(dataset_mock.call_count, 2)
+
     def test_test_command_requires_plan(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
         with self.assertRaises(SystemExit):
@@ -267,7 +327,7 @@ class CliSpecFlowTest(unittest.TestCase):
     def test_plan_without_discover_errors(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
         with self.assertRaises(SystemExit):  # ConfigError -> parser.error
-            main(["plan", "--spec", str(self.spec_path)])
+            main(["plan", "--spec", str(self.spec_path), "--no-generate"])
 
     def test_init_refuses_overwrite_without_force(self) -> None:
         args = ["init", "--target", str(self.target_path), "--out", str(self.spec_path)]

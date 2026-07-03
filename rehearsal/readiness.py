@@ -200,6 +200,54 @@ def _repairs(contract: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
     return [repairs[key] for key in sorted(repairs)]
 
 
+def _aggregate_feedback(critiques: Optional[list[dict[str, Any]]]) -> Optional[dict[str, Any]]:
+    """Roll per-run tool-usability critiques into one "how good is this MCP" view.
+
+    This is the direct answer to "ask the agent-under-test how the tool felt
+    and aggregate it": each conversational case that ran with a judge produces
+    a critique (`rehearsal/critique.py`); this folds all of them from one test
+    run into overall + per-tool signal.
+    """
+    if not critiques:
+        return None
+    scores = [c["critique"]["overall_score"] for c in critiques if "critique" in c]
+    recommendations: list[str] = []
+    for critique in critiques:
+        for rec in critique.get("critique", {}).get("top_recommendations", []):
+            if rec not in recommendations:
+                recommendations.append(rec)
+
+    per_tool: dict[str, dict[str, Any]] = {}
+    for critique in critiques:
+        for tool in critique.get("critique", {}).get("tools", []):
+            name = tool.get("name", "?")
+            entry = per_tool.setdefault(
+                name, {"tool": name, "name_clarity_scores": [], "suggestions": []}
+            )
+            entry["name_clarity_scores"].append(tool.get("name_clarity", 0))
+            for suggestion in tool.get("suggestions", []):
+                if suggestion not in entry["suggestions"]:
+                    entry["suggestions"].append(suggestion)
+
+    per_tool_summary = []
+    for entry in per_tool.values():
+        clarity_scores = entry["name_clarity_scores"]
+        per_tool_summary.append({
+            "tool": entry["tool"],
+            "avg_name_clarity": round(sum(clarity_scores) / len(clarity_scores), 1)
+            if clarity_scores else None,
+            "suggestions": entry["suggestions"],
+        })
+    per_tool_summary.sort(key=lambda e: (e["avg_name_clarity"] if e["avg_name_clarity"] is not None else 5))
+
+    return {
+        "runs_critiqued": len(critiques),
+        "avg_overall_score": round(sum(scores) / len(scores), 1) if scores else None,
+        "top_recommendations": recommendations[:10],
+        "per_tool": per_tool_summary,
+    }
+
+
 def _coverage_notes(plan: Optional[dict[str, Any]], results: Optional[dict[str, Any]]) -> list[str]:
     notes: list[str] = []
     for gap in (plan or {}).get("coverage", {}).get("gaps", []):
@@ -230,11 +278,13 @@ def build_readiness(
     contract: Optional[dict[str, Any]] = None,
     plan: Optional[dict[str, Any]] = None,
     results: Optional[dict[str, Any]] = None,
+    critiques: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     gates = _evaluate_gates(gates_config or {}, contract, results)
     failures = _cluster_failures(results)
     repairs = _repairs(contract)
     coverage_notes = _coverage_notes(plan, results)
+    mcp_feedback = _aggregate_feedback(critiques)
 
     gate_failed = any(gate["status"] == "fail" for gate in gates)
     error_findings = sum(
@@ -258,6 +308,7 @@ def build_readiness(
         "failures": failures,
         "repairs": repairs,
         "coverage_notes": coverage_notes,
+        "mcp_feedback": mcp_feedback,
         "evidence": {
             "contract": bool(contract),
             "plan": bool(plan),
@@ -308,6 +359,26 @@ def render_readiness_md(readiness: dict[str, Any]) -> str:
             f"- **P{repair['priority']} {repair['kind']}** — {repair['advice']}  \n"
             f"  at: {where}{more}"
         )
+
+    feedback = readiness.get("mcp_feedback")
+    if feedback:
+        avg = feedback.get("avg_overall_score")
+        lines += [
+            "",
+            "## MCP feedback (from agents that actually used it)",
+            "",
+            f"- Runs critiqued: {feedback['runs_critiqued']}"
+            + (f" — avg tool-ergonomics score: {avg}/5" if avg is not None else ""),
+        ]
+        if feedback["top_recommendations"]:
+            lines += ["", "**Top recommendations:**", ""]
+            lines += [f"- {rec}" for rec in feedback["top_recommendations"]]
+        if feedback["per_tool"]:
+            lines += ["", "| tool | avg name clarity | suggestions |", "|---|---|---|"]
+            for entry in feedback["per_tool"]:
+                suggestions = "; ".join(entry["suggestions"][:2]) or "-"
+                clarity = entry["avg_name_clarity"]
+                lines.append(f"| `{entry['tool']}` | {'n/a' if clarity is None else f'{clarity}/5'} | {suggestions} |")
 
     if readiness["coverage_notes"]:
         lines += ["", "## Coverage notes", ""]

@@ -10,11 +10,13 @@ explicit uncovered work, not silence.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .hosts import CaseResult, HostAdapter
 from .setup_runtime import environment_fingerprint
 from .types import utc_now
+
+ProgressFn = Callable[[str], None]
 
 
 def select_cases(
@@ -60,15 +62,26 @@ def execute_plan(
     *,
     suites: Optional[list[str]] = None,
     approved_only: bool = False,
+    progress: ProgressFn = print,
 ) -> dict[str, Any]:
+    """Run every selected case, printing progress as each one starts/finishes.
+
+    Protocol cases finish in milliseconds so the line-per-case is mostly a
+    log; conversational cases can take real wall-clock minutes (a live
+    multi-turn LLM conversation), where visible progress is the difference
+    between "it's working" and "did it hang".
+    """
     cases = select_cases(plan, suites=suites, approved_only=approved_only)
     out_dir.mkdir(parents=True, exist_ok=True)
+    total = len(cases)
 
     results: list[CaseResult] = []
     try:
-        for case in cases:
+        for index, case in enumerate(cases, start=1):
             capable, skip_reason = _hosts_for_case(case, hosts)
+            label = f"[{index}/{total}] {case['id']} [{case.get('suite', '?')}/{case.get('kind', '?')}]"
             if not capable:
+                progress(f"{label}: skip ({skip_reason})")
                 results.append(CaseResult(
                     case_id=case["id"], suite=case.get("suite", "?"),
                     host="-", status="skip", kind=case.get("kind", ""),
@@ -76,9 +89,14 @@ def execute_plan(
                 ))
                 continue
             for host in capable:
+                progress(f"{label} on {host.id}...")
                 try:
-                    results.append(host.execute(case, out_dir))
+                    result = host.execute(case, out_dir)
+                    detail = f": {result.detail}" if result.detail else ""
+                    progress(f"  -> {result.status}{detail}")
+                    results.append(result)
                 except Exception as exc:  # noqa: BLE001 — isolate case crashes
+                    progress(f"  -> error: {exc}")
                     results.append(CaseResult(
                         case_id=case["id"], suite=case.get("suite", "?"),
                         host=host.id, status="error", kind=case.get("kind", ""),
@@ -119,6 +137,7 @@ def execute_plan_repeated(
     repeat: int = 1,
     suites: Optional[list[str]] = None,
     approved_only: bool = False,
+    progress: ProgressFn = print,
 ) -> dict[str, Any]:
     """Run the plan ``repeat`` times and aggregate variance (roadmap A7).
 
@@ -128,12 +147,15 @@ def execute_plan_repeated(
     re-open lazily between attempts, so each attempt gets a fresh session.
     """
     if repeat <= 1:
-        return execute_plan(plan, hosts, out_dir, suites=suites, approved_only=approved_only)
+        return execute_plan(
+            plan, hosts, out_dir, suites=suites, approved_only=approved_only, progress=progress
+        )
 
     attempts: list[dict[str, Any]] = []
     for attempt in range(1, repeat + 1):
+        progress(f"=== attempt {attempt}/{repeat} ===")
         result = execute_plan(
-            plan, hosts, out_dir, suites=suites, approved_only=approved_only
+            plan, hosts, out_dir, suites=suites, approved_only=approved_only, progress=progress
         )
         for entry in result["results"]:
             entry["attempt"] = attempt

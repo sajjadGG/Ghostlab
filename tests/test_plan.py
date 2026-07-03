@@ -134,6 +134,33 @@ class BuildPlanTest(unittest.TestCase):
         self.assertEqual(statuses["security-resource-injection"], "rejected")
         self.assertEqual(statuses["semantic-notes-workflow"], "proposed")
 
+    def test_generated_cases_replace_semantic_seeds_and_extend_security(self) -> None:
+        generated = [
+            {"id": "semantic-gen-alice--happy", "suite": "semantic", "kind": "conversational",
+             "title": "t", "reason": "r", "tools": ["notes_list"], "status": "proposed",
+             "execution": {"type": "scenario", "generated": True}},
+            {"id": "security-gen-bob--adv", "suite": "security", "kind": "conversational",
+             "title": "t", "reason": "r", "tools": ["notes_purge"], "status": "proposed",
+             "execution": {"type": "scenario", "generated": True}},
+        ]
+        plan = _plan(generated_cases=generated)
+        ids = {case["id"] for case in plan["cases"]}
+        self.assertIn("semantic-gen-alice--happy", ids)
+        self.assertIn("security-gen-bob--adv", ids)
+        # Per-family seed is gone once real generation covers the semantic suite.
+        self.assertNotIn("semantic-notes-workflow", ids)
+        # Contract-driven security probes are still present alongside the generated one.
+        self.assertIn("security-destructive-notes-purge", ids)
+        self.assertNotIn(
+            "semantic/security suites are placeholder seeds", "\n".join(plan["notes"])
+        )
+
+    def test_no_generated_cases_keeps_seeds_and_notes_the_gap(self) -> None:
+        plan = _plan()
+        ids = {case["id"] for case in plan["cases"]}
+        self.assertIn("semantic-notes-workflow", ids)
+        self.assertTrue(any("ghostlab plan --generate" in note for note in plan["notes"]))
+
     def test_coverage_reports_gaps_for_rejected_tools(self) -> None:
         prior = _plan()
         # Reject every case that touches notes_purge -> it becomes untested.

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from . import __version__
-from .config import ConfigError, load_persona, load_runner, load_scenario, load_target
+from .config import ConfigError, RunnerConfig, load_persona, load_runner, load_scenario, load_target
 from .inspect import inspect_target, write_inspect_artifacts
 from .orchestrator import run_scenario
 from .types import utc_now
@@ -114,6 +114,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--reject", nargs="*", default=None,
         help="Curate only: mark case ids rejected (no ids = all cases).",
     )
+    plan_parser.add_argument(
+        "--generate", action=argparse.BooleanOptionalAction, default=True,
+        help="Generate real persona-grounded scenarios for the semantic/security "
+             "suites via codex (default: on). Pass --no-generate for a fast, "
+             "free, deterministic-only plan.",
+    )
+    plan_parser.add_argument(
+        "--regenerate", action="store_true",
+        help="Force fresh persona/scenario generation even if a cached set exists "
+             "(each persona and scenario is a codex call).",
+    )
+    plan_parser.add_argument(
+        "--personas", type=int, default=None, help="Number of personas to generate (default: 2)."
+    )
+    plan_parser.add_argument(
+        "--scenarios-per-persona", type=int, default=None,
+        help="Scenarios generated per persona (default: 2).",
+    )
+    plan_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
+    )
+    plan_parser.add_argument("--model", default="", help="Model override for codex.")
 
     test_parser = sub.add_parser(
         "test", help="Execute the test plan across the spec's host adapters."
@@ -138,6 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run only cases curated to status=approved.",
     )
     test_parser.add_argument(
+        "--user-runner", type=Path, default=None,
+        help="Runner JSON for the user-emulator session in conversational cases "
+             "(default: a plain codex process with no MCP wired in — it must "
+             "never share the agent-under-test's target-MCP config).",
+    )
+    test_parser.add_argument(
         "--skip-setup", action="store_true",
         help="Skip the spec's setup commands/health checks (target already running).",
     )
@@ -157,6 +185,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict", action="store_true",
         help="Exit non-zero when review gates (e.g. min_pass_rate) fail.",
     )
+    test_parser.add_argument(
+        "--judge", action=argparse.BooleanOptionalAction, default=True,
+        help="Score conversational runs with the codex judge + tool-usability "
+             "critique (default: on). --no-judge runs conversations but grades "
+             "pass/fail only by whether they finished.",
+    )
+    test_parser.add_argument(
+        "--codex-bin", default="", help="Path to codex binary for judging (default: auto-detect)."
+    )
+    test_parser.add_argument("--model", default="", help="Model override for the codex judge.")
 
     review_spec_parser = sub.add_parser(
         "review",
@@ -674,6 +712,65 @@ def _update_spec_capabilities(spec, contract, contract_path: Path, spec_path: Pa
     }
 
 
+def _get_generated_cases(args: argparse.Namespace, spec, inspect_data: dict) -> list | None:
+    """Reuse a cached persona/scenario dataset, or generate a fresh one.
+
+    Each persona and scenario is a real codex call, so a previously written
+    dataset is reused by default (tracked in spec.test_plan.generated_dataset);
+    --regenerate forces a fresh one. Falls back to None (deterministic-only
+    plan) on any codex failure rather than aborting `plan` entirely.
+    """
+    from .codex_backend import CodexBackend, CodexError
+    from .plan_generate import (
+        DEFAULT_N_PERSONAS,
+        DEFAULT_SCENARIOS_PER_PERSONA,
+        generate_conversational_dataset,
+        generation_dir_name,
+        load_generated_cases,
+        write_conversational_dataset,
+    )
+
+    spec_dir = args.spec.resolve().parent
+    cached = (spec.test_plan or {}).get("generated_dataset")
+    if cached and not args.regenerate:
+        cached_dir = spec_dir / cached
+        cases = load_generated_cases(cached_dir)
+        if cases:
+            print(f"  reusing generated scenarios from {cached_dir} (--regenerate to refresh)")
+            return cases
+
+    n_personas = args.personas or DEFAULT_N_PERSONAS
+    scenarios_per_persona = args.scenarios_per_persona or DEFAULT_SCENARIOS_PER_PERSONA
+    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    print(
+        f"  generating {n_personas} persona(s) x {scenarios_per_persona} scenario(s) "
+        f"with codex ({backend._bin()})..."
+    )
+
+    def progress(event: dict) -> None:
+        print(f"    [{event['phase']}] {event['message']} ({event['completed']}/{event['total']})")
+
+    try:
+        dataset = generate_conversational_dataset(
+            inspect_data, backend, spec_id=spec.id,
+            n_personas=n_personas, scenarios_per_persona=scenarios_per_persona,
+            progress=progress,
+        )
+    except CodexError as exc:
+        print(f"  generation skipped (codex error): {exc}")
+        return None
+
+    out_dir = spec.workspace_dir(args.spec) / "generated" / f"{generation_dir_name()}-{spec.id}"
+    write_conversational_dataset(dataset, out_dir)
+    try:
+        relative = str(out_dir.resolve().relative_to(spec_dir.resolve()))
+    except ValueError:
+        relative = str(out_dir)
+    spec.test_plan = {**(spec.test_plan or {}), "generated_dataset": relative}
+    print(f"  wrote generated dataset to {out_dir}")
+    return load_generated_cases(out_dir)
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     from .plan import (
         build_test_plan,
@@ -720,6 +817,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
         samples = json.loads(samples_path.read_text(encoding="utf-8"))
 
     prior_plan = load_test_plan(plan_path) if plan_path.exists() else None
+    generated_cases = None
+    if args.generate:
+        generated_cases = _get_generated_cases(args, spec, inspect_data)
+
     plan = build_test_plan(
         spec.id,
         contract,
@@ -729,12 +830,14 @@ def cmd_plan(args: argparse.Namespace) -> int:
         prior_plan=prior_plan,
         contract_ref=generated_from,
         fixtures=(spec.setup or {}).get("fixtures"),
+        generated_cases=generated_cases,
     )
     write_test_plan(plan, plan_path)
     md_path = plan_path.with_suffix(".md")
     md_path.write_text(render_plan_md(plan), encoding="utf-8")
 
     spec.test_plan = {
+        **(spec.test_plan or {}),  # preserve generated_dataset set by _get_generated_cases
         "plan_file": plan_path.name,
         "generated_at": plan["generated_at"],
         "cases": len(plan["cases"]),
@@ -781,7 +884,35 @@ def cmd_test(args: argparse.Namespace) -> int:
         raise ConfigError(f"No plan at {plan_path}; run `ghostlab plan --spec {args.spec}` first.")
     plan = load_test_plan(plan_path)
 
-    hosts = build_hosts(spec, args.spec, timeout=args.timeout)
+    backend = None
+    if args.judge:
+        from .codex_backend import CodexBackend, CodexError
+
+        try:
+            candidate = CodexBackend(bin_path=args.codex_bin, model=args.model)
+            candidate._bin()  # resolve now so a missing codex degrades gracefully
+            backend = candidate
+        except CodexError as exc:
+            print(f"  (judge disabled: {exc})")
+
+    if args.user_runner is not None:
+        user_runner_config = load_runner(args.user_runner)
+    else:
+        # Zero-config default: a plain codex session with no MCP wired in, so
+        # it plays a human, never another tool-using agent. Mirrors
+        # runners/codex-user-emulator.json.
+        user_runner_config = RunnerConfig(
+            kind="process",
+            command=["codex", "--sandbox", "read-only", "-a", "never",
+                    "exec", "--skip-git-repo-check", "-"],
+            timeout_seconds=600,
+            prompt_mode="stdin",
+            parser="text",
+        )
+    hosts = build_hosts(
+        spec, args.spec, timeout=args.timeout, backend=backend,
+        user_runner_config=user_runner_config,
+    )
     if args.hosts:
         wanted = {part.strip() for part in args.hosts.split(",") if part.strip()}
         unknown = wanted - {host.id for host in hosts}
@@ -889,8 +1020,17 @@ def cmd_review_spec(args: argparse.Namespace) -> int:
     else:
         candidates = sorted(spec.workspace_dir(args.spec).glob("test/*/results.json"))
         results_file = candidates[-1] if candidates else None
+    critiques: list[dict] = []
     if results_file is not None:
         results = json.loads(results_file.read_text(encoding="utf-8"))
+        for entry in results.get("results", []):
+            critique_path = entry.get("artifacts", {}).get("critique")
+            if not critique_path:
+                continue
+            try:
+                critiques.append(json.loads(Path(critique_path).read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                pass  # a missing/corrupt critique file just drops out of the aggregate
 
     readiness = build_readiness(
         spec.id,
@@ -898,6 +1038,7 @@ def cmd_review_spec(args: argparse.Namespace) -> int:
         contract=contract,
         plan=plan,
         results=results,
+        critiques=critiques,
     )
 
     out_dir = results_file.parent if results_file is not None else spec.workspace_dir(args.spec)
@@ -920,6 +1061,15 @@ def cmd_review_spec(args: argparse.Namespace) -> int:
     if readiness["repairs"]:
         top = readiness["repairs"][0]
         print(f"  repairs: {len(readiness['repairs'])} (start with P{top['priority']} {top['kind']})")
+    feedback = readiness.get("mcp_feedback")
+    if feedback:
+        avg = feedback.get("avg_overall_score")
+        print(
+            f"  mcp feedback: {feedback['runs_critiqued']} run(s) critiqued"
+            + (f", avg tool-ergonomics {avg}/5" if avg is not None else "")
+        )
+        if feedback["top_recommendations"]:
+            print(f"  -> {feedback['top_recommendations'][0]}")
     for note in readiness["coverage_notes"][:3]:
         print(f"  note: {note}")
     print(f"  wrote {json_path}")
