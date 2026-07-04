@@ -26,12 +26,24 @@ class Action:
     text: str = ""                  # visible label (click_text) or value (fill)
     selector: str = ""             # CSS selector (click / fill target)
     note: str = ""
+    # Alternate labels to try in order (widgets rename controls: a "submit"
+    # intent must find "Submit for evaluation"). Includes `text` as the first.
+    candidates: list[str] = field(default_factory=list)
+
+    def click_labels(self) -> list[str]:
+        seen: list[str] = []
+        for label in [self.text, *self.candidates]:
+            if label and label not in seen:
+                seen.append(label)
+        return seen
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"op": self.op}
         for key in ("text", "selector", "note"):
             if getattr(self, key):
                 out[key] = getattr(self, key)
+        if self.candidates:
+            out["candidates"] = self.candidates
         return out
 
 
@@ -97,14 +109,15 @@ def plan_intent(intent: UiIntent) -> IntentPlan:
 
 
 def _click_one_of(labels: tuple, override: Any) -> Action:
-    """Click an explicit override label, else the first known control label.
+    """Click an explicit override label, else the first control label that exists.
 
-    The driver resolves the first label that exists; the remaining labels ride
-    along as a fallback note so a single rename doesn't break the plan.
+    All known labels ride along as ``candidates`` so the driver can try each
+    (exact, then substring) — a widget that renames "Submit" to "Submit for
+    evaluation" still resolves without editing the plan.
     """
     if override:
-        return Action(op="click_text", text=str(override))
-    return Action(op="click_text", text=labels[0], note="fallbacks: " + ", ".join(labels[1:]))
+        return Action(op="click_text", text=str(override), candidates=[str(override), *labels])
+    return Action(op="click_text", text=labels[0], candidates=list(labels))
 
 
 def plan_intents(intents: list[UiIntent]) -> list[IntentPlan]:

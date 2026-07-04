@@ -24,28 +24,61 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..config import load_runner
+from ..termcolor import assistant, muted, tool, user, verdict, widget
 from .base import CaseResult, HostAdapter, HostCapabilities
+
+
+def _tool_status_glyph(status: str) -> str:
+    return {"completed": "✓", "failed": "✗"}.get(status, "•")
 
 
 def _print_turn_progress(prefix: str) -> Callable[[Any], None]:
     """Live per-turn progress callback for `orchestrator.run_scenario`.
 
     Turn prompts (`aut_prompt`/`user_emulator_prompt`) carry the full prompt
-    text and are noisy; only the actual conversation turns are printed.
+    text and are noisy; only the actual conversation turns are printed. The
+    emulated user, the agent-under-test, and each tool call get their own color
+    and line so a semantic run reads like a real transcript at a glance.
     """
+    pad = " " * len(prefix)
 
     def callback(event: Any) -> None:
         turn = event.data.get("turn")
         if event.type == "user_message":
-            content = str(event.data.get("content", "")).replace("\n", " ")[:160]
-            print(f"{prefix}turn {turn} user: {content}")
+            content = str(event.data.get("content", "")).replace("\n", " ")[:200]
+            print(f"{prefix}{user(f'turn {turn} user')} {user(content)}")
         elif event.type == "aut_result":
-            output = str(event.data.get("output", "")).replace("\n", " ")[:160]
-            tool_calls = event.data.get("tool_calls") or []
-            tools = ", ".join(call.get("tool", "?") for call in tool_calls) or "-"
-            print(f"{prefix}turn {turn} assistant: {output}  [tools: {tools}]")
+            output = str(event.data.get("output", "")).replace("\n", " ")[:200]
+            print(f"{prefix}{assistant(f'turn {turn} assistant')} {assistant(output)}")
+            for call in event.data.get("tool_calls") or []:
+                name = f"{call.get('server', '?')}/{call.get('tool', '?')}"
+                status = call.get("status", "?")
+                glyph = _tool_status_glyph(status)
+                line = f"{pad}  {glyph} {name}"
+                if status == "failed":
+                    line = tool(line) + muted(f"  ({status})")
+                else:
+                    line = tool(line)
+                print(line)
+        elif event.type == "widgets_shown":
+            names = ", ".join(w.get("tool", "?") for w in event.data.get("widgets") or [])
+            print(f"{pad}  {widget(f'▣ widget shown → user can fill: {names}')}")
+        elif event.type == "widget_interaction":
+            outcome = event.data.get("outcome") or {}
+            calls = outcome.get("server_tool_calls") or []
+            follow = outcome.get("follow_up_messages") or []
+            bits = []
+            if calls:
+                names = ", ".join(c.get("tool") or c.get("method", "?") for c in calls)
+                bits.append(f"{len(calls)} backend call(s): {names}")
+            if follow:
+                bits.append("submitted follow-up")
+            detail = "; ".join(bits) or ("rendered" if outcome.get("rendered") else "no-op")
+            tool_name = outcome.get("tool", "?")
+            print(f"{pad}  {widget(f'▣ widget driven [{tool_name}]: {detail}')}")
         elif event.type == "run_finished":
-            print(f"{prefix}-> {event.data.get('status')}")
+            status = event.data.get("status", "?")
+            print(f"{prefix}{muted('→')} {verdict(status, status)}")
 
     return callback
 
@@ -67,6 +100,7 @@ class RunnerHost(HostAdapter):
         backend: Optional[Any] = None,
         show_progress: bool = True,
         user_runner_config: Optional[Any] = None,
+        apps_mode: bool = False,
     ) -> None:
         self.id = host_id
         self.kind = kind
@@ -74,6 +108,7 @@ class RunnerHost(HostAdapter):
         self.spec_path = spec_path
         self.backend = backend
         self.show_progress = show_progress
+        self.apps_mode = apps_mode
         # The user-emulator config is deliberately *not* derived from
         # host_config: the host's config_ref wires the target MCP into the
         # agent-under-test session, and the user emulator must never have
@@ -160,8 +195,10 @@ class RunnerHost(HostAdapter):
         prefix = f"    [{case['id']}] "
         callback = _print_turn_progress(prefix) if self.show_progress else None
         if self.show_progress:
+            from ..termcolor import heading
+
             who = persona.name if persona else "unnamed user"
-            print(f"{prefix}goal: {scenario.goal!r} (persona: {who})")
+            print(f"{prefix}{heading('goal:')} {scenario.goal!r} {muted(f'(persona: {who})')}")
 
         result = run_scenario(
             target=target,
@@ -171,6 +208,8 @@ class RunnerHost(HostAdapter):
             output_dir=out_dir,
             persona=persona,
             event_callback=callback,
+            apps_mode=self.apps_mode,
+            apps_backend=self.backend,
         )
         return self._judge_and_critique(
             case, scenario, result, prefix, done, capabilities, inspect_data
@@ -238,7 +277,11 @@ class RunnerHost(HostAdapter):
         # so a "fail" next to an all-clear-sounding summary is never a mystery.
         gate_note = f" [gates: {', '.join(verdict['gates'])}]" if verdict.get("gates") else ""
         if self.show_progress:
-            print(f"{prefix}judge: {verdict['verdict']} — {verdict['judge'].get('summary', '')}{gate_note}")
+            from ..termcolor import verdict as color_verdict
+
+            v = verdict["verdict"]
+            summary = verdict["judge"].get("summary", "")
+            print(f"{prefix}judge: {color_verdict(v, v)} — {summary}{muted(gate_note)}")
 
         try:
             critique = critique_run(result.run_dir, self.backend, inspect=inspect_data)

@@ -40,6 +40,18 @@ NOTIF_TOOL_INPUT = "ui/notifications/tool-input"
 NOTIF_TOOL_RESULT = "ui/notifications/tool-result"
 NOTIF_HOST_CONTEXT_CHANGED = "ui/notifications/host-context-changed"
 
+# Widget → host requests that must be relayed to the real MCP server (a real
+# host forwards these over the MCP transport and returns the server's result).
+# `tools/call` is what a Submit / feedback button fires; `resources/read` lets a
+# widget lazy-load extra resources. Everything else (display-mode, open-link) is
+# host-local and safely acknowledged.
+SERVER_RELAY_METHODS = ("tools/call", "resources/read")
+
+# Widget → host messages that belong to the *conversation*, not the server: a
+# real host feeds these to the model. We capture them so the orchestrator can
+# thread them back into the dual-agent transcript.
+UI_MESSAGE = "ui/message"
+
 DEFAULT_HOST_INFO = {"name": "ghostlab", "version": "0.1.0"}
 DEFAULT_HOST_CONTEXT = {"theme": "light", "displayMode": "inline"}
 
@@ -63,6 +75,12 @@ def build_initialize_result(
 # --------------------------------------------------------------------------- #
 # The widget HTML and data are NOT inlined (widget bundles contain `</script>`);
 # the renderer injects them via `window.__ghostlabMount(html, args, result)`.
+#
+# When the renderer registers a `window.__ghostlabRelay(method, params)` binding
+# (a real MCP client on the Python side), the bridge forwards the widget's
+# `tools/call` / `resources/read` requests to it and returns the server's actual
+# result — so a Submit button truly hits the backend. Without a relay it degrades
+# to the old behavior (empty ack), keeping the browser-free/no-server path alive.
 _HOST_PAGE_TEMPLATE = """<!doctype html>
 <html><head><meta charset="utf-8"><style>html,body{{margin:0;padding:0}}</style></head>
 <body>
@@ -71,21 +89,39 @@ _HOST_PAGE_TEMPLATE = """<!doctype html>
 <script>
 const PROTOCOL = {protocol};
 const INIT_RESULT = {init_result};
+const RELAY_METHODS = {relay_methods};
 window.__ghostlabTrace = [];
 function __record(direction, msg) {{ window.__ghostlabTrace.push({{direction, msg}}); }}
 window.__ghostlabMount = function (html, args, result) {{
   const frame = document.getElementById("ghostlab-widget");
   function post(msg) {{ frame.contentWindow.postMessage(msg, "*"); __record("host->widget", msg); }}
-  window.addEventListener("message", function (event) {{
+  window.addEventListener("message", async function (event) {{
     const msg = event.data;
     if (!msg || msg.jsonrpc !== "2.0") return;
     __record("widget->host", msg);
-    if (msg.method === "{ui_initialize}") {{
+    const method = msg.method;
+    const isRequest = msg.id !== undefined && msg.id !== null && typeof method === "string";
+    if (method === "{ui_initialize}") {{
       post({{jsonrpc: "2.0", id: msg.id, result: INIT_RESULT}});
-    }} else if (msg.method === "{notif_initialized}") {{
+      return;
+    }}
+    if (method === "{notif_initialized}") {{
       if (args) post({{jsonrpc: "2.0", method: "{notif_tool_input}", params: {{arguments: args}}}});
       if (result) post({{jsonrpc: "2.0", method: "{notif_tool_result}", params: result}});
-    }} else if (msg.id !== undefined && msg.id !== null && typeof msg.method === "string") {{
+      return;
+    }}
+    if (isRequest && RELAY_METHODS.indexOf(method) !== -1 && window.__ghostlabRelay) {{
+      // Forward to the real MCP server via the Python relay binding.
+      try {{
+        const relayed = await window.__ghostlabRelay(method, msg.params || {{}});
+        post({{jsonrpc: "2.0", id: msg.id, result: relayed}});
+      }} catch (err) {{
+        post({{jsonrpc: "2.0", id: msg.id,
+               error: {{code: -32000, message: String((err && err.message) || err)}}}});
+      }}
+      return;
+    }}
+    if (isRequest) {{
       // Acknowledge any other widget request (display-mode, open-link, ...).
       post({{jsonrpc: "2.0", id: msg.id, result: {{}}}});
     }}
@@ -103,6 +139,7 @@ def build_host_page(width: int = 640, height: int = 560) -> str:
         height=int(height),
         protocol=json.dumps(PROTOCOL_VERSION),
         init_result=json.dumps(build_initialize_result()),
+        relay_methods=json.dumps(list(SERVER_RELAY_METHODS)),
         ui_initialize=UI_INITIALIZE,
         notif_initialized=NOTIF_INITIALIZED,
         notif_tool_input=NOTIF_TOOL_INPUT,
@@ -151,6 +188,46 @@ def classify_transcript(raw: list[dict]) -> list[BridgeMessage]:
             continue
         out.append(_classify_one(entry.get("direction", "?"), msg))
     return out
+
+
+def _raw_widget_messages(raw: list[dict], method: str) -> list[dict]:
+    """Pull the full params of widget→host messages with the given method."""
+    out: list[dict] = []
+    for entry in raw or []:
+        if not isinstance(entry, dict) or entry.get("direction") != "widget->host":
+            continue
+        msg = entry.get("msg")
+        if isinstance(msg, dict) and msg.get("method") == method:
+            out.append(msg.get("params") or {})
+    return out
+
+
+def extract_widget_messages(raw: list[dict]) -> list[dict]:
+    """`ui/message` follow-ups the widget sent (e.g. a submitted essay).
+
+    A real host injects these into the conversation as the user's next turn.
+    Returns each message's params ``{role, content}``.
+    """
+    return _raw_widget_messages(raw, UI_MESSAGE)
+
+
+def extract_model_context_updates(raw: list[dict]) -> list[dict]:
+    """`ui/update-model-context` payloads the widget pushed to the host."""
+    return _raw_widget_messages(raw, UPDATE_MODEL_CONTEXT)
+
+
+def widget_message_text(message: dict) -> str:
+    """Flatten a `ui/message` params block to plain text."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for block in content or []:
+        if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+            parts.append(str(block["text"]))
+        elif isinstance(block, str):
+            parts.append(block)
+    return "\n".join(parts).strip()
 
 
 def handshake_completed(messages: list[BridgeMessage]) -> bool:

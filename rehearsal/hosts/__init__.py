@@ -30,6 +30,7 @@ def build_hosts(
     backend: Any | None = None,
     show_progress: bool = True,
     user_runner_config: Any | None = None,
+    apps_mode: bool = False,
 ) -> list[HostAdapter]:
     """Instantiate adapters for a spec's `hosts` section.
 
@@ -54,7 +55,8 @@ def build_hosts(
             adapters.append(
                 RunnerHost(host_id, kind, host, spec_path, backend=backend,
                           show_progress=show_progress,
-                          user_runner_config=user_runner_config)
+                          user_runner_config=user_runner_config,
+                          apps_mode=apps_mode)
             )
     if not any(isinstance(adapter, DirectMcpHost) for adapter in adapters):
         adapters.insert(0, DirectMcpHost("direct-mcp", target, timeout=timeout))

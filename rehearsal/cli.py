@@ -166,6 +166,13 @@ def build_parser() -> argparse.ArgumentParser:
              "never share the agent-under-test's target-MCP config).",
     )
     test_parser.add_argument(
+        "--apps-mode", action="store_true",
+        help="MCP Apps host: render the ui:// widgets the agent opens in a headless "
+             "browser and let the emulated user operate them for real — DOM actions "
+             "fire real backend tools/calls and a Submit's follow-up flows back into "
+             "the conversation. Requires the apps extra (pip install 'ghostlab[apps]').",
+    )
+    test_parser.add_argument(
         "--skip-setup", action="store_true",
         help="Skip the spec's setup commands/health checks (target already running).",
     )
@@ -459,6 +466,18 @@ def build_parser() -> argparse.ArgumentParser:
     ui_parser.add_argument("--port", type=int, default=8501, help="Port to serve the UI on.")
     ui_parser.add_argument(
         "--server-address", default="localhost", help="Address Streamlit binds to."
+    )
+
+    dashboard_parser = sub.add_parser(
+        "dashboard", help="Build a standalone HTML dashboard for a `ghostlab test` run."
+    )
+    dashboard_parser.add_argument(
+        "run_dir",
+        type=Path,
+        help="A test-run directory (containing results.json), e.g. .ghostlab/test/<timestamp>-<id>.",
+    )
+    dashboard_parser.add_argument(
+        "--open", action="store_true", help="Open the dashboard in the default browser when done."
     )
 
     db_parser = sub.add_parser("db", help="Manage the SQLite persistence database.")
@@ -912,6 +931,7 @@ def cmd_test(args: argparse.Namespace) -> int:
     hosts = build_hosts(
         spec, args.spec, timeout=args.timeout, backend=backend,
         user_runner_config=user_runner_config,
+        apps_mode=args.apps_mode,
     )
     if args.hosts:
         wanted = {part.strip() for part in args.hosts.split(",") if part.strip()}
@@ -984,6 +1004,13 @@ def cmd_test(args: argparse.Namespace) -> int:
         print(f"  wrote {variance_path}")
     print(f"  wrote {results_json}")
     print(f"  wrote {results_md}")
+    try:
+        from .dashboard import build_dashboard
+
+        dashboard_path = build_dashboard(out_dir)
+        print(f"  wrote {dashboard_path}")
+    except Exception as exc:  # noqa: BLE001 — dashboard is a convenience, never fail the run
+        print(f"  (dashboard skipped: {exc})")
 
     gate_failures = evaluate_gates(results, (spec.review or {}).get("gates", {}))
     for failure in gate_failures:
@@ -1731,9 +1758,27 @@ def cmd_ui(args: argparse.Namespace) -> int:
     return subprocess.call(command)
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    from .dashboard import build_dashboard
+
+    run_dir = args.run_dir
+    if not (run_dir / "results.json").exists():
+        raise ConfigError(
+            f"No results.json in {run_dir}; pass a `ghostlab test` run directory."
+        )
+    path = build_dashboard(run_dir)
+    print(f"Wrote {path}")
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(path.resolve().as_uri())
+    return 0
+
+
 _HANDLERS.update(
     {
         "init": cmd_init,
+        "dashboard": cmd_dashboard,
         "discover": cmd_discover,
         "plan": cmd_plan,
         "test": cmd_test,

@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from .config import PersonaConfig, RunnerConfig, ScenarioConfig, TargetConfig
 from .logging import JsonlLogger
+from .mcp_apps import widgets_from_tool_calls
 from .mcp_config import write_mcp_servers_config
 from .prompts import build_aut_prompt, build_user_emulator_prompt
 from .report import write_markdown_report
@@ -51,6 +52,8 @@ def run_scenario(
     case_public_id: str | None = None,
     inspection_public_id: str | None = None,
     profile_public_id: str | None = None,
+    apps_mode: bool = False,
+    apps_backend: "Any | None" = None,
 ) -> RunResult:
     run_id = build_run_id(target.id, scenario.id)
     run_dir = output_dir / run_id
@@ -131,6 +134,22 @@ def run_scenario(
     user_message = scenario.opening_message
     aut_stateful = getattr(aut_runner, "stateful", False)
 
+    # MCP Apps mode: a live host that renders the widgets the agent opens and
+    # lets the user operate them for real (DOM actions -> backend tools/calls,
+    # Submit -> a follow-up message back into the conversation). Opt-in; a
+    # connection failure degrades to the text-only widget flow.
+    apps_session = None
+    persona_note = (persona.summary if persona else "") or scenario.persona
+    if apps_mode:
+        try:
+            from .apps_host.live import AppsHostSession
+
+            apps_session = AppsHostSession.connect(target, backend=apps_backend, out_dir=run_dir)
+            emit(Event.create("apps_mode_started", ui_tools=len(apps_session.ui_map)))
+        except Exception as exc:  # noqa: BLE001 — never abort the run over apps setup
+            emit(Event.create("apps_mode_unavailable", reason=str(exc)))
+            apps_session = None
+
     for turn_index in range(1, scenario.max_turns + 1):
         transcript.append(TranscriptTurn(role="user", content=user_message))
         emit(Event.create("user_message", turn=turn_index, content=user_message))
@@ -187,7 +206,38 @@ def run_scenario(
 
         transcript.append(TranscriptTurn(role="assistant", content=aut_message))
 
-        user_prompt = build_user_emulator_prompt(scenario, transcript, aut_message, persona)
+        widgets = widgets_from_tool_calls(tool_calls)
+        if widgets:
+            emit(Event.create("widgets_shown", turn=turn_index, widgets=widgets))
+
+        # If the agent opened a widget and apps mode is on, the user operates it
+        # for real. A Submit that emits a follow-up message IS the user's next
+        # turn — they "spoke" through the widget — so we skip the text emulator.
+        widget_follow_up = ""
+        if apps_session is not None and tool_calls:
+            try:
+                outcomes = apps_session.drive_turn(tool_calls, scenario.goal, persona_note)
+            except Exception as exc:  # noqa: BLE001 — widget failure must not kill the run
+                outcomes = []
+                emit(Event.create("widget_interaction_error", turn=turn_index, reason=str(exc)))
+            follow_ups: list[str] = []
+            for outcome in outcomes:
+                emit(Event.create("widget_interaction", turn=turn_index, outcome=outcome.to_json()))
+                text = outcome.follow_up_text()
+                if text:
+                    follow_ups.append(text)
+            widget_follow_up = "\n\n".join(follow_ups)
+
+        if widget_follow_up:
+            # The next loop iteration emits the user_message (with this content);
+            # mark that its source was the widget, not the text emulator.
+            emit(Event.create("widget_follow_up", turn=turn_index, content=widget_follow_up))
+            user_message = widget_follow_up
+            continue
+
+        user_prompt = build_user_emulator_prompt(
+            scenario, transcript, aut_message, persona, widgets=widgets
+        )
         emit(Event.create("user_emulator_prompt", turn=turn_index, prompt=user_prompt))
         user_result = user_runner.run_turn(user_prompt)
         user_message_out = redact_host_noise(user_result.output)
@@ -214,6 +264,9 @@ def run_scenario(
         user_message = next_message
     else:
         status = "max_turns_reached"
+
+    if apps_session is not None:
+        apps_session.close()
 
     all_tool_calls = [call for turn in sorted(tool_calls_by_turn) for call in tool_calls_by_turn[turn]]
     emit(

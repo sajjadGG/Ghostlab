@@ -293,8 +293,10 @@ class TurnProgressCallbackTest(unittest.TestCase):
             callback(Event.create("aut_result", turn=1, output="hi back",
                                   tool_calls=[{"server": "cortex", "tool": "notes_list"}]))
             callback(Event.create("run_finished", status="completed"))
-        self.assertTrue(any("user: hello there" in line for line in lines))
-        self.assertTrue(any("assistant: hi back" in line and "notes_list" in line for line in lines))
+        self.assertTrue(any("user" in line and "hello there" in line for line in lines))
+        self.assertTrue(any("assistant" in line and "hi back" in line for line in lines))
+        # Tool calls now render on their own line, each with server/tool.
+        self.assertTrue(any("cortex/notes_list" in line for line in lines))
         self.assertTrue(any("completed" in line for line in lines))
 
 

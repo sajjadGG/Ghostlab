@@ -102,6 +102,76 @@ def tool_result_ui_ref(tool_result: Optional[dict]) -> Optional[str]:
     return ui_resource_uri(tool_result.get("_meta"))
 
 
+# Tool-name shapes that produce an interactive widget even when the result's
+# `_meta` omits an explicit `ui://` ref (some Cortex `views_create_*` results
+# carry only a `viewUUID`, with the renderable payload in structured_content).
+_UI_TOOL_HINTS = ("views_create_", "_practice", "lesson_start", "placement_create", "initial_setup", "mock_exam")
+
+
+def _looks_ui_producing(tool_name: str) -> bool:
+    name = (tool_name or "").lower()
+    return any(hint in name for hint in _UI_TOOL_HINTS)
+
+
+def widgets_from_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract the interactive widgets an agent's tool calls put in front of the user.
+
+    A conversational user-emulator is text-only: it never sees the rendered
+    ``ui://`` widget, so it cannot know it was just asked to (say) write a timed
+    essay. This surfaces, from a turn's captured tool calls, the widgets that
+    appeared and the *content a human would read and act on* — the prompt, word
+    limit, options, rubric — pulled from the result's ``structured_content`` and
+    text blocks. The orchestrator feeds this to the emulator so it can respond as
+    a real user filling the widget in, not blind.
+    """
+    widgets: list[dict[str, Any]] = []
+    for call in tool_calls or []:
+        if call.get("status") not in (None, "completed"):
+            continue
+        result = call.get("result")
+        tool_name = call.get("tool", "?")
+        uri = tool_result_ui_ref(result)
+        if uri is None and not _looks_ui_producing(tool_name):
+            continue
+        widgets.append(
+            {
+                "tool": tool_name,
+                "resource_uri": uri,
+                "fields": _widget_fields(result),
+                "text": _widget_text(result),
+            }
+        )
+    return widgets
+
+
+def _widget_fields(result: Optional[dict]) -> dict[str, Any]:
+    """The human-relevant contents of a widget, from its structured payload."""
+    if not isinstance(result, dict):
+        return {}
+    structured = result.get("structured_content")
+    if not isinstance(structured, dict):
+        return {}
+    # Drop internal plumbing keys; keep what a user would actually read/answer.
+    noise = {
+        "sessionUUID", "viewUUID", "sourcePath", "viewPath", "viewTool",
+        "sourceResourceUri", "resourceUri", "views", "source", "selected",
+    }
+    return {k: v for k, v in structured.items() if k not in noise}
+
+
+def _widget_text(result: Optional[dict]) -> str:
+    """Concatenated visible text blocks from a tool result's ``content``."""
+    if not isinstance(result, dict):
+        return ""
+    parts: list[str] = []
+    for block in result.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # Fetched resource model
 # --------------------------------------------------------------------------- #

@@ -95,11 +95,16 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(reveal.actions[0].text, "Reveal answer")
         submit = plan_intent(UiIntent(type="submit"))
         self.assertEqual(submit.actions[0].text, "Check")
-        self.assertIn("fallbacks", submit.actions[0].note)
+        # All known labels ride along as candidates so a renamed control
+        # ("Submit for evaluation") still resolves.
+        self.assertIn("Submit", submit.actions[0].candidates)
+        self.assertEqual(submit.actions[0].click_labels()[0], "Check")
 
     def test_submit_override(self):
         plan = plan_intent(UiIntent(type="submit", target="Finish"))
         self.assertEqual(plan.actions[0].text, "Finish")
+        # The override leads, but the defaults remain as fallbacks.
+        self.assertIn("Check", plan.actions[0].candidates)
 
     def test_plan_intents_sequence(self):
         plans = plan_intents([UiIntent(type="reveal"), UiIntent(type="submit")])
