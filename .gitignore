@@ -222,3 +222,7 @@ __marimo__/
 
 # Streamlit UI workspace (generated)
 ghostlab_workspace/
+
+# ghostlab spec-flow local artifacts
+.ghostlab/
+ghostlab.sqlite3

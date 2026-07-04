@@ -13,11 +13,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..mcp_apps import UiIntent
 from . import protocol
 from .executor import IntentPlan, plan_intents
+
+# A relay turns a widget's `tools/call` / `resources/read` request into a real
+# MCP call and returns the server's result. Signature: (method, params) -> result.
+Relay = Callable[[str, dict], dict]
 
 # Selectors counted as "interactive controls" for render assertions.
 _INTERACTIVE_SELECTOR = "button, [role='button'], a[href], input, textarea, select, [draggable='true']"
@@ -51,6 +55,13 @@ class RenderResult:
     final_screenshot_path: Optional[str] = None
     final_body_text: str = ""
     intent_log: list[dict] = field(default_factory=list)
+    # Real MCP calls the widget triggered through the bridge (Submit/feedback → backend).
+    server_tool_calls: list[dict] = field(default_factory=list)
+    # `ui/message` follow-ups the widget sent back into the conversation (e.g. a
+    # submitted essay) and `ui/update-model-context` updates — a real host feeds
+    # these to the model as the user's next turn / added context.
+    widget_messages: list[dict] = field(default_factory=list)
+    model_context_updates: list[dict] = field(default_factory=list)
     error: Optional[str] = None
 
     def summary(self) -> dict[str, Any]:
@@ -60,6 +71,7 @@ class RenderResult:
             "console_errors": self.console_errors,
             "body_text": self.body_text,
             "interactive_count": self.interactive_count,
+            "server_tool_calls": self.server_tool_calls,
         }
 
 
@@ -70,6 +82,7 @@ def render_widget(
     tool_result: Optional[dict] = None,
     intents: Optional[list[UiIntent]] = None,
     screenshot_path: Optional[Path] = None,
+    relay: Optional[Relay] = None,
     width: int = 640,
     height: int = 560,
     settle_ms: int = 2500,
@@ -79,8 +92,12 @@ def render_widget(
 
     ``tool_input`` are the tool-call arguments; ``tool_result`` is the MCP tool
     result the widget renders from. If ``intents`` are given, they are executed
-    in order after the initial render. Never raises for a widget-side failure —
-    the failure is captured on the result; only a missing browser raises.
+    in order after the initial render. When ``relay`` is supplied, the widget's
+    ``tools/call`` / ``resources/read`` requests are forwarded to it (a live MCP
+    client) and the real server results flow back to the widget — so clicking
+    Submit actually mutates backend state. Every such call is recorded on
+    ``result.server_tool_calls``. Never raises for a widget-side failure — the
+    failure is captured on the result; only a missing browser raises.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -104,6 +121,12 @@ def render_widget(
             page.on("requestfailed", lambda r: result.network_failures.append(
                 "%s %s" % (r.url, (r.failure or ""))))
 
+            if relay is not None:
+                page.expose_binding(
+                    "__ghostlabRelay",
+                    lambda source, method, params: _relay_call(relay, result, method, params),
+                )
+
             page.set_content(host_page, wait_until="load")
             page.evaluate(
                 "([h,a,r]) => window.__ghostlabMount(h,a,r)",
@@ -115,11 +138,6 @@ def render_widget(
             result.body_text = _safe_text(frame)
             result.interactive_count = frame.locator(_INTERACTIVE_SELECTOR).count() if frame else 0
 
-            raw_trace = page.evaluate("window.__ghostlabTrace") or []
-            messages = protocol.classify_transcript(raw_trace)
-            result.transcript = [m.to_json() for m in messages]
-            result.handshake_completed = protocol.handshake_completed(messages)
-
             if screenshot_path is not None:
                 screenshot_path = Path(screenshot_path)
                 screenshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -128,7 +146,7 @@ def render_widget(
 
             if intents and frame is not None:
                 _run_intents(frame, intents, result, action_timeout_ms)
-                page.wait_for_timeout(400)  # let the widget settle after actions
+                page.wait_for_timeout(600)  # let the widget settle / emit after actions
                 result.final_body_text = _safe_text(frame)
                 if result.screenshot_path is not None:
                     final_path = Path(result.screenshot_path).with_name("widget-final.png")
@@ -137,12 +155,46 @@ def render_widget(
             else:
                 result.final_body_text = result.body_text
 
+            # Read the trace *after* interactions so a Submit's follow-up message
+            # and any post-click server calls are captured.
+            raw_trace = page.evaluate("window.__ghostlabTrace") or []
+            messages = protocol.classify_transcript(raw_trace)
+            result.transcript = [m.to_json() for m in messages]
+            result.handshake_completed = protocol.handshake_completed(messages)
+            result.widget_messages = protocol.extract_widget_messages(raw_trace)
+            result.model_context_updates = protocol.extract_model_context_updates(raw_trace)
+
             browser.close()
     except RenderUnavailable:
         raise
     except Exception as exc:  # browser/launch failure
         result.error = str(exc)
     return result
+
+
+def _relay_call(relay: Relay, result: RenderResult, method: str, params: dict) -> dict:
+    """Bridge a widget request to the live MCP server and record it.
+
+    Runs inside Playwright's driver loop (the widget awaits this). Any relay
+    failure is surfaced to the widget as a JSON-RPC error (raised here) *and*
+    recorded, so a broken Submit is visible in the transcript rather than silent.
+    """
+    params = params or {}
+    record: dict[str, Any] = {"method": method}
+    if method == "tools/call":
+        record["tool"] = params.get("name", "?")
+        record["arguments"] = params.get("arguments") or {}
+    elif method == "resources/read":
+        record["uri"] = params.get("uri", "?")
+    try:
+        payload = relay(method, params)
+        record["result"] = payload
+        result.server_tool_calls.append(record)
+        return payload
+    except Exception as exc:  # noqa: BLE001 — surfaced to the widget as an error
+        record["error"] = str(exc)[:300]
+        result.server_tool_calls.append(record)
+        raise
 
 
 def _on_console(result: RenderResult, message: Any) -> None:
@@ -191,14 +243,27 @@ def _run_plan(frame: Any, plan: IntentPlan, result: RenderResult, timeout_ms: in
 
 def _run_action(frame: Any, action: Any, timeout_ms: int) -> None:
     if action.op == "click_text":
-        # Prefer a button with this accessible name; fall back to any text node.
-        button = frame.get_by_role("button", name=action.text, exact=True)
-        if button.count() > 0:
-            button.first.click(timeout=timeout_ms)
-        else:
-            frame.get_by_text(action.text, exact=True).first.click(timeout=timeout_ms)
+        # Real widgets label controls loosely ("Submit for evaluation" for a
+        # "Submit" intent), so try each candidate label by accessible name
+        # (exact, then substring), then fall back to any text node.
+        labels = action.click_labels() if hasattr(action, "click_labels") else [action.text]
+        for exact in (True, False):
+            for label in labels:
+                button = frame.get_by_role("button", name=label, exact=exact)
+                if button.count() > 0:
+                    button.first.click(timeout=timeout_ms)
+                    return
+        frame.get_by_text(labels[0], exact=False).first.click(timeout=timeout_ms)
     elif action.op == "fill":
-        frame.locator(action.selector).first.fill(action.text, timeout=timeout_ms)
+        target = frame.locator(action.selector).first
+        target.fill(action.text, timeout=timeout_ms)
+        # Some widgets only enable Submit on input/change events; nudge them.
+        try:
+            target.dispatch_event("input")
+            target.dispatch_event("change")
+            target.blur()
+        except Exception:  # noqa: BLE001 — best-effort event nudge
+            pass
     elif action.op == "click":
         frame.locator(action.selector).first.click(timeout=timeout_ms)
     else:  # pragma: no cover
