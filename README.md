@@ -25,9 +25,12 @@ runs the dual-agent loop, scores each run, and compares runs for regressions.
 python3.13 -m venv .venv
 .venv/bin/pip install -e .            # add '.[ui]' for the web UI, '.[apps]' for widget rendering
 
-# 1. Understand a target MCP (spec-driven flow)
-ghostlab init --target targets/cortex-local.json     # writes ghostlab.yaml
-ghostlab discover --spec ghostlab.yaml               # inventory + contract lint + apps probe
+# 1. Create a self-contained job (guided wizard), then run the loop by name
+ghostlab create                                      # -> jobs/<name>/ (job.yaml, workspace/, runs/)
+ghostlab discover --job cortex-eval                  # inventory + contract lint + apps probe
+ghostlab plan     --job cortex-eval                  # coverage-driven test-plan.yaml
+ghostlab test     --job cortex-eval                  # execute across host adapters
+ghostlab review   --job cortex-eval                  # readiness report / release gate
 
 # 2. Drive it with two agents (one under test, one emulating a user)
 ghostlab run --target targets/cortex-local.json --scenario scenarios/cortex-onboarding-status.json
@@ -42,7 +45,8 @@ ghostlab apps-render --target targets/cortex-local.json --tool views_generate_se
 
 | Stage | Commands | What you get |
 | --- | --- | --- |
-| **Spec** | `init`, `discover`, `plan`, `test`, `review` | A curated `ghostlab.yaml` per MCP, a deterministic `contract.json` (schema lint, risk labels, MCP Apps metadata checks), a coverage-driven `test-plan.yaml`, gated multi-host execution results, and a readiness report with prioritized repairs |
+| **Job** | `create` | A self-contained `jobs/<name>/` folder holding one `job.yaml` (all config + editable defaults + prompt overrides), its `test-plan.yaml`, `workspace/` artifacts, and `runs/`. Job commands take `--job <name>` (or auto-detect `job.yaml` in the cwd) |
+| **Spec** | `init`, `discover`, `plan`, `test`, `review` | A curated `job.yaml`/`ghostlab.yaml` per MCP, a deterministic `contract.json` (schema lint, risk labels, MCP Apps metadata checks), a coverage-driven `test-plan.yaml`, gated multi-host execution results, and a readiness report with prioritized repairs |
 | **Understand** | `inspect`, `profile` | Tool/resource/prompt dump + a capability profile, with lint findings |
 | **Generate** | `generate-scenarios`, `generate-personas`, `generate-dataset`, `review-dataset` | Reusable persona × scenario datasets you can curate |
 | **Run** | `run`, `run-dataset` | Multi-turn dual-agent transcripts with structured tool-call capture |

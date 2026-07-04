@@ -105,12 +105,12 @@ def _digest(inspect: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _build_prompt(digest: str, families: list[str]) -> str:
-    return f"""You are analyzing an MCP (Model Context Protocol) server to produce a capability profile.
+# Placeholders: {digest} {families}
+PROFILE_TEMPLATE = """You are analyzing an MCP (Model Context Protocol) server to produce a capability profile.
 
 {digest}
 
-The tool name families present are: {', '.join(families)}.
+The tool name families present are: {families}.
 
 Produce a JSON object with:
 - domain_summary: 1-3 sentences on what this MCP is for and who would use it.
@@ -118,6 +118,17 @@ Produce a JSON object with:
 - workflows: 3-6 realistic multi-step workflows a client agent would perform with these tools. Each `steps` array lists tool names IN ORDER. Only use tool names that appear in the tool list above. Do NOT invent tools, and do not reference the non-exposed tools.
 
 Output only the JSON object."""
+
+
+def _build_prompt(digest: str, families: list[str]) -> str:
+    from . import prompts
+
+    return prompts.render(
+        "profile",
+        PROFILE_TEMPLATE,
+        digest=digest,
+        families=", ".join(families),
+    )
 
 
 def profile_prompt(inspect: dict[str, Any]) -> str:

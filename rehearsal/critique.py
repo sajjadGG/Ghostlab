@@ -136,20 +136,19 @@ def _format_transcript(transcript: list[dict[str, Any]]) -> str:
     )
 
 
-def _build_critique_prompt(run: dict[str, Any], tools: list[dict[str, Any]]) -> str:
-    scenario = run.get("scenario", {})
-    return f"""You are a developer-experience reviewer for an MCP (Model Context Protocol) server.
+# Placeholders: {goal} {tools} {transcript}
+CRITIQUE_TEMPLATE = """You are a developer-experience reviewer for an MCP (Model Context Protocol) server.
 An assistant used this server's tools to pursue a user goal. Critique the *tools*,
 not the assistant: judge how well-designed each exercised tool is for an LLM client.
 
 Scenario goal:
-{scenario.get('goal', '(unspecified)')}
+{goal}
 
 Tools the assistant exercised (with their real definitions and observed calls):
-{_format_tools(tools)}
+{tools}
 
 Conversation transcript (for context on how tools were chosen and whether results were usable):
-{_format_transcript(run.get('transcript', []))}
+{transcript}
 
 For each exercised tool, judge from evidence:
 - name_clarity (0-5): does the name make its purpose obvious to an LLM with no extra context?
@@ -164,6 +163,19 @@ For each exercised tool, judge from evidence:
 Then give an overall_score (0-5) for the server's tool ergonomics, overall_notes
 (2-3 sentences), and top_recommendations (the highest-impact fixes across all tools).
 Judge strictly from the evidence above. Output only the JSON object."""
+
+
+def _build_critique_prompt(run: dict[str, Any], tools: list[dict[str, Any]]) -> str:
+    from . import prompts
+
+    scenario = run.get("scenario", {})
+    return prompts.render(
+        "critique",
+        CRITIQUE_TEMPLATE,
+        goal=scenario.get("goal", "(unspecified)"),
+        tools=_format_tools(tools),
+        transcript=_format_transcript(run.get("transcript", [])),
+    )
 
 
 def critique_prompt(run: dict[str, Any], inspect: dict[str, Any] | None = None) -> str:

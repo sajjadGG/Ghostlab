@@ -6,6 +6,58 @@ from typing import Any
 from .config import PersonaConfig, ScenarioConfig, TargetConfig
 from .types import TranscriptTurn
 
+# --------------------------------------------------------------------------- #
+# Prompt-override registry
+#
+# Every prompt GhostLab sends is built by routing a computed context through a
+# named template. A job's `prompts:` section can override any template by name;
+# `set_overrides` seeds the active set once (at CLI dispatch) so builders in
+# other modules don't have to thread overrides through every call. An empty /
+# missing override means "use the built-in template".
+# --------------------------------------------------------------------------- #
+_OVERRIDES: dict[str, str] = {}
+
+
+def set_overrides(mapping: dict[str, str] | None) -> None:
+    """Replace the active prompt-override set (values are template strings)."""
+    _OVERRIDES.clear()
+    for key, value in (mapping or {}).items():
+        if isinstance(value, str) and value.strip():
+            _OVERRIDES[key] = value
+
+
+def get_template(name: str, default: str) -> str:
+    """The active template for ``name`` — the override if set, else ``default``."""
+    return _OVERRIDES.get(name) or default
+
+
+class _SafeDict(dict):
+    """Formatting map that leaves unknown ``{placeholders}`` intact.
+
+    A user override that references a placeholder we don't supply (or fat-fingers
+    one) renders it literally instead of raising, so a bad edit degrades rather
+    than crashing a run.
+    """
+
+    def __missing__(self, key: str) -> str:  # noqa: D401
+        return "{" + key + "}"
+
+
+def render(name: str, default_template: str, **context: Any) -> str:
+    """Format the active template for ``name`` with ``context``.
+
+    Falls back to the built-in template if a user override fails to format (e.g.
+    it uses attribute/index access on a missing name), so overrides can never
+    hard-fail a run.
+    """
+    template = get_template(name, default_template)
+    try:
+        return template.format_map(_SafeDict(context))
+    except Exception:  # noqa: BLE001 — a broken override must not abort the run
+        if template is not default_template:
+            return default_template.format_map(_SafeDict(context))
+        raise
+
 
 def format_transcript(transcript: list[TranscriptTurn]) -> str:
     if not transcript:
@@ -74,28 +126,23 @@ def compose_persona(scenario: ScenarioConfig, persona: PersonaConfig | None) -> 
     return "\n".join(lines)
 
 
-def build_aut_prompt(
-    target: TargetConfig,
-    scenario: ScenarioConfig,
-    transcript: list[TranscriptTurn],
-    user_message: str,
-    mcp_config_path: str,
-) -> str:
-    return f"""You are the agent-under-test in an MCP end-to-end test.
+# Placeholders: {target_id} {transport} {capabilities} {mcp_config_path}
+# {scenario_id} {scenario_title} {goal} {transcript} {user_message}
+AUT_TEMPLATE = """You are the agent-under-test in an MCP end-to-end test.
 
 Target MCP app:
-- id: {target.id}
-- transport: {target.transport}
-- expected capabilities: {target.capabilities or "unspecified"}
+- id: {target_id}
+- transport: {transport}
+- expected capabilities: {capabilities}
 - generated MCP client config: {mcp_config_path}
 
 Scenario:
-- id: {scenario.id}
-- title: {scenario.title}
-- user goal: {scenario.goal}
+- id: {scenario_id}
+- title: {scenario_title}
+- user goal: {goal}
 
 Previous transcript:
-{format_transcript(transcript)}
+{transcript}
 
 The user now says:
 {user_message}
@@ -103,25 +150,39 @@ The user now says:
 Respond as the real assistant that has access to the configured MCP app. The MCP app is the product the user is actually using — it is the system under test, so prefer its tools to accomplish the goal. When the app offers a capability for what the user wants — creating a practice exercise or interactive widget, starting a lesson, recording a result or score, saving feedback, reading the learner's state — call that tool rather than doing the work yourself in plain prose. Only answer inline when no app tool fits. Use the tools through your coding-agent environment. Be concise but complete."""
 
 
-def build_user_emulator_prompt(
+def build_aut_prompt(
+    target: TargetConfig,
     scenario: ScenarioConfig,
     transcript: list[TranscriptTurn],
-    last_assistant_message: str,
-    persona: PersonaConfig | None = None,
-    widgets: list[dict[str, Any]] | None = None,
+    user_message: str,
+    mcp_config_path: str,
 ) -> str:
-    widget_note = describe_widgets(widgets or [])
-    widget_section = f"\n\n{widget_note}\n" if widget_note else ""
-    return f"""You ARE this person, chatting with an AI assistant. You are not a tester, a QA engineer, or an evaluator — you are a real human with your own goal, mood, and way of talking.
+    return render(
+        "aut",
+        AUT_TEMPLATE,
+        target_id=target.id,
+        transport=target.transport,
+        capabilities=target.capabilities or "unspecified",
+        mcp_config_path=mcp_config_path,
+        scenario_id=scenario.id,
+        scenario_title=scenario.title,
+        goal=scenario.goal,
+        transcript=format_transcript(transcript),
+        user_message=user_message,
+    )
+
+
+# Placeholders: {persona} {goal} {widget_section} {transcript} {last_assistant_message}
+USER_EMULATOR_TEMPLATE = """You ARE this person, chatting with an AI assistant. You are not a tester, a QA engineer, or an evaluator — you are a real human with your own goal, mood, and way of talking.
 
 Who you are:
-{compose_persona(scenario, persona)}
+{persona}
 
 What you actually want out of this conversation (your private motivation — never recite it back verbatim):
-{scenario.goal}
+{goal}
 {widget_section}
 The conversation so far:
-{format_transcript(transcript)}
+{transcript}
 
 The assistant just said to you:
 {last_assistant_message}
@@ -135,3 +196,23 @@ Now write your next message as this person. Rules for staying human:
 - Never mention that this is a test, a rehearsal, a simulation, or that you are role-playing.
 
 Write ONLY your next message, nothing else. If your goal is genuinely met, or the conversation clearly cannot progress any further, write exactly REHEARSAL_DONE instead of a message."""
+
+
+def build_user_emulator_prompt(
+    scenario: ScenarioConfig,
+    transcript: list[TranscriptTurn],
+    last_assistant_message: str,
+    persona: PersonaConfig | None = None,
+    widgets: list[dict[str, Any]] | None = None,
+) -> str:
+    widget_note = describe_widgets(widgets or [])
+    widget_section = f"\n\n{widget_note}\n" if widget_note else ""
+    return render(
+        "user_emulator",
+        USER_EMULATOR_TEMPLATE,
+        persona=compose_persona(scenario, persona),
+        goal=scenario.goal,
+        widget_section=widget_section,
+        transcript=format_transcript(transcript),
+        last_assistant_message=last_assistant_message,
+    )

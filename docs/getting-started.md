@@ -14,6 +14,50 @@ ghostlab --help
 ghostlab --version
 ```
 
+## Create A Job (Recommended Starting Point)
+
+A **job** is one MCP evaluation, and everything about it lives in one folder. Use the guided wizard to set one up:
+
+```bash
+ghostlab create
+# ? Job name: cortex-eval
+# ? Target MCP URL (or path to a target JSON): http://localhost:8000/mcp
+# ? Transport [streamable-http]:
+# ? Personas to generate [2]:
+# ? Scenarios per persona [2]:
+# ? Min pass rate (release gate) [0.9]:
+```
+
+It scaffolds a self-contained directory:
+
+```
+jobs/cortex-eval/
+  job.yaml         # the whole config: target, hosts, generation, test, prompts, gates
+  test-plan.yaml   # produced by `ghostlab plan`
+  workspace/       # discover/generated/test artifacts + ghostlab.sqlite3
+  runs/            # dual-agent run output
+```
+
+`job.yaml` is populated with **editable defaults** for every knob — persona/scenario counts, suites, judge, gates, and a `prompts:` section where you can override any built-in prompt (each entry is blank = use the built-in; the file header lists the `{placeholders}` each prompt accepts). An explicit CLI flag still wins over a `job.yaml` setting, which wins over the code default.
+
+Non-interactive (for scripts/CI):
+
+```bash
+ghostlab create --name cortex-eval --target http://localhost:8000/mcp \
+  --aut-runner runners/codex-cortex-local-aut.json --yes
+```
+
+Then run the loop against the job by name (`--job`), no paths to juggle:
+
+```bash
+ghostlab discover --job cortex-eval    # inspect + lint + refresh capabilities
+ghostlab plan     --job cortex-eval    # coverage-driven test-plan.yaml
+ghostlab test     --job cortex-eval    # execute across host adapters
+ghostlab review   --job cortex-eval    # readiness report / release gate
+```
+
+Inside a job directory you can drop `--job` entirely — the commands auto-detect `job.yaml` in the current folder.
+
 ## Run A Mock Scenario
 
 Mock runners let you exercise the orchestrator without spending coding-agent credits.

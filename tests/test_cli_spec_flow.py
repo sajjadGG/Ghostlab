@@ -97,6 +97,31 @@ class CliSpecFlowTest(unittest.TestCase):
         self.assertIn("weak_tool_description", kinds)
         self.assertIn("missing_tool_reference", kinds)
 
+    def test_create_then_discover_by_job_name(self) -> None:
+        import os
+
+        jobs_root = self.tmp / "jobs"
+        with patch.dict(os.environ, {"GHOSTLAB_JOBS_DIR": str(jobs_root)}):
+            code = main(
+                ["create", "--name", "Notes Eval", "--target", str(self.target_path), "--yes"]
+            )
+            self.assertEqual(code, 0)
+            spec_path = jobs_root / "notes-eval" / "job.yaml"
+            self.assertTrue(spec_path.is_file())
+            self.assertTrue((jobs_root / "notes-eval" / "workspace").is_dir())
+            self.assertTrue((jobs_root / "notes-eval" / "runs").is_dir())
+
+            # Resolve the whole loop by job name; artifacts + db land in the job.
+            code = main(["discover", "--job", "notes-eval"])
+            self.assertEqual(code, 0)
+
+        spec = load_spec(spec_path)
+        tool_names = {tool["name"] for tool in spec.capabilities["tools"]}
+        self.assertEqual(tool_names, {"notes_list", "notes_delete"})
+        workspace = jobs_root / "notes-eval" / "workspace"
+        self.assertTrue(list(workspace.glob("discover/*/contract.json")))
+        self.assertTrue((workspace / "ghostlab.sqlite3").exists())
+
     def test_discover_strict_fails_on_schema_errors(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
         code = main(

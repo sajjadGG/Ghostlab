@@ -226,3 +226,8 @@ ghostlab_workspace/
 # ghostlab spec-flow local artifacts
 .ghostlab/
 ghostlab.sqlite3
+
+# ghostlab jobs — track job.yaml + test-plan.*, ignore per-job run artifacts + db
+jobs/*/workspace/
+jobs/*/runs/
+jobs/*/ghostlab.sqlite3*

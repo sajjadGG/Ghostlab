@@ -117,19 +117,13 @@ def _persona_block(persona: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _build_prompt(profile: dict[str, Any], n: int, persona: dict[str, Any] | None = None) -> str:
-    persona_section = f"\n\n{_persona_block(persona)}\n" if persona else ""
-    persona_field_help = (
-        "a SHORT situational note for this conversation (not the persona's identity)."
-        if persona
-        else "1-3 sentences describing the user (background, constraints, attitude)."
-    )
-    return f"""You design end-to-end test scenarios for an MCP (Model Context Protocol) server.
+# Placeholders: {profile_digest} {persona_section} {n} {persona_field_help}
+SCENARIO_GEN_TEMPLATE = """You design end-to-end test scenarios for an MCP (Model Context Protocol) server.
 In each test, one agent role-plays a user and another agent uses the MCP tools to help them.
 
 Capability profile:
 
-{_profile_digest(profile)}{persona_section}
+{profile_digest}{persona_section}
 
 Generate exactly {n} diverse, realistic scenarios that this MCP can support. Spread them across intents:
 - happy_path: a primary, well-supported use case.
@@ -149,6 +143,25 @@ For each scenario provide:
 - exercises: the tool names (from the lists above) this scenario should cause the assistant to use. Use ONLY real tool names; never the non-exposed ones.
 
 Output only the JSON object with a `scenarios` array."""
+
+
+def _build_prompt(profile: dict[str, Any], n: int, persona: dict[str, Any] | None = None) -> str:
+    from . import prompts
+
+    persona_section = f"\n\n{_persona_block(persona)}\n" if persona else ""
+    persona_field_help = (
+        "a SHORT situational note for this conversation (not the persona's identity)."
+        if persona
+        else "1-3 sentences describing the user (background, constraints, attitude)."
+    )
+    return prompts.render(
+        "scenario_gen",
+        SCENARIO_GEN_TEMPLATE,
+        profile_digest=_profile_digest(profile),
+        persona_section=persona_section,
+        n=n,
+        persona_field_help=persona_field_help,
+    )
 
 
 def _to_scenario_dict(raw: dict[str, Any], tool_names: set[str], index: int) -> dict[str, Any]:
