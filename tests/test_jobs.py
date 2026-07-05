@@ -124,6 +124,36 @@ class CreateAndResolveTest(unittest.TestCase):
         self.assertIn("ghostlab create", str(ctx.exception))
 
 
+class ConnectionEnvExpansionTest(unittest.TestCase):
+    def test_expands_env_in_headers_at_connection_time(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from rehearsal.config import expand_env
+        from rehearsal.mcp_config import build_mcp_servers_config
+
+        target = jobs.target_from_url(
+            "http://localhost:8000/mcp",
+            headers={"Authorization": "Bearer ${GH_TOKEN}"},
+        )
+        # The stored spec keeps the placeholder literal (no secret written).
+        self.assertEqual(
+            target.connection["headers"]["Authorization"], "Bearer ${GH_TOKEN}"
+        )
+        with patch.dict(os.environ, {"GH_TOKEN": "s3cret"}):
+            expanded = expand_env(target.connection)
+            self.assertEqual(expanded["headers"]["Authorization"], "Bearer s3cret")
+            cfg = build_mcp_servers_config(target)
+        server = next(iter(cfg["mcpServers"].values()))
+        self.assertEqual(server["headers"]["Authorization"], "Bearer s3cret")
+
+    def test_undefined_env_left_literal(self) -> None:
+        from rehearsal.config import expand_env
+
+        out = expand_env({"h": "Bearer ${DEFINITELY_UNSET_VAR_XYZ}"})
+        self.assertEqual(out["h"], "Bearer ${DEFINITELY_UNSET_VAR_XYZ}")
+
+
 class PromptOverrideTest(unittest.TestCase):
     def tearDown(self) -> None:
         prompts.set_overrides({})  # never leak overrides into other tests

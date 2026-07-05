@@ -14,8 +14,9 @@
 **Test your MCP server the way it's actually used** — not with unit tests against
 the protocol, but with a real coding agent (Codex / Claude) that picks tools,
 makes mistakes, and tries to accomplish goals, while a second agent plays the
-user. Ghostlab understands a target MCP, generates persona × scenario datasets,
-runs the dual-agent loop, scores each run, and compares runs for regressions.
+user. Protocol-level checks (schema errors, a tool call that 500s) are useful
+sanity checks, but they aren't the real test — the real test is whether an
+agent can actually get a task done through your MCP, end to end.
 
 📖 **Docs wiki:** https://sajjadgg.github.io/Rehearsal/ · 🤖 **For agents:** [`llms.txt`](llms.txt) · 🛠 **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
@@ -25,34 +26,53 @@ runs the dual-agent loop, scores each run, and compares runs for regressions.
 python3.13 -m venv .venv
 .venv/bin/pip install -e .            # add '.[ui]' for the web UI, '.[apps]' for widget rendering
 
-# 1. Create a self-contained job (guided wizard), then run the loop by name
-ghostlab create                                      # -> jobs/<name>/ (job.yaml, workspace/, runs/)
-ghostlab discover --job cortex-eval                  # inventory + contract lint + apps probe
-ghostlab plan     --job cortex-eval                  # coverage-driven test-plan.yaml
-ghostlab test     --job cortex-eval                  # execute across host adapters
-ghostlab review   --job cortex-eval                  # readiness report / release gate
-
-# 2. Drive it with two agents (one under test, one emulating a user)
-ghostlab run --target targets/cortex-local.json --scenario scenarios/cortex-onboarding-status.json
-
-# 3. Render and click through an MCP Apps ui:// widget (needs '.[apps]')
-ghostlab apps-render --target targets/cortex-local.json --tool views_generate_sentence_scramble \
-  --arguments '{"target_sentence":"The cat sat on the mat","shuffled_elements":["mat","The","on","sat","cat","the"]}' \
-  --intent '{"type":"reorder","value":["The","cat","sat","on","the","mat"]}'
+ghostlab create
 ```
 
-## What it does
+That's the whole flow. `ghostlab create` walks you through everything, end to end:
 
-| Stage | Commands | What you get |
-| --- | --- | --- |
-| **Job** | `create` | A self-contained `jobs/<name>/` folder holding one `job.yaml` (all config + editable defaults + prompt overrides), its `test-plan.yaml`, `workspace/` artifacts, and `runs/`. Job commands take `--job <name>` (or auto-detect `job.yaml` in the cwd) |
-| **Spec** | `init`, `discover`, `plan`, `test`, `review` | A curated `job.yaml`/`ghostlab.yaml` per MCP, a deterministic `contract.json` (schema lint, risk labels, MCP Apps metadata checks), a coverage-driven `test-plan.yaml`, gated multi-host execution results, and a readiness report with prioritized repairs |
-| **Understand** | `inspect`, `profile` | Tool/resource/prompt dump + a capability profile, with lint findings |
-| **Generate** | `generate-scenarios`, `generate-personas`, `generate-dataset`, `review-dataset` | Reusable persona × scenario datasets you can curate |
-| **Run** | `run`, `run-dataset` | Multi-turn dual-agent transcripts with structured tool-call capture |
-| **Evaluate** | `evaluate`, `compare` | Pass/fail verdicts (codex judge) and regression diffs between runs |
-| **MCP Apps** | `apps-probe`, `apps-render` | Fetch/diagnose `ui://` widgets, then render + interact with them in headless Chrome |
-| **Persist & explore** | `db`, `ui` | SQLite run history + a Streamlit UI over the whole pipeline |
+1. **Name + target** — the only two prompts. A target is an MCP URL, or a path
+   to a target JSON / standard `mcpServers` config.
+2. **Discover** — connects to the target, lints its contract (schema errors,
+   risk labels), and probes any MCP Apps `ui://` widgets.
+3. **Configure semantic testing** — if `codex` is on your `$PATH`, offers to
+   wire it up as the **agent-under-test**: a real coding-agent session with
+   your MCP's tools available, so the dual-agent conversations below have
+   something to actually drive. (No codex? The wizard still finishes —
+   protocol-level suites still run, semantic/security just skip until a host
+   is configured; see [Runner Configs](#runner-configs).)
+4. **Generate a test plan** — personas × scenarios for the semantic/security
+   suites, plus deterministic coverage for every discovered tool
+   (`test-plan.yaml`), all editable afterward.
+5. **Pick which suites to run** — defaults to everything; narrow it to just
+   `semantic` while you're iterating, or the full set for a release check.
+6. **Run + review** — executes the plan against your configured host(s),
+   writes a colored pass/fail summary plus a dashboard, and prints the
+   readiness/gate verdict.
+
+Everything the wizard does is one of `discover` / `plan` / `test` / `review`
+under the hood — run any of them standalone afterward to iterate without
+repeating the whole wizard:
+
+```bash
+ghostlab discover --job <name>    # re-inspect after the target changes
+ghostlab plan --job <name>        # regenerate/curate the test plan
+ghostlab test --job <name>        # rerun (add --suite semantic to narrow it)
+ghostlab review --job <name>      # the readiness/gate report on its own
+```
+
+A job is a self-contained folder: `jobs/<name>/job.yaml` (target, hosts,
+generation/test defaults, gates — all editable), `test-plan.yaml`, `workspace/`
+(discover/generated/test artifacts + a local sqlite db), and `runs/`.
+
+## What you get
+
+| Stage | What it produces |
+| --- | --- |
+| **Discover** | A deterministic `contract.json` (schema lint, risk labels, MCP Apps metadata checks) and a refreshed `capabilities:` section in `job.yaml` |
+| **Plan** | A coverage-driven `test-plan.yaml`: deterministic protocol cases for every tool, plus generated persona/scenario cases for the semantic/security suites |
+| **Test** | Multi-host execution results (`results.json`/`results.md`), a standalone HTML dashboard, and — for conversational cases — full dual-agent transcripts with structured tool-call capture |
+| **Review** | A readiness report: pass/fail gate verdict, failure clusters, and prioritized repairs |
 
 ## Goal
 
@@ -76,52 +96,37 @@ Rehearsal is intentionally **app-agnostic**:
 
 No Cortex-specific assumptions are required in the core harness.
 
-## Core Idea
+## Reference
 
-Rehearsal uses a **dual-harness architecture**:
+Everything below is the individual-command reference and advanced usage —
+useful once you're past the first `ghostlab create` run, or scripting CI.
 
-1. **AUT Harness (Agent Under Test)**
-- Starts a coding-agent session (Codex or Claude Code).
-- Injects target MCP server config into that session.
-- Exposes a controlled I/O bridge so it can receive user messages and return replies/tool results.
+### Job folder layout
 
-2. **User Emulator Harness**
-- Starts a second coding-agent session.
-- Gives it a scenario file (persona, goals, constraints, success criteria).
-- Asks it to act like a realistic user and send messages turn-by-turn to the AUT.
+```text
+jobs/<name>/
+  job.yaml          # target, setup, hosts, generation, test, prompts, gates
+  test-plan.yaml    # produced by `ghostlab plan`
+  workspace/        # discover/, generated/, test/ artifacts + ghostlab.sqlite3
+  runs/             # dual-agent run output
+```
 
-3. **Orchestrator**
-- Coordinates turn-taking, timeouts, retries, and stop conditions.
-- Logs every message and event in structured format.
-- Produces a run report with bug candidates and reproduction context.
+### Core dual-harness architecture
 
-## First Implementation Plan
+1. **AUT Harness (Agent Under Test)** — starts a coding-agent session (Codex or
+   Claude Code), injects the target MCP server config into it, and exposes a
+   controlled I/O bridge so it can receive user messages and return
+   replies/tool results.
+2. **User Emulator Harness** — starts a second coding-agent session, gives it a
+   scenario file (persona, goals, constraints, success criteria), and asks it
+   to act like a realistic user, sending messages turn-by-turn to the AUT.
+3. **Orchestrator** — coordinates turn-taking, timeouts, retries, and stop
+   conditions; logs every message/event in structured format; produces a run
+   report with bug candidates and reproduction context.
 
-### Phase 1: Local Loop
+### Target configuration model
 
-- Define scenario schema (JSON).
-- Define target schema for MCP connection config (stdio/SSE/HTTP).
-- Build a Python orchestrator that runs:
-  - `codex`/`claude` process A as AUT
-  - `codex`/`claude` process B as emulator
-- Relay turns through a strict protocol.
-- Write JSONL logs + markdown summary.
-
-### Phase 2: Sandboxed Execution
-
-- Add Docker Compose profiles for generic MCP target services.
-- Keep orchestrator on host or in sidecar container.
-- Stamp each run with target ID + build SHA/version + scenario ID + timestamp.
-
-### Phase 3: Regression + CI
-
-- Add deterministic scenario packs.
-- Add pass/fail gates (timeouts, tool misuse, policy violations, hallucinated capabilities, schema errors).
-- Publish comparison reports between runs.
-
-## Target Configuration Model
-
-Each test run points to a target definition, for example:
+Each test run points to a target definition:
 
 - `target.id`: unique name (`filesystem-mcp-local`, `my-app-staging`)
 - `transport`: `stdio` | `sse` | `streamable-http`
@@ -129,76 +134,28 @@ Each test run points to a target definition, for example:
 - `capabilities`: optional expected tools/resources/prompts
 - `startup`: optional health checks and boot timeout
 
-This model makes the same harness reusable across different MCP apps.
+### Commands
 
-## What We’ll Log
+The package installs two equivalent console scripts: `ghostlab` and `rehearsal`.
 
-Per run:
-
-- Target metadata (id, transport, endpoint/command fingerprint).
-- Scenario metadata (id, persona, goal).
-- Full AUT/emulator transcripts.
-- MCP tool call envelopes (request/response/error).
-- Timing (latency per turn, total runtime).
-- Exit states (success, timeout, crash, policy breach).
-- Repro bundle pointers.
-
-## Success Criteria
-
-Rehearsal is useful when you can:
-
-- Start one command and run multiple scenarios against any MCP target.
-- Reproduce failures with the same target+scenario seed/config.
-- Compare two runs and quickly see regressions.
-- Debug from logs without rerunning blindly.
-
-## Current Folder Layout
-
-```text
-mcp-rehearsal/
-  README.md
-  __main__.py
-  rehearsal/
-  targets/
-  scenarios/
-  runners/
-  runs/
-  docker/
-```
-
-## Commands
-
-Install locally from this checkout:
-
-```bash
-python3.13 -m venv .venv
-.venv/bin/pip install -r requirements-dev.txt
-```
-
-The package installs two equivalent console scripts:
-
-```bash
-ghostlab --help
-rehearsal --help
-```
-
-Rehearsal exposes subcommands (the bare `--target ... --scenario ...` form still
-works and is treated as `run`):
-
-- `ghostlab inspect` — connect to a target MCP and capture what it exposes.
+- `ghostlab create` — the end-to-end wizard described above.
+- `ghostlab init` — create a `job.yaml`/`ghostlab.yaml` from an existing target JSON, without the wizard prompts.
+- `ghostlab discover` — inspect the job's target, lint its contract, refresh capabilities.
+- `ghostlab plan` — generate (or curate) the coverage-driven test plan.
+- `ghostlab test` — execute the test plan across the job's host adapters.
+- `ghostlab review` — readiness report over discover + plan + test artifacts (release gate).
+- `ghostlab inspect` — connect to a target MCP and capture what it exposes (no job needed).
 - `ghostlab profile` — turn an `inspect.json` into a capability profile (codex).
-- `ghostlab generate-scenarios` — generate scenarios from a profile (codex).
-- `ghostlab generate-personas` — generate a reusable persona library (codex).
-- `ghostlab generate-dataset` — build a persona x scenario dataset (codex).
-- `ghostlab review-dataset` — review & curate a dataset (coverage, flags, approve/reject).
-- `ghostlab run-dataset` — run every case in a dataset.
-- `ghostlab run` — run a dual-agent E2E scenario.
+- `ghostlab generate-scenarios` / `generate-personas` / `generate-dataset` — build reusable persona×scenario datasets outside the job model.
+- `ghostlab review-dataset` / `run-dataset` — curate and run a standalone dataset.
+- `ghostlab run` — run one dual-agent E2E scenario directly.
 - `ghostlab evaluate` — score a run into a pass/fail verdict (codex judge).
 - `ghostlab compare` — diff two dataset runs for regressions.
-- `ghostlab apps-probe` — probe a target's MCP Apps (`ui://`) widgets: fetch resources + CSP diagnostics.
-- `ghostlab apps-render` — render a `ui://` widget in headless Chrome, drive it, and capture proof.
+- `ghostlab apps-probe` / `apps-render` — probe/render MCP Apps `ui://` widgets.
 - `ghostlab doctor` — check codex and validate runner presets.
+- `ghostlab dashboard` — build a standalone HTML dashboard for a `ghostlab test` run.
 - `ghostlab ui` — launch the Streamlit pipeline UI.
+- `ghostlab db` — manage the SQLite persistence database.
 
 ### The UI: `ghostlab ui`
 
@@ -209,37 +166,270 @@ pip install 'ghostlab[ui]'       # installs streamlit
 ghostlab ui                      # opens http://localhost:8501
 ```
 
-The app walks an MCP through four user-facing stages:
+The app mirrors the same job-based flow as `ghostlab create`: pick or create a
+job, discover its target, configure the agent-under-test host, generate and
+curate the test plan, run selected suites, and review colored results and full
+conversation traces — the same `job.yaml`/`test-plan.yaml`/`results.json` a CLI
+run of the same job would produce.
 
-1. **Inspect MCP** — connect to the MCP, verify its tools/resources, and analyze
-   its capabilities and likely workflows.
-2. **Build Test Cases** — generate personas and scenarios, pair them into
-   runnable cases, then review coverage, warnings, case selection, and the
-   resolved per-case prompts together.
-3. **Run & Evaluate** — run each selected persona + scenario case with the
-   agent-under-test and user emulator, then optionally evaluate it with a codex
-   judge. Generation and runs expose determinate progress and live turn activity.
-4. **Review Results** — browse each run's chronological conversation trace,
-   inline tool activity, exact runtime prompts, model/duration metadata, and
-   verdict evidence. Filter run history by target, status, verdict, or search.
+### Understand a new MCP: `inspect`
 
-A **case** is the concrete runnable preset formed by pairing one persona with
-one scenario. Each selected case produces one run and one trace.
+Point it at a target and it introspects the server without any coding-agent
+credits or manual `curl`:
 
-The sidebar sets the **workspace dir**, the **codex binary**, and the **codex
-model** (applied to every codex-backed stage — generation, the AUT/user runners,
-and the judge — and shown wherever it is used). Each stage has a **🔍 View
-prompt** expander so you can see the exact prompt sent to codex (profile,
-persona/scenario generation, the agent-under-test and user-emulator prompts, and
-the judge). Steps gate on their prerequisites and the run step shows live
-per-case progress.
+```bash
+ghostlab inspect --target targets/cortex-local.json
+```
 
-Artifacts are written under the workspace directory (default
-`ghostlab_workspace/`) so runs persist and can also be opened with the CLI.
+This connects over the configured transport (stdio / streamable-HTTP / SSE),
+runs the `initialize` handshake, and pages through `tools/list`,
+`resources/list`, `resources/templates/list`, and `prompts/list`. It writes
+`runs/<id>-inspect/inspect.json` (raw) and `inspect.md` (readable), and **lints**
+tool/resource descriptions for references to tools the server does not actually
+expose. This capability dump is the input to capability profiling and scenario
+generation.
+
+### Profile a new MCP: `profile`
+
+Turn the raw `inspect.json` into a structured **capability profile** — the
+bridge between Understand and Generate. Deterministic structure (tool taxonomy
+by name family, read/write state surfaces, gaps) is computed locally; a domain
+summary and inferred multi-step workflows are generated by codex:
+
+```bash
+ghostlab profile \
+  --inspect runs/<id>-inspect/inspect.json
+```
+
+It writes `capabilities.json` + `capabilities.md` next to the `inspect.json`.
+Generated workflow steps are filtered to real tool names, so the profile never
+references hallucinated or non-exposed tools.
+
+### Generate scenarios: `generate-scenarios`
+
+Generate grounded use-case scenarios the MCP supports, derived from the
+capability profile:
+
+```bash
+ghostlab generate-scenarios \
+  --profile runs/<id>-inspect/capabilities.json \
+  --n 3 \
+  --output-dir scenarios
+```
+
+Scenarios are spread across intents (`happy_path` / `edge_case` / `adversarial`)
+and each declares an `exercises` list of the tools it should drive the assistant
+to use. Tool references are filtered to real tool names.
+
+### Build a persona library: `generate-personas`
+
+Personas are reusable **user profiles** decoupled from scenarios, so the same
+persona can be paired with many scenarios (the basis for the dataset matrix).
+Generate a domain-relevant library from a capability profile:
+
+```bash
+ghostlab generate-personas \
+  --profile runs/<id>-inspect/capabilities.json \
+  --n 4 \
+  --output-dir personas
+```
+
+Each persona has a `summary`, behavioral `traits` (terse, impatient, easily
+confused, non-native, ...), and a domain `context` map (native_language,
+target_exam, level, ...). Pass one to a run with `--persona`:
+
+```bash
+ghostlab run ... --persona personas/ielts-power-user.json
+```
+
+### Build a dataset: `generate-dataset`
+
+A dataset is a **persona x scenario matrix** — different users, and different
+scenarios tailored to each of them. For every persona, codex generates
+persona-specific scenarios, and the pairs become runnable cases:
+
+```bash
+ghostlab generate-dataset \
+  --profile runs/<id>-inspect/capabilities.json \
+  --personas 3 --scenarios-per-persona 3 --seed 7 \
+  --name cortex
+```
+
+This writes a self-contained dataset directory:
+
+```text
+datasets/cortex/
+  dataset.json          manifest: mcp, seed, cases[]
+  personas/<id>.json
+  scenarios/<id>.json    persona-namespaced; inline `persona` is a situational note
+```
+
+### Review & curate a dataset: `review-dataset`
+
+Before spending agent credits, check that the dataset makes sense:
+
+```bash
+ghostlab review-dataset \
+  --dataset datasets/cortex \
+  --profile runs/<id>-inspect/capabilities.json
+```
+
+This writes `review.md` + `review.json` with a tool-coverage matrix, per-case
+previews, and flags (near-duplicate cases, scenarios exercising non-exposed
+tools, personas with no scenarios). Curation is file-first — each case gets a
+`status` in `dataset.json` (`pending` / `approved` / `rejected` / `needs-edit`):
+
+```bash
+ghostlab review-dataset --dataset datasets/cortex \
+  --approve case-a case-b --reject case-c
+```
+
+### Run a dataset: `run-dataset`
+
+```bash
+ghostlab run-dataset \
+  --dataset datasets/cortex \
+  --target targets/cortex-local.json \
+  --aut-runner runners/codex-cortex-aut.json \
+  --user-runner runners/codex-user-emulator.json \
+  --limit 2
+```
+
+Each case runs through the orchestrator (with its persona) into its own run
+directory, and a dataset-level `summary.md` + `results.json` capture per-case
+status and turn counts.
+
+### Tool-call capture & output hygiene
+
+Every run captures structured MCP tool calls from the agent host. The codex AUT
+runners set `"parser": "codex-json"` and run `codex exec --json`, so the
+orchestrator parses the JSONL stream and records each `mcp_tool_call` with its
+arguments, result, error, and status into `events.jsonl`, with a per-turn table
+in `report.md`. stdout and stderr are kept separate: only stdout (with known
+host noise redacted) becomes the conversational message handed to the other
+agent, while raw stderr is logged for debugging.
+
+### Evaluate a run: `evaluate`
+
+```bash
+ghostlab evaluate --run runs/<id> --capabilities runs/<id>-inspect/capabilities.json
+```
+
+Combines deterministic checks over captured tool calls with a codex LLM-judge
+that scores each `success_criterion`/`failure_signal` from the transcript.
+Writes `verdict.json` + `verdict.md`; exits non-zero unless the verdict is
+`pass`.
+
+### Compare two runs: `compare`
+
+```bash
+ghostlab compare --base runs/<base>-summary --candidate runs/<cand>-summary \
+  --output comparison.md
+```
+
+Diffs case-by-case on verdict, listing regressions first, then fixes, then
+other changes. Exits non-zero when there are regressions, so it can gate CI.
+
+### MCP Apps: `apps-probe` / `apps-render`
+
+Some MCPs ship **MCP Apps UI** resources — a tool's `_meta.ui.resourceUri`
+points to a `ui://…` HTML widget a compatible host is expected to render.
+
+`apps-probe` connects to a target, finds every UI-producing tool, fetches each
+`ui://` resource, and reports render-readiness and CSP diagnostics:
+
+```bash
+ghostlab apps-probe --target targets/cortex-local.json
+```
+
+`apps-render` actually renders a `ui://` widget in headless Chrome, proving a
+user can see and use it — it implements the MCP Apps host bridge, mounts the
+widget in a sandboxed iframe, completes the `ui/initialize` handshake, feeds it
+real tool input/result, and can drive a sequence of UI intents:
+
+```bash
+pip install 'ghostlab[apps]' && playwright install chrome    # one-time
+ghostlab apps-render --target targets/cortex-local.json \
+  --tool views_generate_sentence_scramble \
+  --arguments '{"target_sentence":"The cat sat on the mat","shuffled_elements":["mat","The","on","sat","cat","the"]}' \
+  --intent '{"type":"reorder","value":["The","cat","sat","on","the","mat"]}' \
+  --intent '{"type":"reveal"}'
+```
+
+It writes `apps-render.json` + `apps-render.md`, a `widget.png` of the initial
+render, and `widget-final.png` after the intents run. Exit status is non-zero
+if the render errored or any assertion failed.
+
+### Session runner (one live agent across turns)
+
+By default each turn spawns a fresh agent process and the orchestrator replays
+the transcript. The session runner (`"kind": "codex-session"`) instead keeps
+one codex session alive: turn 1 records the `thread_id`, and later turns run
+`codex exec resume <thread_id>` so codex retains context — fewer tokens, no
+repeated cold-start noise.
+
+```bash
+ghostlab run --target targets/cortex-local.json --scenario <scenario.json> \
+  --aut-runner runners/codex-cortex-local-session.json --user-runner <user.json>
+```
+
+### Validate your setup: `doctor`
+
+```bash
+ghostlab doctor               # validates runners/*.json
+ghostlab doctor --runners runners/codex-cortex-local-session.json
+```
+
+Reports the codex binary + version and validates each runner's kind, command,
+and parser.
+
+### Default agent backend
+
+`codex` is the default coding-agent backend for generation, the
+agent-under-test, and judging. `inspect` needs no agent — it is a direct MCP
+client. The codex binary is auto-detected from `$PATH`, then the macOS app
+bundle (`/Applications/Codex.app/Contents/Resources/codex`); override with
+`$REHEARSAL_CODEX_BIN` or `--codex-bin`.
+
+### Colored output
+
+CLI output is colored automatically on a TTY (dual-agent transcripts,
+pass/fail/skip verdicts, gate failures). Set `NO_COLOR=1` (or
+`GHOSTLAB_COLOR=0`) to disable it, `GHOSTLAB_COLOR=1` to force it on (e.g.
+piping into a pager that groks ANSI).
+
+## Runner Configs
+
+Mock runner (no agent, free):
+
+```json
+{ "kind": "mock" }
+```
+
+Process runner:
+
+```json
+{
+  "kind": "process",
+  "command": ["codex", "exec", "-"],
+  "env": {},
+  "timeout_seconds": 300,
+  "prompt_mode": "stdin"
+}
+```
+
+The process runner starts one fresh process per turn. `prompt_mode` can be
+`stdin`, `append-arg`, or `replace-placeholder`. `ghostlab create` synthesizes
+one of these automatically for the agent-under-test host (wiring the target
+MCP in via codex's `-c mcp_servers.<id>...` overrides, including
+`bearer_token_env_var` for `Bearer ${VAR}`-style auth headers) — see
+`jobs/<name>/runners/aut.json` after running it. To use Claude Code or another
+agent as the AUT instead, hand-write a runner JSON (see
+`runners/claude-process.example.json`) and pass it via `--aut-runner` to
+`ghostlab create`/`ghostlab plan`, or add it directly under `hosts:` in
+`job.yaml`.
 
 ## Install from PyPI
-
-Once published, install the released package directly:
 
 ```bash
 pip install ghostlab            # add [ui] and/or [apps] for those extras
@@ -274,362 +464,3 @@ environment `pypi`. No PyPI username or token is committed.
 The Pages workflow builds the docs wiki with MkDocs and deploys it to GitHub
 Pages on pushes to `main`, `v*.*.*` release tags, and manual workflow runs. In
 the GitHub repository settings, set Pages to use GitHub Actions as the source.
-
-### Understand a new MCP: `inspect`
-
-Point it at a target and it introspects the server without any coding-agent
-credits or manual `curl`:
-
-```bash
-ghostlab inspect --target targets/cortex-local.json
-```
-
-This connects over the configured transport (stdio / streamable-HTTP / SSE),
-runs the `initialize` handshake, and pages through `tools/list`,
-`resources/list`, `resources/templates/list`, and `prompts/list`. It writes
-`runs/<id>-inspect/inspect.json` (raw) and `inspect.md` (readable), and **lints**
-tool/resource descriptions for references to tools the server does not actually
-expose (e.g. Cortex descriptions mention `kb_find` / `kb_read` / `kb_read_skill`,
-which are not in `tools/list`). This capability dump is the input to capability
-profiling and scenario generation.
-
-### Profile a new MCP: `profile`
-
-Turn the raw `inspect.json` into a structured **capability profile** — the
-bridge between Understand and Generate. Deterministic structure (tool taxonomy
-by name family, read/write state surfaces, gaps) is computed locally; a domain
-summary and inferred multi-step workflows are generated by codex:
-
-```bash
-ghostlab profile \
-  --inspect runs/<id>-inspect/inspect.json
-```
-
-It writes `capabilities.json` + `capabilities.md` next to the `inspect.json`.
-Generated workflow steps are filtered to real tool names, so the profile never
-references hallucinated or non-exposed tools. This profile is the input scenario
-generation consumes.
-
-### Generate scenarios: `generate-scenarios`
-
-Generate grounded use-case scenarios the MCP supports, derived from the
-capability profile:
-
-```bash
-ghostlab generate-scenarios \
-  --profile runs/<id>-inspect/capabilities.json \
-  --n 3 \
-  --output-dir scenarios
-```
-
-Scenarios are spread across intents (`happy_path` / `edge_case` / `adversarial`)
-and each declares an `exercises` list of the tools it should drive the assistant
-to use. Tool references are filtered to real tool names, so scenarios never
-depend on hallucinated or non-exposed tools. Each scenario is written as a
-`ScenarioConfig`-shaped JSON file ready for `run`.
-
-### Build a persona library: `generate-personas`
-
-Personas are reusable **user profiles** decoupled from scenarios, so the same
-persona can be paired with many scenarios (the basis for the dataset matrix).
-Generate a domain-relevant library from a capability profile:
-
-```bash
-ghostlab generate-personas \
-  --profile runs/<id>-inspect/capabilities.json \
-  --n 4 \
-  --output-dir personas
-```
-
-Each persona has a `summary`, behavioral `traits` (terse, impatient, easily
-confused, non-native, ...), and a domain `context` map (native_language,
-target_exam, level, ...). Pass one to a run with `--persona`:
-
-```bash
-ghostlab run ... --persona personas/ielts-power-user.json
-```
-
-The user-emulator prompt is composed from the persona's summary + traits +
-context. Scenarios with an inline `persona` string still work unchanged; when a
-persona is supplied, the scenario's inline note refines it.
-
-### Build a dataset: `generate-dataset`
-
-A dataset is a **persona x scenario matrix** — different users, and different
-scenarios tailored to each of them. For every persona, codex generates
-persona-specific scenarios, and the pairs become runnable cases:
-
-```bash
-ghostlab generate-dataset \
-  --profile runs/<id>-inspect/capabilities.json \
-  --personas 3 --scenarios-per-persona 3 --seed 7 \
-  --name cortex
-```
-
-This writes a self-contained dataset directory:
-
-```text
-datasets/cortex/
-  dataset.json          manifest: mcp, seed, cases[]
-  personas/<id>.json
-  scenarios/<id>.json    persona-namespaced; inline `persona` is a situational note
-```
-
-The persona is the authoritative identity at run time; each scenario's inline
-`persona` carries only a short situational note ("has 45 minutes before work"),
-so the two never conflict. The `--seed` governs case ordering for reproducible
-manifests.
-
-### Review & curate a dataset: `review-dataset`
-
-Before spending agent credits, check that the dataset makes sense:
-
-```bash
-ghostlab review-dataset \
-  --dataset datasets/cortex \
-  --profile runs/<id>-inspect/capabilities.json
-```
-
-This writes `review.md` + `review.json` with a **tool-coverage matrix** (which
-tool categories are exercised, which tools are never touched), **per-case
-previews** (persona traits, situation, goal, opening message, success/failure
-criteria, exercises), and **flags**: near-duplicate cases, scenarios exercising
-non-exposed tools, and personas with no scenarios.
-
-Curation is **file-first** — each case gets a `status` in `dataset.json`
-(`pending` / `approved` / `rejected` / `needs-edit`). Edit it by hand, or use:
-
-```bash
-# approve/reject by case id (no ids = all cases)
-ghostlab review-dataset --dataset datasets/cortex \
-  --approve case-a case-b --reject case-c
-```
-
-Then run only the approved cases:
-
-```bash
-ghostlab run-dataset --dataset datasets/cortex \
-  --target targets/cortex-local.json --approved-only
-```
-
-### Run a dataset: `run-dataset`
-
-Execute every case (use `--limit` for small dev runs):
-
-```bash
-ghostlab run-dataset \
-  --dataset datasets/cortex \
-  --target targets/cortex-local.json \
-  --aut-runner runners/codex-cortex-aut.json \
-  --user-runner runners/codex-user-emulator.json \
-  --limit 2
-```
-
-Each case runs through the orchestrator (with its persona) into its own run
-directory, and a dataset-level `summary.md` + `results.json` capture per-case
-status and turn counts.
-
-### Tool-call capture & output hygiene
-
-Every run captures structured MCP tool calls from the agent host. The codex AUT
-runners set `"parser": "codex-json"` and run `codex exec --json`, so the
-orchestrator parses the JSONL stream and records each `mcp_tool_call` with its
-**arguments, result, error, and status** — plus the clean assistant message —
-into `events.jsonl`, with a per-turn table in `report.md`. (Runners without the
-codex-json parser fall back to scraping codex's plain-text
-`mcp: <server>/<tool> started|(completed)|(failed)` lines for tool name +
-status.) When a scenario declares `exercises`, the report also shows a
-tool-coverage line (expected vs. actually called).
-
-stdout and stderr are kept **separate**: only stdout (with known host noise
-redacted) becomes the conversational message handed to the other agent, while
-raw stderr is logged for debugging. This prevents the emulator from reacting to
-agent-host warnings instead of the assistant's actual reply.
-
-### Evaluate a run: `evaluate`
-
-Turn a run into a structured pass/fail verdict:
-
-```bash
-ghostlab evaluate --run runs/<id> --capabilities runs/<id>-inspect/capabilities.json
-```
-
-It combines **deterministic checks** over the captured tool calls (failed calls,
-expected-tool coverage from the scenario's `exercises`) with a **codex
-LLM-judge** that scores each `success_criterion` (met?) and `failure_signal`
-(triggered?) from the transcript and tool calls. Hard gates force an overall
-`fail`: the run crashed, a failure signal triggered, or — when `--capabilities`
-is supplied — the assistant claimed a tool the server does not expose. Writes
-`verdict.json` + `verdict.md`; exits non-zero unless the verdict is `pass`
-(`partial` exits 0 unless `--strict`), so datasets can gate CI.
-
-### Score a whole dataset
-
-`run-dataset --evaluate` runs the codex judge on each case and records the
-verdict in the per-case run dir and in the summary's `results.json` (stamped with
-the ghostlab version + dataset seed for provenance):
-
-```bash
-ghostlab run-dataset --dataset datasets/cortex \
-  --target targets/cortex-local.json \
-  --aut-runner runners/codex-cortex-local-session.json \
-  --evaluate --capabilities runs/<id>-inspect/capabilities.json
-```
-
-### Compare two runs: `compare`
-
-After editing a prompt or tool description, re-run the same dataset and diff the
-results to see what got better or worse:
-
-```bash
-ghostlab compare --base runs/<base>-summary --candidate runs/<cand>-summary \
-  --output comparison.md
-```
-
-It diffs case-by-case on verdict (falling back to run status), listing
-**regressions** (newly failing) first, then **fixes** (newly passing), then other
-changes. Exits non-zero when there are regressions, so it can gate CI.
-
-### Probe MCP Apps widgets: `apps-probe`
-
-Some MCPs ship **MCP Apps UI** resources — a tool's `_meta.ui.resourceUri` points
-to a `ui://…` HTML widget a compatible host is expected to render. The vanilla
-runner can confirm an agent *called* a UI-producing tool, but not that the widget
-rendered or that a user could interact with it (see
-`specs/cortex-mcp-apps-e2e.spec`, issue #13).
-
-`apps-probe` is the first increment of the MCP Apps host layer. It connects to a
-target, finds every UI-producing tool, fetches each `ui://` resource via
-`resources/read`, and reports render-readiness and CSP diagnostics:
-
-```bash
-ghostlab apps-probe --target targets/cortex-local.json
-# or restrict to specific widgets:
-ghostlab apps-probe --target targets/cortex-local.json --tool views_create_listening_practice
-```
-
-It writes `apps-probe.json` + `apps-probe.md` with the resource's MIME profile,
-HTML size, preferred frame hints, and CSP connect/resource domains. Diagnostics
-flag empty/unfetchable resources, non-`mcp-app` MIME types, and tools that accept
-remote media (`audio_url`, `image_url`, …) whose resource CSP would block it. The
-report reserves structured sections for the host-bridge transcript, interaction
-trace, render artifacts, and final app state — populated by `apps-render` below.
-The module also defines the **UI-intent contract**
-(`reorder`/`choose`/`type`/`reveal`/`submit`/`rate`/`mark`) the user emulator
-emits, and the host-bridge message vocabulary a renderer must implement.
-
-### Render & drive MCP Apps widgets: `apps-render`
-
-`apps-render` actually **renders** a `ui://` widget and proves a user can see and
-use it. It implements the MCP Apps host bridge (JSON-RPC over `postMessage`,
-protocol `2026-01-26`), mounts the widget in a sandboxed headless-Chrome iframe,
-completes the `ui/initialize` handshake, and feeds it the tool input + result so
-it renders real content. It then captures a screenshot, the visible DOM text, the
-host-bridge transcript, console/network errors, and runs app-aware assertions —
-and can execute a sequence of UI intents against the live widget.
-
-```bash
-pip install 'ghostlab[apps]' && playwright install chrome    # one-time
-ghostlab apps-render --target targets/cortex-local.json \
-  --tool views_generate_sentence_scramble \
-  --arguments '{"target_sentence":"The cat sat on the mat","shuffled_elements":["mat","The","on","sat","cat","the"]}' \
-  --intent '{"type":"reorder","value":["The","cat","sat","on","the","mat"]}' \
-  --intent '{"type":"reveal"}'
-```
-
-By default it **calls the tool** with `--arguments` to obtain the result the
-widget renders from (use `--no-call` to render from the arguments alone, or omit
-`--tool` to pick the first UI-producing tool). It writes `apps-render.json` +
-`apps-render.md`, a `widget.png` of the initial render, and a `widget-final.png`
-after the intents run. Exit status is non-zero if the render errored or any
-assertion failed, so it can gate CI. In the example above the reorder intent
-rebuilds the sentence and the widget confirms _"Nice work. Sentence is correct."_
-— proving both visibility and a completed interaction.
-
-This is the browser-backed increment of issue #13. Still ahead: richer per-widget
-assertions, the full request-side host bridge (`call-server-tool` proxying,
-`open-link`/`download-file` handling), and wiring the user emulator to emit UI
-intents during a live `run`.
-
-### Session runner (one live agent across turns)
-
-By default each turn spawns a fresh agent process and the orchestrator replays
-the transcript. The **session runner** (`"kind": "codex-session"`) instead keeps
-one codex session alive: turn 1 records the `thread_id` from the JSONL
-`thread.started` event, and later turns run `codex exec resume <thread_id>` so
-codex retains context — the orchestrator then sends only the new user message
-instead of the whole transcript (fewer tokens, no repeated cold-start noise). The
-shared `session_id` is logged per turn in `events.jsonl` for auditability.
-
-```bash
-ghostlab run --target targets/cortex-local.json --scenario <scenario.json> \
-  --aut-runner runners/codex-cortex-local-session.json --user-runner <user.json>
-```
-
-### Validate your setup: `doctor`
-
-Check that codex is reachable and that runner presets are well-formed before a
-run:
-
-```bash
-ghostlab doctor               # validates runners/*.json
-ghostlab doctor --runners runners/codex-cortex-local-session.json
-```
-
-It reports the codex binary + version and validates each runner's kind, command,
-and parser (e.g. a `codex-session` command must contain `exec`).
-
-### Default agent backend
-
-`codex` is the default coding-agent backend for the generation and run stages.
-The `inspect` command needs no agent — it is a direct MCP client. The codex
-binary is auto-detected from `$PATH`, then the macOS app bundle
-(`/Applications/Codex.app/Contents/Resources/codex`); override with
-`$REHEARSAL_CODEX_BIN` or `--codex-bin`.
-
-## Quick Start
-
-Run a mock scenario without spending any coding-agent credits:
-
-```bash
-cd mcp-rehearsal
-ghostlab run \
-  --target targets/example-stdio.json \
-  --scenario scenarios/basic-discovery.json \
-  --aut-runner runners/mock-aut.json \
-  --user-runner runners/mock-user.json
-```
-
-The run output is written under `runs/<run-id>/`:
-
-- `events.jsonl`: structured event log
-- `report.md`: readable run summary
-- `target.mcp.json`: generated `mcpServers` config for the target
-
-## Runner Configs
-
-Mock runner:
-
-```json
-{
-  "kind": "mock"
-}
-```
-
-Process runner:
-
-```json
-{
-  "kind": "process",
-  "command": ["codex", "exec", "-"],
-  "env": {},
-  "timeout_seconds": 300,
-  "prompt_mode": "stdin"
-}
-```
-
-The process runner starts one fresh process per turn. `prompt_mode` can be `stdin`, `append-arg`, or `replace-placeholder`. Rehearsal also sets `REHEARSAL_TARGET_ID` and `REHEARSAL_MCP_CONFIG` for the AUT process so runner commands can inject the generated MCP config into Codex, Claude Code, or another agent host.
-
-## Next Step
-
-Wire the process runner to real Codex and Claude Code MCP config injection, then add a Docker Compose sandbox for target MCP apps.

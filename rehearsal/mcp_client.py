@@ -17,7 +17,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import TargetConfig
+from .config import TargetConfig, expand_env
 
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "rehearsal-ghostlab", "version": "0.1.0"}
@@ -247,7 +247,11 @@ class StdioMcpClient(McpClient):
     def __init__(self, command: list[str], args: list[str], env: dict[str, str], timeout: float = 30.0) -> None:
         super().__init__()
         if not command:
-            raise McpClientError("stdio target requires a connection.command")
+            raise McpClientError(
+                "stdio target has no command. A GhostLab target needs "
+                "connection.command; a standard MCP config needs "
+                "mcpServers.<name>.command (pass --server to pick one)."
+            )
         import os
 
         full_command = [command, *args] if isinstance(command, str) else [*command, *args]
@@ -338,7 +342,9 @@ class StdioMcpClient(McpClient):
 
 def create_client(target: TargetConfig, timeout: float = 30.0) -> McpClient:
     """Build an MCP client for a target's transport."""
-    connection = target.connection
+    # Expand $VAR / ${VAR} in connection values (e.g. an auth header token kept
+    # in the environment instead of a tracked spec file).
+    connection = expand_env(target.connection)
     if target.transport == "stdio":
         return StdioMcpClient(
             command=connection.get("command"),

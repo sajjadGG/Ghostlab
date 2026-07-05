@@ -122,6 +122,55 @@ class CliSpecFlowTest(unittest.TestCase):
         self.assertTrue(list(workspace.glob("discover/*/contract.json")))
         self.assertTrue((workspace / "ghostlab.sqlite3").exists())
 
+    def test_create_from_config_auto_discovers(self) -> None:
+        server = self.tmp / "fake_mcp.py"
+        mcp_json = self.tmp / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {"mcpServers": {"notes": {"command": sys.executable, "args": [str(server)]}}}
+            ),
+            encoding="utf-8",
+        )
+        jobs_root = self.tmp / "jobs"
+        with patch.dict("os.environ", {"GHOSTLAB_JOBS_DIR": str(jobs_root)}):
+            # default: create auto-inspects the target, populating capabilities
+            code = main(["create", "--name", "with-disc", "--target", str(mcp_json), "--yes"])
+            self.assertEqual(code, 0)
+            spec = load_spec(jobs_root / "with-disc" / "job.yaml")
+            self.assertEqual(
+                {t["name"] for t in spec.capabilities["tools"]}, {"notes_list", "notes_delete"}
+            )
+
+            # --no-discover just scaffolds (no capabilities yet)
+            code = main([
+                "create", "--name", "no-disc", "--target", str(mcp_json), "--no-discover", "--yes"
+            ])
+            self.assertEqual(code, 0)
+            spec = load_spec(jobs_root / "no-disc" / "job.yaml")
+            self.assertEqual(spec.capabilities, {})
+
+    def test_inspect_accepts_standard_mcp_servers_config(self) -> None:
+        # A user's normal MCP client config (Codex/Claude Desktop shape), not a
+        # GhostLab target — issue #32.
+        server = self.tmp / "fake_mcp.py"
+        mcp_json = self.tmp / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {"mcpServers": {"notes": {"command": sys.executable, "args": [str(server)]}}}
+            ),
+            encoding="utf-8",
+        )
+        out_dir = self.tmp / "out"
+        code = main([
+            "inspect", "--target", str(mcp_json),
+            "--output-dir", str(out_dir), "--db", str(self.db_path),
+        ])
+        self.assertEqual(code, 0)
+        inspect_json = next(out_dir.glob("*/inspect.json"))
+        data = json.loads(inspect_json.read_text(encoding="utf-8"))
+        tool_names = {tool["name"] for tool in data["tools"]}
+        self.assertEqual(tool_names, {"notes_list", "notes_delete"})
+
     def test_discover_strict_fails_on_schema_errors(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
         code = main(

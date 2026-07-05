@@ -16,6 +16,7 @@ and seeds those directories; the heavy lifting stays in `spec.py`.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -30,6 +31,10 @@ from .spec import (
 
 JOB_FILE = "job.yaml"
 DEFAULT_JOBS_DIR = "jobs"
+RUNNERS_DIR = "runners"
+AUT_RUNNER_FILE = "aut.json"
+
+_BEARER_ENV_RE = re.compile(r"Bearer\s+\$\{(\w+)\}")
 
 # Documented in the generated job.yaml so users know what each prompt override
 # can interpolate. Keep in sync with the *_TEMPLATE placeholders in the prompt
@@ -109,12 +114,17 @@ def job_header(spec: GhostlabSpec) -> str:
 
 
 def target_from_url(url: str, *, transport: str = "streamable-http",
-                    timeout_seconds: int = 30) -> TargetConfig:
-    """Build a TargetConfig for a plain MCP URL (the wizard's common case)."""
+                    timeout_seconds: int = 30,
+                    headers: dict | None = None) -> TargetConfig:
+    """Build a TargetConfig for a plain MCP URL (the wizard's common case).
+
+    ``headers`` may reference environment variables (``${TOKEN}``) so a secret
+    stays out of the tracked job.yaml; they are expanded at connection time.
+    """
     return TargetConfig(
         id="target",
         transport=transport,
-        connection={"url": url, "headers": {}},
+        connection={"url": url, "headers": dict(headers or {})},
         startup={"timeout_seconds": timeout_seconds},
     )
 
@@ -150,6 +160,73 @@ def default_job_spec(
             "roles": ["agent_under_test"],
         })
     return spec
+
+
+def build_codex_aut_runner(spec: GhostlabSpec) -> dict:
+    """Synthesize a codex agent-under-test runner config for this job's target.
+
+    Wires the job's target MCP straight into a codex process via `-c
+    mcp_servers.<id>...` overrides (mirrors the hand-written examples in
+    `runners/codex-cortex-*-aut.json`), so `ghostlab create` can turn on
+    semantic/security testing without the user hand-editing a runner JSON.
+    Bearer-token auth (``Authorization: Bearer ${VAR}``) is detected and wired
+    via codex's `bearer_token_env_var`; anything else is left unwired (the
+    caller should tell the user auth wasn't configured, not fail the wizard).
+    """
+    target = spec.target_config()
+    connection = target.connection or {}
+    command = [
+        "codex", "--sandbox", "read-only", "-a", "never",
+    ]
+    if target.transport == "stdio":
+        parts = connection.get("command") or []
+        if isinstance(parts, str):
+            parts = [parts]
+        parts = [*parts, *(connection.get("args") or [])]
+        command += ["-c", f"mcp_servers.{spec.id}.command={json.dumps([str(p) for p in parts])}"]
+    else:
+        url = connection.get("url", "")
+        command += ["-c", f"mcp_servers.{spec.id}.url={json.dumps(str(url))}"]
+        for value in (connection.get("headers") or {}).values():
+            match = _BEARER_ENV_RE.search(str(value))
+            if match:
+                command += [
+                    "-c",
+                    f"mcp_servers.{spec.id}.bearer_token_env_var={json.dumps(match.group(1))}",
+                ]
+                break
+    command += ["exec", "--json", "--skip-git-repo-check", "-"]
+    return {
+        "kind": "process",
+        "command": command,
+        "env": {},
+        "timeout_seconds": 600,
+        "prompt_mode": "stdin",
+        "parser": "codex-json",
+    }
+
+
+def add_aut_host(spec: GhostlabSpec, spec_path: Path, runner_config: dict) -> Path:
+    """Write ``runner_config`` under the job dir and append it as an AUT host.
+
+    Returns the runner JSON path (relative `config_ref` is stored in the spec
+    so `job.yaml` stays portable). No-op-safe to call at most once per job —
+    callers should check `spec.hosts` for an existing process/codex-session
+    host first, since this always appends.
+    """
+    job_dir = spec_path.resolve().parent
+    runners_dir = job_dir / RUNNERS_DIR
+    runners_dir.mkdir(exist_ok=True)
+    runner_path = runners_dir / AUT_RUNNER_FILE
+    runner_path.write_text(json.dumps(runner_config, indent=2) + "\n", encoding="utf-8")
+    spec.hosts.append({
+        "id": "aut",
+        "kind": "process",
+        "config_ref": f"{RUNNERS_DIR}/{AUT_RUNNER_FILE}",
+        "roles": ["agent_under_test"],
+    })
+    save_spec(spec, spec_path)
+    return runner_path
 
 
 def create_job(
