@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,23 @@ from typing import Any
 
 class ConfigError(ValueError):
     """Raised when a Rehearsal config file is invalid."""
+
+
+def expand_env(value: Any) -> Any:
+    """Recursively expand ``$VAR`` / ``${VAR}`` from the environment in strings.
+
+    Lets secrets (auth headers, tokens) stay out of a tracked ``job.yaml``: write
+    ``Authorization: "Bearer ${GITHUB_MCP_TOKEN}"`` and export the token in the
+    shell instead. An undefined variable is left literal (so the request still
+    goes out, just unauthenticated) rather than raising.
+    """
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, dict):
+        return {key: expand_env(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [expand_env(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -85,19 +103,16 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def load_target(path: Path) -> TargetConfig:
-    data = load_json(path)
-    missing = [key for key in ("id", "transport", "connection") if key not in data]
-    if missing:
-        raise ConfigError(f"Target {path} is missing required keys: {', '.join(missing)}")
+def load_target(path: Path, server: str | None = None) -> TargetConfig:
+    """Load a target config into the canonical TargetConfig.
 
-    return TargetConfig(
-        id=str(data["id"]),
-        transport=str(data["transport"]),
-        connection=dict(data["connection"]),
-        capabilities=dict(data.get("capabilities", {})),
-        startup=dict(data.get("startup", {})),
-    )
+    Accepts either a GhostLab native target JSON or a standard MCP client config
+    with an ``mcpServers`` map (pick one with ``server``). Normalization lives in
+    the adapter layer, `rehearsal.mcp_targets`.
+    """
+    from .mcp_targets import load_target as _load_target
+
+    return _load_target(path, server=server)
 
 
 def load_scenario(path: Path) -> ScenarioConfig:

@@ -1,0 +1,121 @@
+# ghostlab spec for hf-mcp — edit freely; `ghostlab discover` updates
+# the `capabilities` section and leaves the rest of the file to you.
+schema_version: 1
+id: hf-mcp
+name: hf-mcp
+source_target: hf.json
+workspace: workspace
+target:
+  transport: streamable-http
+  connection:
+    url: https://huggingface.co/mcp
+    headers:
+      Authorization: "Bearer ${HF_TOKEN}"
+  capabilities: {}
+  startup: {}
+setup:
+  commands: []
+  health: []
+  reset: []
+  teardown: []
+  fixtures: []
+hosts:
+  - id: direct-mcp
+    kind: direct-mcp
+    roles:
+      - contract
+      - deterministic
+capabilities:
+  generated_from: workspace/discover/2026-07-05T194842.742600Z-hf-mcp/contract.json
+  discovered_at: 2026-07-05 19:48:43.708367+00:00
+  mcp: "@huggingface/mcp-services@0.3.26"
+  tools:
+    - name: hf_whoami
+      labels:
+        - read-only
+      produces_ui: false
+    - name: space_search
+      labels:
+        - read-only
+        - open-world
+      produces_ui: false
+    - name: hub_repo_search
+      labels:
+        - read-only
+        - credential-bearing
+        - open-world
+      produces_ui: false
+    - name: paper_search
+      labels:
+        - read-only
+        - open-world
+      produces_ui: false
+    - name: hub_repo_details
+      labels:
+        - read-only
+      produces_ui: false
+    - name: hf_doc_search
+      labels:
+        - read-only
+        - open-world
+      produces_ui: false
+    - name: hf_doc_fetch
+      labels:
+        - read-only
+        - external-network
+        - open-world
+      produces_ui: false
+    - name: dynamic_space
+      labels:
+        - mutates-state
+        - open-world
+      produces_ui: false
+    - name: hf_hub_query
+      labels:
+        - read-only
+        - open-world
+      produces_ui: false
+    - name: gr1_z_image_turbo_generate
+      labels:
+        - mutates-state
+        - open-world
+      produces_ui: false
+  ui_resources: []
+generation:
+  personas: 2
+  scenarios_per_persona: 2
+  model: ""
+  codex_bin: ""
+  regenerate: false
+test:
+  suites: []
+  judge: true
+  apps_mode: false
+  repeat: 1
+  timeout: 30.0
+  user_runner: ""
+  approved_only: false
+prompts:
+  aut: ""
+  user_emulator: ""
+  judge: ""
+  critique: ""
+  persona_gen: ""
+  scenario_gen: ""
+  profile: ""
+test_plan:
+  generated_dataset: workspace/generated/2026-07-05T195012.356304Z-hf-mcp
+  plan_file: test-plan.yaml
+  generated_at: 2026-07-05T19:50:12.359021+00:00
+  cases: 25
+  suites:
+    smoke: 9
+    semantic: 4
+    edge: 10
+    security: 2
+review:
+  gates:
+    min_pass_rate: 0.9
+    no_tool_schema_errors: true
+    no_ui_console_errors: true
+    no_high_security_findings: true

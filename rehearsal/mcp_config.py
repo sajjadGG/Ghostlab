@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .config import TargetConfig
+from .config import TargetConfig, expand_env
 
 
 def build_mcp_servers_config(target: TargetConfig) -> dict[str, object]:
-    connection = target.connection
+    # Expand $VAR / ${VAR} so a token kept in the environment reaches the
+    # agent-under-test's injected MCP config (not just the direct client).
+    connection = expand_env(target.connection)
 
     if target.transport == "stdio":
         server_config: dict[str, object] = {

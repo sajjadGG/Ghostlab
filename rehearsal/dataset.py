@@ -186,9 +186,10 @@ def run_dataset(
     capabilities: dict[str, Any] | None = None,
     backend: "Any | None" = None,
     store: "Any | None" = None,
+    server: str | None = None,
 ) -> Path:
     manifest = json.loads((dataset_dir / "dataset.json").read_text(encoding="utf-8"))
-    target = load_target(target_path)
+    target = load_target(target_path, server=server)
     aut_runner = load_runner(aut_runner_path)
     user_runner = load_runner(user_runner_path)
 

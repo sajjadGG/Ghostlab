@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from . import __version__
+from . import termcolor as tc
 from .config import ConfigError, RunnerConfig, load_persona, load_runner, load_scenario, load_target
 from .inspect import inspect_target, write_inspect_artifacts
 from .orchestrator import run_scenario
@@ -21,16 +23,79 @@ def _add_db_arg(parser: argparse.ArgumentParser) -> None:
         "--db",
         type=Path,
         default=None,
-        help="SQLite database path (default: ./ghostlab.sqlite3 or $GHOSTLAB_DB).",
+        help="SQLite database path (default: the job's workspace/ghostlab.sqlite3, "
+             "or ./ghostlab.sqlite3 / $GHOSTLAB_DB).",
     )
 
 
-def _open_store(args: argparse.Namespace):
+def _add_server_arg(parser: argparse.ArgumentParser) -> None:
+    """Server selector for a standard `mcpServers` config given via --target."""
+    parser.add_argument(
+        "--server", default=None,
+        help="When --target is a standard MCP config (mcpServers) with more than "
+             "one server, which server to test. Auto-selected when only one.",
+    )
+
+
+def _add_job_args(parser: argparse.ArgumentParser) -> None:
+    """Job selector for the discover/plan/test/review loop commands."""
+    parser.add_argument(
+        "--job", default=None,
+        help="Job to operate on: a name under jobs/<name>/, a job directory, or "
+             "(with no value) a job.yaml in the current directory.",
+    )
+    parser.add_argument(
+        "--spec", type=Path, default=None,
+        help="Explicit spec file path; overrides --job. For advanced use.",
+    )
+
+
+def _job_spec(args: argparse.Namespace):
+    """Resolve --job/--spec, load the spec, seed prompt overrides, default the db.
+
+    Sets ``args.spec`` to the resolved spec path so the rest of a handler (which
+    anchors every relative path on the spec's directory) works unchanged.
+    """
+    from . import prompts
+    from .jobs import resolve_job
+    from .spec import load_spec
+
+    spec_path = args.spec if getattr(args, "spec", None) else resolve_job(getattr(args, "job", None))
+    args.spec = spec_path
+    spec = load_spec(spec_path)
+    prompts.set_overrides(spec.prompts)
+    if hasattr(args, "db") and args.db is None:
+        # Keep each job self-contained: its db lives in the job workspace.
+        args.db = spec.workspace_dir(spec_path) / "ghostlab.sqlite3"
+    return spec
+
+
+def _job_output_dir(args: argparse.Namespace, default_name: str = "runs") -> Path:
+    """For run/run-dataset: honor an explicit --output-dir, else route into a
+    --job's folder (seeding its prompt overrides + db), else fall back to ./runs.
+    """
+    if getattr(args, "output_dir", None) is not None:
+        return args.output_dir
+    if getattr(args, "job", None):
+        from . import prompts
+        from .jobs import resolve_job
+        from .spec import load_spec
+
+        spec_path = resolve_job(args.job)
+        spec = load_spec(spec_path)
+        prompts.set_overrides(spec.prompts)
+        if hasattr(args, "db") and args.db is None:
+            args.db = spec.workspace_dir(spec_path) / "ghostlab.sqlite3"
+        return spec_path.parent / default_name
+    return Path(default_name)
+
+
+def _open_store(args: argparse.Namespace, workspace=None):
     """Open the persistence store, or None if it can't be opened (best-effort)."""
     from .storage import GhostlabStore
 
     try:
-        return GhostlabStore.open(getattr(args, "db", None))
+        return GhostlabStore.open(getattr(args, "db", None), workspace=workspace)
     except Exception as exc:  # noqa: BLE001
         print(f"  (persistence disabled: {exc})")
         return None
@@ -44,7 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = sub.add_parser(
         "init", help="Create a ghostlab.yaml spec from an existing target JSON."
     )
-    init_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
+    init_parser.add_argument(
+        "--target", required=True, type=Path,
+        help="Path to a GhostLab target JSON or a standard MCP config (mcpServers).",
+    )
+    _add_server_arg(init_parser)
     init_parser.add_argument(
         "--out", type=Path, default=Path("ghostlab.yaml"),
         help="Spec file to write (.yaml or .json; default: ghostlab.yaml).",
@@ -58,13 +127,62 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="Overwrite an existing spec file."
     )
 
+    create_parser = sub.add_parser(
+        "create",
+        help="End-to-end wizard: create a job, discover, configure semantic "
+             "testing, generate a plan, run it, and show the results.",
+    )
+    create_parser.add_argument("--name", default=None, help="Job name (skips the name prompt).")
+    create_parser.add_argument(
+        "--target", default=None,
+        help="Target MCP URL, or a path to a GhostLab target JSON or a standard "
+             "MCP config (mcpServers). Skips the target prompt.",
+    )
+    _add_server_arg(create_parser)
+    create_parser.add_argument(
+        "--transport", default=None,
+        help="MCP transport for a URL target (default: streamable-http).",
+    )
+    create_parser.add_argument(
+        "--header", action="append", default=None, metavar="NAME: VALUE",
+        help="Auth/other request header for a URL target (repeatable). Values may "
+             "reference env vars, e.g. --header 'Authorization: Bearer ${GH_TOKEN}', "
+             "which are expanded at connection time so no secret is written to job.yaml.",
+    )
+    create_parser.add_argument(
+        "--aut-runner", type=Path, default=None,
+        help="Runner JSON for the agent-under-test host (adds a process host).",
+    )
+    create_parser.add_argument(
+        "--personas", type=int, default=None, help="Default personas to generate (default: 2)."
+    )
+    create_parser.add_argument(
+        "--scenarios-per-persona", type=int, default=None,
+        help="Default scenarios per persona (default: 2).",
+    )
+    create_parser.add_argument(
+        "--min-pass-rate", type=float, default=None, help="Release gate min pass rate (default: 0.9)."
+    )
+    create_parser.add_argument(
+        "--discover", action=argparse.BooleanOptionalAction, default=True,
+        help="Run discover -> configure host -> generate plan -> pick suites -> "
+             "test -> review, right after creating the job (default: on). "
+             "--no-discover just scaffolds the job.",
+    )
+    create_parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Non-interactive: accept defaults for anything not passed as a flag "
+             "(runs every generated suite, sets up codex if available).",
+    )
+    create_parser.add_argument(
+        "--force", action="store_true", help="Overwrite an existing job of the same name."
+    )
+
     discover_parser = sub.add_parser(
         "discover",
-        help="Inspect the spec's target, lint its contract, and refresh spec capabilities.",
+        help="Inspect the job's target, lint its contract, and refresh capabilities.",
     )
-    discover_parser.add_argument(
-        "--spec", type=Path, default=Path("ghostlab.yaml"), help="Path to the ghostlab spec."
-    )
+    _add_job_args(discover_parser)
     discover_parser.add_argument(
         "--timeout", type=float, default=30.0, help="Per-request timeout in seconds."
     )
@@ -99,9 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
         "plan",
         help="Generate (or curate) a coverage-driven test plan from discover artifacts.",
     )
-    plan_parser.add_argument(
-        "--spec", type=Path, default=Path("ghostlab.yaml"), help="Path to the ghostlab spec."
-    )
+    _add_job_args(plan_parser)
     plan_parser.add_argument(
         "--out", type=Path, default=None,
         help="Plan file to write (default: test-plan.yaml next to the spec).",
@@ -138,11 +254,9 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--model", default="", help="Model override for codex.")
 
     test_parser = sub.add_parser(
-        "test", help="Execute the test plan across the spec's host adapters."
+        "test", help="Execute the test plan across the job's host adapters."
     )
-    test_parser.add_argument(
-        "--spec", type=Path, default=Path("ghostlab.yaml"), help="Path to the ghostlab spec."
-    )
+    _add_job_args(test_parser)
     test_parser.add_argument(
         "--plan", type=Path, default=None,
         help="Plan file (default: test-plan.yaml next to the spec).",
@@ -193,7 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit non-zero when review gates (e.g. min_pass_rate) fail.",
     )
     test_parser.add_argument(
-        "--judge", action=argparse.BooleanOptionalAction, default=True,
+        "--judge", action=argparse.BooleanOptionalAction, default=None,
         help="Score conversational runs with the codex judge + tool-usability "
              "critique (default: on). --no-judge runs conversations but grades "
              "pass/fail only by whether they finished.",
@@ -207,9 +321,7 @@ def build_parser() -> argparse.ArgumentParser:
         "review",
         help="Readiness report over discover + plan + test artifacts (release gate).",
     )
-    review_spec_parser.add_argument(
-        "--spec", type=Path, default=Path("ghostlab.yaml"), help="Path to the ghostlab spec."
-    )
+    _add_job_args(review_spec_parser)
     review_spec_parser.add_argument(
         "--results", type=Path, default=None,
         help="Test results dir or results.json (default: latest under the workspace).",
@@ -220,16 +332,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     run_parser = sub.add_parser("run", help="Run a dual-agent E2E scenario.")
-    run_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
+    run_parser.add_argument(
+        "--target", required=True, type=Path,
+        help="Path to a GhostLab target JSON or a standard MCP config (mcpServers).",
+    )
+    _add_server_arg(run_parser)
     run_parser.add_argument("--scenario", required=True, type=Path, help="Path to scenario JSON config.")
     run_parser.add_argument("--aut-runner", type=Path, help="Path to AUT runner JSON config.")
     run_parser.add_argument("--user-runner", type=Path, help="Path to user emulator runner JSON config.")
     run_parser.add_argument("--persona", type=Path, help="Optional persona JSON to drive the user emulator.")
-    run_parser.add_argument("--output-dir", type=Path, default=Path("runs"), help="Directory for logs and reports.")
+    run_parser.add_argument(
+        "--job", default=None,
+        help="Route output + db into this job's folder (jobs/<name>/runs/) and use its prompt overrides.",
+    )
+    run_parser.add_argument("--output-dir", type=Path, default=None, help="Directory for logs and reports (default: the job's runs/ or ./runs).")
     _add_db_arg(run_parser)
 
     inspect_parser = sub.add_parser("inspect", help="Introspect a target MCP server.")
-    inspect_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
+    inspect_parser.add_argument(
+        "--target", required=True, type=Path,
+        help="Path to a GhostLab target JSON or a standard MCP config (mcpServers).",
+    )
+    _add_server_arg(inspect_parser)
     inspect_parser.add_argument(
         "--output-dir", type=Path, default=Path("runs"), help="Directory for inspect artifacts."
     )
@@ -318,11 +442,19 @@ def build_parser() -> argparse.ArgumentParser:
     rundataset_parser.add_argument(
         "--dataset", required=True, type=Path, help="Path to a dataset directory (with dataset.json)."
     )
-    rundataset_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
+    rundataset_parser.add_argument(
+        "--target", required=True, type=Path,
+        help="Path to a GhostLab target JSON or a standard MCP config (mcpServers).",
+    )
+    _add_server_arg(rundataset_parser)
     rundataset_parser.add_argument("--aut-runner", type=Path, help="Path to AUT runner JSON config.")
     rundataset_parser.add_argument("--user-runner", type=Path, help="Path to user emulator runner JSON config.")
     rundataset_parser.add_argument(
-        "--output-dir", type=Path, default=Path("runs"), help="Directory for per-case runs and summary."
+        "--job", default=None,
+        help="Route output + db into this job's folder (jobs/<name>/runs/) and use its prompt overrides.",
+    )
+    rundataset_parser.add_argument(
+        "--output-dir", type=Path, default=None, help="Directory for per-case runs and summary (default: the job's runs/ or ./runs)."
     )
     rundataset_parser.add_argument(
         "--limit", type=int, default=None, help="Only run the first N cases (for small dev runs)."
@@ -423,7 +555,11 @@ def build_parser() -> argparse.ArgumentParser:
         "apps-probe",
         help="Probe a target's MCP Apps (ui://) widgets: fetch resources + CSP diagnostics.",
     )
-    apps_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
+    apps_parser.add_argument(
+        "--target", required=True, type=Path,
+        help="Path to a GhostLab target JSON or a standard MCP config (mcpServers).",
+    )
+    _add_server_arg(apps_parser)
     apps_parser.add_argument(
         "--tool", action="append", default=None,
         help="Restrict to specific UI tool(s) by name (repeatable).",
@@ -439,7 +575,11 @@ def build_parser() -> argparse.ArgumentParser:
         "apps-render",
         help="Render an MCP Apps (ui://) widget in headless Chrome and capture proof.",
     )
-    render_parser.add_argument("--target", required=True, type=Path, help="Path to target JSON config.")
+    render_parser.add_argument(
+        "--target", required=True, type=Path,
+        help="Path to a GhostLab target JSON or a standard MCP config (mcpServers).",
+    )
+    _add_server_arg(render_parser)
     render_parser.add_argument(
         "--tool", default=None, help="UI tool to render (default: first UI-producing tool)."
     )
@@ -491,7 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_init(args: argparse.Namespace) -> int:
     from .spec import DEFAULT_WORKSPACE, save_spec, spec_from_target
 
-    target = load_target(args.target)
+    target = load_target(args.target, args.server)
     if args.out.exists() and not args.force:
         print(f"{args.out} already exists; use --force to overwrite.")
         return 1
@@ -508,18 +648,213 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_header_lines(lines: list[str]) -> dict[str, str]:
+    """Parse `Name: Value` header strings into a dict (malformed ones warned)."""
+    headers: dict[str, str] = {}
+    for line in lines:
+        field, sep, value = line.partition(":")
+        if not sep:
+            print(f"  (ignoring malformed --header {line!r}; expected 'Name: Value')")
+            continue
+        headers[field.strip()] = value.strip()
+    return headers
+
+
+def _discover_new_job(slug: str) -> int:
+    """Run `discover` on a freshly created job (reuses the discover handler)."""
+    disc_args = argparse.Namespace(
+        job=slug, spec=None, db=None, skip_setup=False, timeout=30.0,
+        sample="off", approve_mutations=False, approve_destructive=False,
+        skip_apps=False, strict=False,
+    )
+    return cmd_discover(disc_args)
+
+
+def cmd_create(args: argparse.Namespace) -> int:
+    from .config import load_target
+    from .jobs import create_job, default_job_spec, slugify, target_from_url
+
+    interactive = not args.yes
+
+    def ask(prompt: str, default: str = "") -> str:
+        if not interactive:
+            return default
+        try:
+            raw = input(prompt).strip()
+        except EOFError:
+            return default
+        return raw or default
+
+    def ask_yn(prompt: str, default: bool) -> bool:
+        raw = ask(f"{prompt} [{'Y/n' if default else 'y/N'}] ", "y" if default else "n")
+        return raw.strip().lower() not in ("n", "no")
+
+    # Only the two things GhostLab can't infer are ever prompted for; everything
+    # else comes from flags or documented defaults (all editable in job.yaml).
+    name = args.name or ask("Job name: ")
+    if not name:
+        print("A job name is required (pass --name or answer the prompt).")
+        return 1
+
+    target_value = args.target or ask("Target MCP URL or config path: ")
+    if not target_value:
+        print("A target is required (pass --target or answer the prompt).")
+        return 1
+
+    source_target = ""
+    target_path = Path(target_value)
+    is_config_file = target_path.suffix.lower() == ".json" and target_path.exists()
+    if is_config_file:
+        # A config file already carries transport + headers/env — don't re-ask.
+        try:
+            target = load_target(target_path, server=args.server)
+        except ConfigError as exc:
+            print(str(exc))
+            return 1
+        source_target = str(target_path)
+    else:
+        target = target_from_url(
+            target_value,
+            transport=args.transport or "streamable-http",
+            headers=_parse_header_lines(list(args.header or [])),
+        )
+
+    generation: dict = {}
+    if args.personas is not None:
+        generation["personas"] = args.personas
+    if args.scenarios_per_persona is not None:
+        generation["scenarios_per_persona"] = args.scenarios_per_persona
+    review_gates = {"min_pass_rate": args.min_pass_rate} if args.min_pass_rate is not None else None
+
+    spec = default_job_spec(
+        name,
+        target=target,
+        source_target=source_target,
+        generation=generation,
+        review_gates=review_gates,
+        aut_runner=str(args.aut_runner) if args.aut_runner else None,
+    )
+    try:
+        spec_path = create_job(name, spec, force=args.force)
+    except ConfigError as exc:
+        print(str(exc))
+        return 1
+
+    slug = slugify(name)
+    job_dir = spec_path.parent
+    print(tc.heading(f"Created job '{slug}' at {job_dir}/  (job.yaml + workspace/ + runs/)"))
+    print(f"  target: {target.transport} {target.connection.get('url') or target.connection.get('command') or ''}")
+
+    if not args.discover:
+        print(tc.muted(f"  next: ghostlab discover --job {slug}"))
+        return 0
+
+    # Inspect the target right away so the job is validated + capabilities are
+    # populated — especially the point when a config file was handed in.
+    print()
+    try:
+        rc = _discover_new_job(slug)
+    except Exception as exc:  # noqa: BLE001 — never lose the created job over a bad target
+        print(tc.verdict(f"  discovery failed: {exc}", "fail"))
+        rc = 1
+    if rc != 0:
+        print(tc.muted(f"  job created; fix the target/auth then: ghostlab discover --job {slug}"))
+        return 0
+
+    _configure_aut_host(spec_path, ask_yn)
+
+    print()
+    plan_args = argparse.Namespace(
+        job=slug, spec=None, db=None, out=None, approve=None, reject=None,
+        generate=True, regenerate=False,
+        personas=args.personas, scenarios_per_persona=args.scenarios_per_persona,
+        codex_bin="", model="",
+    )
+    if cmd_plan(plan_args) != 0:
+        print(tc.muted(f"  job created; fix the plan then: ghostlab plan --job {slug}"))
+        return 0
+
+    from .plan import load_test_plan
+
+    plan = load_test_plan(job_dir / "test-plan.yaml")
+    suite_names = [name for name, entry in plan["suites"].items() if entry["cases"]]
+    chosen_suites = None
+    if suite_names:
+        raw = ask(f"\nRun which suites? [all: {', '.join(suite_names)}] ", "all")
+        if raw.strip().lower() not in ("", "all"):
+            picked = [s.strip() for s in raw.split(",") if s.strip()]
+            unknown = [s for s in picked if s not in suite_names]
+            if unknown:
+                print(f"  (ignoring unknown suite(s): {', '.join(unknown)})")
+            chosen_suites = [s for s in picked if s in suite_names] or None
+
+    print()
+    test_args = argparse.Namespace(
+        job=slug, spec=None, db=None, plan=None, suite=chosen_suites, hosts=None,
+        approved_only=False, user_runner=None, apps_mode=False, skip_setup=False,
+        timeout=30.0, repeat=1, profile=None, strict=False, judge=None,
+        codex_bin="", model="",
+    )
+    cmd_test(test_args)
+
+    print()
+    review_args = argparse.Namespace(job=slug, spec=None, db=None, results=None, strict=False)
+    cmd_review_spec(review_args)
+
+    print()
+    print(tc.muted(
+        f"  rerun anytime: ghostlab test --job {slug}   |   "
+        f"gate report: ghostlab review --job {slug}"
+    ))
+    return 0
+
+
+def _configure_aut_host(spec_path: Path, ask_yn) -> None:
+    """Offer to wire an agent-under-test host so semantic/security suites run.
+
+    A fresh job has no host capable of executing conversational cases, so they
+    silently skip in `ghostlab test` until one is configured. Codex is the only
+    auto-detected/auto-wired backend today; anything else stays a manual
+    `--aut-runner` / `hosts:` edit.
+    """
+    from .codex_backend import CodexError, resolve_codex_bin
+    from .jobs import add_aut_host, build_codex_aut_runner
+    from .spec import load_spec
+
+    spec = load_spec(spec_path)  # reload: discover just updated `capabilities`
+    if any(h.get("kind") in ("process", "codex-session") for h in spec.hosts):
+        return  # --aut-runner (or a hand-edited job.yaml) already set one up
+
+    try:
+        resolve_codex_bin()
+    except CodexError:
+        print(tc.muted(
+            "  codex not found — semantic/security suites will skip until an "
+            "agent-under-test host is configured (see README)."
+        ))
+        return
+
+    if not ask_yn("\nSet up semantic/E2E testing with codex?", True):
+        print(tc.muted("  skipping — semantic/security suites will skip for now."))
+        return
+
+    runner_config = build_codex_aut_runner(spec)
+    runner_path = add_aut_host(spec, spec_path, runner_config)
+    print(f"  wrote {runner_path}")
+    print(f"  updated {spec_path} (hosts: aut)")
+
+
 def cmd_discover(args: argparse.Namespace) -> int:
     from dataclasses import asdict
 
     from .setup_runtime import SetupError, SetupRuntime
-    from .spec import load_spec
 
-    spec = load_spec(args.spec)
+    spec = _job_spec(args)
     target = spec.target_config()
     timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
     out_dir = spec.workspace_dir(args.spec) / "discover" / f"{timestamp}-{spec.id}"
 
-    print(f"Discovering '{spec.id}' ({target.transport})...")
+    print(tc.heading(f"Discovering '{spec.id}' ({target.transport})..."))
     runtime = SetupRuntime({} if args.skip_setup else spec.setup, out_dir)
     try:
         if runtime.declared:
@@ -588,13 +923,15 @@ def _discover_inspect(args, spec, target, out_dir: Path, runtime) -> int:
         f"  tools={contract['counts']['tools']} (ui={ui_tool_count}) "
         f"resources={contract['counts']['resources']} prompts={contract['counts']['prompts']}"
     )
+    error_status = "fail" if severities["error"] else "pass"
     print(
-        f"  contract findings: {severities['error']} error(s), "
-        f"{severities['warning']} warning(s), {severities['info']} info"
+        "  contract findings: "
+        + tc.verdict(f"{severities['error']} error(s)", error_status)
+        + f", {severities['warning']} warning(s), {severities['info']} info"
     )
     for finding in contract["findings"]:
         if finding["severity"] == "error":
-            print(f"  ! [{finding['kind']}] {finding['in']}: {finding['message']}")
+            print(tc.verdict(f"  ! [{finding['kind']}] {finding['in']}: {finding['message']}", "fail"))
     if apps_report is not None:
         summary = apps_report["summary"]
         print(
@@ -761,9 +1098,14 @@ def _get_generated_cases(args: argparse.Namespace, spec, inspect_data: dict) -> 
     n_personas = args.personas or DEFAULT_N_PERSONAS
     scenarios_per_persona = args.scenarios_per_persona or DEFAULT_SCENARIOS_PER_PERSONA
     backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    try:
+        codex_bin = backend._bin()
+    except CodexError as exc:
+        print(f"  generation skipped (codex error): {exc}")
+        return None
     print(
         f"  generating {n_personas} persona(s) x {scenarios_per_persona} scenario(s) "
-        f"with codex ({backend._bin()})..."
+        f"with codex ({codex_bin})..."
     )
 
     def progress(event: dict) -> None:
@@ -798,9 +1140,21 @@ def cmd_plan(args: argparse.Namespace) -> int:
         set_case_statuses,
         write_test_plan,
     )
-    from .spec import load_spec, save_spec
+    from .spec import save_spec
 
-    spec = load_spec(args.spec)
+    spec = _job_spec(args)
+    # Editable defaults: explicit flag -> spec.generation -> code default.
+    gen = spec.generation or {}
+    if args.personas is None:
+        args.personas = gen.get("personas")
+    if args.scenarios_per_persona is None:
+        args.scenarios_per_persona = gen.get("scenarios_per_persona")
+    if not args.model:
+        args.model = gen.get("model", "") or ""
+    if not args.codex_bin:
+        args.codex_bin = gen.get("codex_bin", "") or ""
+    if not args.regenerate:
+        args.regenerate = bool(gen.get("regenerate", False))
     plan_path = args.out or args.spec.resolve().parent / "test-plan.yaml"
 
     # Curation-only mode: --approve / --reject touch statuses, no regeneration.
@@ -864,21 +1218,29 @@ def cmd_plan(args: argparse.Namespace) -> int:
     }
     save_spec(spec, args.spec)
 
-    print(f"Planned {len(plan['cases'])} case(s) for '{spec.id}'")
-    for suite, entry in plan["suites"].items():
-        if entry["cases"]:
+    print(tc.heading(f"Planned {len(plan['cases'])} case(s) for '{spec.id}'"))
+    e2e_suites = ("semantic", "security", "error-recovery", "apps", "host-compat", "regression")
+    for suite in e2e_suites:
+        entry = plan["suites"].get(suite)
+        if entry and entry["cases"]:
             print(f"  {suite}: {entry['cases']}")
+    protocol_total = sum(
+        entry["cases"] for suite, entry in plan["suites"].items()
+        if suite not in e2e_suites and entry["cases"]
+    )
+    if protocol_total:
+        print(tc.muted(f"  + {protocol_total} protocol case(s) (smoke/edge)"))
     gaps = plan["coverage"]["gaps"]
     if gaps:
         print(f"  coverage gaps: {len(gaps)}")
         for gap in gaps[:5]:
             print(f"  ! {gap}")
     for note in plan["notes"]:
-        print(f"  note: {note}")
+        print(tc.muted(f"  note: {note}"))
     print(f"  wrote {plan_path}")
     print(f"  wrote {md_path}")
     print(f"  updated {args.spec} (test_plan)")
-    print("  next: review statuses, then `ghostlab plan --approve` to approve all")
+    print(tc.muted("  next: review statuses, then `ghostlab plan --approve` to approve all"))
     return 0
 
 
@@ -886,10 +1248,10 @@ def cmd_test(args: argparse.Namespace) -> int:
     from .hosts import build_hosts
     from .plan import load_test_plan
     from .setup_runtime import SetupError, SetupRuntime
-    from .spec import load_spec
     from .testrun import evaluate_gates, execute_plan_repeated, render_results_md
 
-    # CI profile presets; explicit flags win.
+    # CI profile presets; explicit flags win (and a profile beats job.yaml too,
+    # so this runs before the spec-default resolution below).
     if args.profile == "smoke" and not args.suite:
         args.suite = ["smoke", "edge"]
     elif args.profile == "release":
@@ -897,7 +1259,28 @@ def cmd_test(args: argparse.Namespace) -> int:
             args.repeat = 3
         args.strict = True
 
-    spec = load_spec(args.spec)
+    spec = _job_spec(args)
+    # Editable defaults: explicit flag (or profile) -> spec.test/generation -> code default.
+    t = spec.test or {}
+    if args.suite is None and t.get("suites"):
+        args.suite = list(t["suites"])
+    if args.judge is None:
+        args.judge = bool(t.get("judge", True))
+    if not args.apps_mode and t.get("apps_mode"):
+        args.apps_mode = True
+    if not args.approved_only and t.get("approved_only"):
+        args.approved_only = True
+    if args.user_runner is None and t.get("user_runner"):
+        args.user_runner = Path(t["user_runner"])
+    if args.repeat == 1 and t.get("repeat"):
+        args.repeat = int(t["repeat"])
+    if args.timeout == 30.0 and t.get("timeout") is not None:
+        args.timeout = float(t["timeout"])
+    gen = spec.generation or {}
+    if not args.model:
+        args.model = gen.get("model", "") or ""
+    if not args.codex_bin:
+        args.codex_bin = gen.get("codex_bin", "") or ""
     plan_path = args.plan or args.spec.resolve().parent / "test-plan.yaml"
     if not plan_path.exists():
         raise ConfigError(f"No plan at {plan_path}; run `ghostlab plan --spec {args.spec}` first.")
@@ -942,10 +1325,24 @@ def cmd_test(args: argparse.Namespace) -> int:
 
     timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
     out_dir = spec.workspace_dir(args.spec) / "test" / f"{timestamp}-{spec.id}"
-    print(
+    print(tc.heading(
         f"Testing '{spec.id}' with host(s): {', '.join(host.id for host in hosts)}"
         + (f" (suites: {', '.join(args.suite)})" if args.suite else "")
-    )
+    ))
+
+    def progress(line: str) -> None:
+        match = re.match(r"^(\s*)-> (pass|fail|error|skip)\b(.*)$", line)
+        if match:
+            indent, status, rest = match.groups()
+            print(f"{indent}-> {tc.verdict(status, status)}{rest}")
+        elif ": skip (" in line:
+            print(tc.muted(line))
+        elif line.startswith("==="):
+            print(tc.heading(line))
+        elif line.endswith("..."):
+            print(tc.muted(line))
+        else:
+            print(line)
 
     runtime = SetupRuntime({} if args.skip_setup else spec.setup, out_dir)
     try:
@@ -953,11 +1350,11 @@ def cmd_test(args: argparse.Namespace) -> int:
             try:
                 runtime.start()
             except SetupError as exc:
-                print(f"  setup failed: {exc}")
+                print(tc.verdict(f"  setup failed: {exc}", "fail"))
                 runtime.write_status()
                 return 1
             if not runtime.wait_healthy():
-                print("  target is not healthy; aborting test run")
+                print(tc.verdict("  target is not healthy; aborting test run", "fail"))
                 runtime.write_status()
                 return 1
         results = execute_plan_repeated(
@@ -965,6 +1362,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             repeat=max(1, args.repeat),
             suites=args.suite,
             approved_only=args.approved_only,
+            progress=progress,
         )
     finally:
         runtime.teardown()
@@ -980,21 +1378,25 @@ def cmd_test(args: argparse.Namespace) -> int:
 
     totals = results["totals"]
     rate = results["pass_rate"]
-    print(
+    print(tc.heading(
         f"  executed {results['executed']} case-run(s): "
         f"{totals['pass']} pass, {totals['fail']} fail, {totals['error']} error "
         f"({totals['skip']} skipped)"
-    )
-    print(f"  pass rate: {'n/a' if rate is None else f'{rate:.0%}'}"
+    ))
+    rate_status = "pass" if rate is not None and rate >= 0.9 else ("fail" if rate is not None else "skip")
+    print(tc.verdict(f"  pass rate: {'n/a' if rate is None else f'{rate:.0%}'}", rate_status)
           + (f" across {results['attempts']} attempts" if results.get("attempts") else ""))
     reported: set[str] = set()
     for entry in results["results"]:
         if entry["status"] in ("fail", "error") and entry["case"] not in reported:
             reported.add(entry["case"])
-            print(f"  ! {entry['case']} [{entry['host']}] {entry['status']}: {entry.get('detail', '')}")
+            print(tc.verdict(
+                f"  ! {entry['case']} [{entry['host']}] {entry['status']}: {entry.get('detail', '')}",
+                entry["status"],
+            ))
     flaky = results.get("variance", {}).get("flaky_cases", [])
     if flaky:
-        print(f"  FLAKY: {', '.join(flaky)}")
+        print(tc.verdict(f"  FLAKY: {', '.join(flaky)}", "partial"))
     if results.get("variance"):
         variance_path = out_dir / "variance.json"
         variance_path.write_text(
@@ -1014,7 +1416,7 @@ def cmd_test(args: argparse.Namespace) -> int:
 
     gate_failures = evaluate_gates(results, (spec.review or {}).get("gates", {}))
     for failure in gate_failures:
-        print(f"  GATE FAILED: {failure}")
+        print(tc.verdict(f"  GATE FAILED: {failure}", "fail"))
     if args.strict and gate_failures:
         return 1
     return 0
@@ -1023,9 +1425,8 @@ def cmd_test(args: argparse.Namespace) -> int:
 def cmd_review_spec(args: argparse.Namespace) -> int:
     from .plan import load_test_plan
     from .readiness import build_readiness, render_readiness_md
-    from .spec import load_spec
 
-    spec = load_spec(args.spec)
+    spec = _job_spec(args)
     spec_dir = args.spec.resolve().parent
 
     contract = None
@@ -1077,14 +1478,15 @@ def cmd_review_spec(args: argparse.Namespace) -> int:
     )
     md_path.write_text(render_readiness_md(readiness), encoding="utf-8")
 
-    print(f"Readiness for '{spec.id}': {readiness['verdict'].upper()}")
+    verdict_status = {"ready": "pass", "needs-work": "partial", "not-ready": "fail"}[readiness["verdict"]]
+    print(tc.heading(f"Readiness for '{spec.id}': ") + tc.verdict(readiness["verdict"].upper(), verdict_status))
     for gate in readiness["gates"]:
         marker = {"pass": "ok", "fail": "!!", "not-evaluated": "--"}[gate["status"]]
-        print(f"  [{marker}] {gate['gate']}: {gate['detail']}")
+        print(tc.verdict(f"  [{marker}] {gate['gate']}: {gate['detail']}", gate["status"]))
     if readiness["failures"]:
-        print(f"  failure clusters: {len(readiness['failures'])}")
+        print(tc.verdict(f"  failure clusters: {len(readiness['failures'])}", "fail"))
         for cluster in readiness["failures"][:3]:
-            print(f"  ! {cluster['category']} x{cluster['count']}: {cluster['signature']}")
+            print(tc.verdict(f"  ! {cluster['category']} x{cluster['count']}: {cluster['signature']}", "fail"))
     if readiness["repairs"]:
         top = readiness["repairs"][0]
         print(f"  repairs: {len(readiness['repairs'])} (start with P{top['priority']} {top['kind']})")
@@ -1108,11 +1510,12 @@ def cmd_review_spec(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    target = load_target(args.target)
+    target = load_target(args.target, args.server)
     scenario = load_scenario(args.scenario)
     aut_runner = load_runner(args.aut_runner)
     user_runner = load_runner(args.user_runner)
     persona = load_persona(args.persona) if args.persona else None
+    output_dir = _job_output_dir(args)
     store = _open_store(args)
     try:
         result = run_scenario(
@@ -1120,7 +1523,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             scenario=scenario,
             aut_runner_config=aut_runner,
             user_runner_config=user_runner,
-            output_dir=args.output_dir,
+            output_dir=output_dir,
             persona=persona,
             store=store,
         )
@@ -1133,7 +1536,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
-    target = load_target(args.target)
+    target = load_target(args.target, args.server)
     result = inspect_target(target, timeout=args.timeout)
     timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
     out_dir = args.output_dir / f"{timestamp}-{target.id}-inspect"
@@ -1336,6 +1739,7 @@ def cmd_run_dataset(args: argparse.Namespace) -> int:
                 raise ConfigError(f"capabilities.json not found: {args.capabilities}")
             capabilities = json.loads(args.capabilities.read_text(encoding="utf-8"))
 
+    output_dir = _job_output_dir(args)
     store = _open_store(args)
     try:
         summary_path = run_dataset(
@@ -1343,13 +1747,14 @@ def cmd_run_dataset(args: argparse.Namespace) -> int:
             target_path=args.target,
             aut_runner_path=args.aut_runner,
             user_runner_path=args.user_runner,
-            output_dir=args.output_dir,
+            output_dir=output_dir,
             limit=args.limit,
             approved_only=args.approved_only,
             evaluate=args.evaluate,
             capabilities=capabilities,
             backend=backend,
             store=store,
+            server=args.server,
         )
     finally:
         if store is not None:
@@ -1585,7 +1990,7 @@ def cmd_apps_probe(args: argparse.Namespace) -> int:
     from .mcp_apps import build_app_report, probe_ui_tools, render_app_report_md
     from .mcp_client import create_client
 
-    target = load_target(args.target)
+    target = load_target(args.target, args.server)
     client = create_client(target, timeout=args.timeout)
     try:
         client.initialize()
@@ -1640,7 +2045,7 @@ def cmd_apps_render(args: argparse.Namespace) -> int:
         )
         return 1
 
-    target = load_target(args.target)
+    target = load_target(args.target, args.server)
     arguments = _load_json_arg(args.arguments)
     intents = [parse_ui_intent(json.loads(item)) for item in (args.intent or [])]
 
@@ -1778,6 +2183,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 _HANDLERS.update(
     {
         "init": cmd_init,
+        "create": cmd_create,
         "dashboard": cmd_dashboard,
         "discover": cmd_discover,
         "plan": cmd_plan,

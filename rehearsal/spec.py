@@ -24,7 +24,11 @@ from typing import Any
 from .config import ConfigError, TargetConfig, load_json
 
 SPEC_SCHEMA_VERSION = 1
+# Legacy specs (root ghostlab.yaml) used a hidden .ghostlab workspace. Self-
+# contained jobs keep everything under the job dir, so a job's workspace is a
+# plain sibling folder (see JOB_WORKSPACE / rehearsal.jobs).
 DEFAULT_WORKSPACE = ".ghostlab"
+JOB_WORKSPACE = "workspace"
 
 _TOP_LEVEL_KEYS = (
     "schema_version",
@@ -36,9 +40,43 @@ _TOP_LEVEL_KEYS = (
     "setup",
     "hosts",
     "capabilities",
+    "generation",
+    "test",
+    "prompts",
     "test_plan",
     "review",
 )
+
+# Curated, editable defaults surfaced into every generated job.yaml so a user
+# can see and tune every knob in one place. Kept here (not in argparse) so the
+# CLI can resolve `explicit flag -> spec setting -> this default`.
+DEFAULT_GENERATION = {
+    "personas": 2,
+    "scenarios_per_persona": 2,
+    "model": "",
+    "codex_bin": "",
+    "regenerate": False,
+}
+DEFAULT_TEST = {
+    "suites": [],  # empty = all suites
+    "judge": True,
+    "apps_mode": False,
+    "repeat": 1,
+    "timeout": 30.0,
+    "user_runner": "",
+    "approved_only": False,
+}
+# Each prompt is overridable; "" means "use the built-in template". The
+# placeholders each template accepts are documented in the job.yaml header.
+DEFAULT_PROMPTS = {
+    "aut": "",
+    "user_emulator": "",
+    "judge": "",
+    "critique": "",
+    "persona_gen": "",
+    "scenario_gen": "",
+    "profile": "",
+}
 
 
 @dataclass
@@ -58,6 +96,12 @@ class GhostlabSpec:
     hosts: list[dict[str, Any]] = field(default_factory=list)
     # Discovered capabilities: generated_from, tools, ui_resources.
     capabilities: dict[str, Any] = field(default_factory=dict)
+    # Editable knobs for `plan`/`test` (persona/scenario counts, suites, judge,
+    # etc.); the CLI resolves explicit flag -> these -> code default.
+    generation: dict[str, Any] = field(default_factory=dict)
+    test: dict[str, Any] = field(default_factory=dict)
+    # Optional prompt overrides ("" per key = use the built-in template).
+    prompts: dict[str, Any] = field(default_factory=dict)
     test_plan: dict[str, Any] = field(default_factory=dict)
     review: dict[str, Any] = field(default_factory=dict)
     # Keys we don't model yet; preserved verbatim on save so human edits and
@@ -100,6 +144,9 @@ class GhostlabSpec:
         data["setup"] = self.setup
         data["hosts"] = self.hosts
         data["capabilities"] = self.capabilities
+        data["generation"] = self.generation
+        data["test"] = self.test
+        data["prompts"] = self.prompts
         data["test_plan"] = self.test_plan
         data["review"] = self.review
         data.update(self.extras)
@@ -138,6 +185,9 @@ def spec_from_dict(data: dict[str, Any], source: str = "spec") -> GhostlabSpec:
         setup=dict(data.get("setup", {}) or {}),
         hosts=[dict(host) for host in hosts],
         capabilities=dict(data.get("capabilities", {}) or {}),
+        generation=dict(data.get("generation", {}) or {}),
+        test=dict(data.get("test", {}) or {}),
+        prompts=dict(data.get("prompts", {}) or {}),
         test_plan=dict(data.get("test_plan", {}) or {}),
         review=dict(data.get("review", {}) or {}),
         extras=extras,
@@ -172,6 +222,9 @@ def spec_from_target(
             }
         ],
         capabilities={},
+        generation=dict(DEFAULT_GENERATION),
+        test=dict(DEFAULT_TEST),
+        prompts=dict(DEFAULT_PROMPTS),
         test_plan={},
         review={
             "gates": {
@@ -203,7 +256,9 @@ def load_spec(path: Path) -> GhostlabSpec:
     return spec_from_dict(data, source=str(path))
 
 
-def save_spec(spec: GhostlabSpec, path: Path) -> Path:
+def save_spec(spec: GhostlabSpec, path: Path, header: str | None = None) -> Path:
+    """Write a spec to YAML (or JSON). ``header`` overrides the default comment
+    banner (ignored for JSON, which has no comments)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix.lower() == ".json":
         path.write_text(
@@ -211,10 +266,11 @@ def save_spec(spec: GhostlabSpec, path: Path) -> Path:
             encoding="utf-8",
         )
         return path
-    header = (
-        f"# ghostlab spec for {spec.id} — edit freely; `ghostlab discover` updates\n"
-        "# the `capabilities` section and leaves the rest of the file to you.\n"
-    )
+    if header is None:
+        header = (
+            f"# ghostlab spec for {spec.id} — edit freely; `ghostlab discover` updates\n"
+            "# the `capabilities` section and leaves the rest of the file to you.\n"
+        )
     path.write_text(header + dump_yaml(spec.to_dict()), encoding="utf-8")
     return path
 

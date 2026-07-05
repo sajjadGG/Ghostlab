@@ -140,6 +140,21 @@ class SpecModelTest(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_spec(path)
 
+    def test_generation_test_prompts_round_trip(self) -> None:
+        spec = spec_from_target(_target(), name="Cortex")
+        spec.generation = {"personas": 3, "model": "gpt-x"}
+        spec.test = {"suites": ["smoke", "edge"], "judge": False, "timeout": 45.0}
+        spec.prompts = {"aut": "hello {goal}", "judge": ""}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "job.yaml"
+            save_spec(spec, path)
+            loaded = load_spec(path)
+        self.assertEqual(loaded.generation, {"personas": 3, "model": "gpt-x"})
+        self.assertEqual(loaded.test["suites"], ["smoke", "edge"])
+        self.assertEqual(loaded.test["judge"], False)
+        self.assertEqual(loaded.test["timeout"], 45.0)
+        self.assertEqual(loaded.prompts["aut"], "hello {goal}")
+
 
 if __name__ == "__main__":
     unittest.main()

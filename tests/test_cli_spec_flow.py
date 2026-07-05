@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from rehearsal.cli import _HANDLERS, build_parser, main
+from rehearsal.codex_backend import CodexError
 from rehearsal.spec import load_spec
 
 FAKE_SERVER = '''
@@ -96,6 +97,98 @@ class CliSpecFlowTest(unittest.TestCase):
         self.assertIn("required_param_undefined", kinds)
         self.assertIn("weak_tool_description", kinds)
         self.assertIn("missing_tool_reference", kinds)
+
+    @patch(
+        "rehearsal.codex_backend.CodexBackend._bin",
+        side_effect=CodexError("codex not found (test double)"),
+    )
+    def test_create_then_discover_by_job_name(self, _bin_mock) -> None:
+        import os
+
+        # Codex is deliberately unavailable here: `create --yes` now runs the
+        # whole discover -> configure-host -> plan -> test -> review wizard
+        # (not just discover), and every codex-backed step must degrade to a
+        # skip instead of crashing the wizard — this was a real regression
+        # (codex._bin() raised outside its try/except in _get_generated_cases).
+        jobs_root = self.tmp / "jobs"
+        with patch.dict(os.environ, {"GHOSTLAB_JOBS_DIR": str(jobs_root)}):
+            code = main(
+                ["create", "--name", "Notes Eval", "--target", str(self.target_path), "--yes"]
+            )
+            self.assertEqual(code, 0)
+            spec_path = jobs_root / "notes-eval" / "job.yaml"
+            self.assertTrue(spec_path.is_file())
+            self.assertTrue((jobs_root / "notes-eval" / "workspace").is_dir())
+            self.assertTrue((jobs_root / "notes-eval" / "runs").is_dir())
+            # The wizard reached plan + test + review despite no codex.
+            self.assertTrue((jobs_root / "notes-eval" / "test-plan.yaml").is_file())
+            self.assertTrue(
+                list((jobs_root / "notes-eval" / "workspace").glob("test/*/results.json"))
+            )
+
+            # Resolve the whole loop by job name; artifacts + db land in the job.
+            code = main(["discover", "--job", "notes-eval"])
+            self.assertEqual(code, 0)
+
+        spec = load_spec(spec_path)
+        tool_names = {tool["name"] for tool in spec.capabilities["tools"]}
+        self.assertEqual(tool_names, {"notes_list", "notes_delete"})
+        workspace = jobs_root / "notes-eval" / "workspace"
+        self.assertTrue(list(workspace.glob("discover/*/contract.json")))
+        self.assertTrue((workspace / "ghostlab.sqlite3").exists())
+
+    @patch(
+        "rehearsal.codex_backend.CodexBackend._bin",
+        side_effect=CodexError("codex not found (test double)"),
+    )
+    def test_create_from_config_auto_discovers(self, _bin_mock) -> None:
+        server = self.tmp / "fake_mcp.py"
+        mcp_json = self.tmp / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {"mcpServers": {"notes": {"command": sys.executable, "args": [str(server)]}}}
+            ),
+            encoding="utf-8",
+        )
+        jobs_root = self.tmp / "jobs"
+        with patch.dict("os.environ", {"GHOSTLAB_JOBS_DIR": str(jobs_root)}):
+            # default: create auto-inspects the target, populating capabilities
+            code = main(["create", "--name", "with-disc", "--target", str(mcp_json), "--yes"])
+            self.assertEqual(code, 0)
+            spec = load_spec(jobs_root / "with-disc" / "job.yaml")
+            self.assertEqual(
+                {t["name"] for t in spec.capabilities["tools"]}, {"notes_list", "notes_delete"}
+            )
+
+            # --no-discover just scaffolds (no capabilities yet)
+            code = main([
+                "create", "--name", "no-disc", "--target", str(mcp_json), "--no-discover", "--yes"
+            ])
+            self.assertEqual(code, 0)
+            spec = load_spec(jobs_root / "no-disc" / "job.yaml")
+            self.assertEqual(spec.capabilities, {})
+
+    def test_inspect_accepts_standard_mcp_servers_config(self) -> None:
+        # A user's normal MCP client config (Codex/Claude Desktop shape), not a
+        # GhostLab target — issue #32.
+        server = self.tmp / "fake_mcp.py"
+        mcp_json = self.tmp / "mcp.json"
+        mcp_json.write_text(
+            json.dumps(
+                {"mcpServers": {"notes": {"command": sys.executable, "args": [str(server)]}}}
+            ),
+            encoding="utf-8",
+        )
+        out_dir = self.tmp / "out"
+        code = main([
+            "inspect", "--target", str(mcp_json),
+            "--output-dir", str(out_dir), "--db", str(self.db_path),
+        ])
+        self.assertEqual(code, 0)
+        inspect_json = next(out_dir.glob("*/inspect.json"))
+        data = json.loads(inspect_json.read_text(encoding="utf-8"))
+        tool_names = {tool["name"] for tool in data["tools"]}
+        self.assertEqual(tool_names, {"notes_list", "notes_delete"})
 
     def test_discover_strict_fails_on_schema_errors(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
@@ -318,6 +411,31 @@ class CliSpecFlowTest(unittest.TestCase):
         # --regenerate forces a fresh call.
         main(["plan", "--spec", str(self.spec_path), "--regenerate"])
         self.assertEqual(dataset_mock.call_count, 2)
+
+    @patch(
+        "rehearsal.codex_backend.CodexBackend._bin",
+        side_effect=CodexError("codex not found (test double)"),
+    )
+    def test_plan_generate_skips_gracefully_without_codex(self, _bin_mock) -> None:
+        # Regression: `_get_generated_cases` used to resolve the codex binary
+        # for a log line *before* its try/except, so a missing codex crashed
+        # `plan` (and therefore `create`, which now calls `plan`) instead of
+        # falling back to the deterministic-only plan.
+        main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+
+        code = main(["plan", "--spec", str(self.spec_path)])  # --generate is the default
+        self.assertEqual(code, 0)
+
+        from rehearsal.plan import load_test_plan
+
+        plan = load_test_plan(self.spec_path.parent / "test-plan.yaml")
+        ids = {case["id"] for case in plan["cases"]}
+        # Falls back to the inert per-family seeds instead of real scenarios.
+        self.assertTrue(any(cid.startswith("semantic-notes") for cid in ids))
+
+        spec = load_spec(self.spec_path)
+        self.assertNotIn("generated_dataset", spec.test_plan)
 
     def test_test_command_requires_plan(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])

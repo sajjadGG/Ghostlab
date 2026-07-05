@@ -262,7 +262,38 @@ def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# Placeholders: {goal} {criteria_block} {signals_block} {tools_line}
+# {tool_calls} {transcript}
+JUDGE_TEMPLATE = """You are evaluating one end-to-end test conversation against an MCP server.
+A user (emulated) talked to an assistant that has access to MCP tools.
+
+Scenario goal:
+{goal}
+
+Success criteria (judge each by index):
+{criteria_block}
+
+Failure signals to check for (judge each by index):
+{signals_block}
+{tools_line}
+Tool calls the assistant actually made:
+{tool_calls}
+
+Conversation transcript:
+{transcript}
+
+Judge strictly from evidence in the transcript and tool calls. For each success
+criterion return met (true/false) + short evidence. For each failure signal
+return triggered (true/false) + short evidence. Give an overall verdict:
+- "pass": all criteria met and no failure signal triggered.
+- "partial": some but not all criteria met, no failure signal triggered.
+- "fail": no criteria met, or any failure signal triggered.
+Output only the JSON object."""
+
+
 def _build_judge_prompt(run: dict[str, Any], tool_names: list[str] | None) -> str:
+    from . import prompts
+
     scenario = run["scenario"]
     criteria = scenario.get("success_criteria", [])
     signals = scenario.get("failure_signals", [])
@@ -275,31 +306,16 @@ def _build_judge_prompt(run: dict[str, Any], tool_names: list[str] | None) -> st
         if tool_names
         else ""
     )
-    return f"""You are evaluating one end-to-end test conversation against an MCP server.
-A user (emulated) talked to an assistant that has access to MCP tools.
-
-Scenario goal:
-{scenario.get('goal', '')}
-
-Success criteria (judge each by index):
-{criteria_block}
-
-Failure signals to check for (judge each by index):
-{signals_block}
-{tools_line}
-Tool calls the assistant actually made:
-{_format_tool_calls(run['tool_calls'])}
-
-Conversation transcript:
-{_format_transcript(run['transcript'])}
-
-Judge strictly from evidence in the transcript and tool calls. For each success
-criterion return met (true/false) + short evidence. For each failure signal
-return triggered (true/false) + short evidence. Give an overall verdict:
-- "pass": all criteria met and no failure signal triggered.
-- "partial": some but not all criteria met, no failure signal triggered.
-- "fail": no criteria met, or any failure signal triggered.
-Output only the JSON object."""
+    return prompts.render(
+        "judge",
+        JUDGE_TEMPLATE,
+        goal=scenario.get("goal", ""),
+        criteria_block=criteria_block,
+        signals_block=signals_block,
+        tools_line=tools_line,
+        tool_calls=_format_tool_calls(run["tool_calls"]),
+        transcript=_format_transcript(run["transcript"]),
+    )
 
 
 def combine_verdict(

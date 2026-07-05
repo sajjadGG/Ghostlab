@@ -53,15 +53,12 @@ def _slug(text: str) -> str:
     return slug or "persona"
 
 
-def _build_prompt(profile: dict[str, Any], n: int) -> str:
-    categories = ", ".join(
-        c.get("label", c.get("key", "")) for c in profile.get("categories", [])
-    )
-    return f"""You design a library of realistic user personas for testing an MCP (Model Context Protocol) server.
+# Placeholders: {mcp} {domain_summary} {categories} {n}
+PERSONA_GEN_TEMPLATE = """You design a library of realistic user personas for testing an MCP (Model Context Protocol) server.
 Each persona will later role-play a user in end-to-end conversations against the server's tools.
 
-MCP: {profile.get('mcp', '?')}
-Domain: {profile.get('domain_summary', '')}
+MCP: {mcp}
+Domain: {domain_summary}
 Tool categories: {categories}
 
 Generate exactly {n} DISTINCT personas that represent the realistic range of users for this domain.
@@ -77,6 +74,22 @@ For each persona provide:
 - context: domain-relevant attributes as key/value string pairs (e.g. native_language: Persian, target_exam: IELTS, level: B1, daily_minutes: 30, tech_savviness: low). Choose keys that matter for THIS domain.
 
 Output only the JSON object with a `personas` array."""
+
+
+def _build_prompt(profile: dict[str, Any], n: int) -> str:
+    from . import prompts
+
+    categories = ", ".join(
+        c.get("label", c.get("key", "")) for c in profile.get("categories", [])
+    )
+    return prompts.render(
+        "persona_gen",
+        PERSONA_GEN_TEMPLATE,
+        mcp=profile.get("mcp", "?"),
+        domain_summary=profile.get("domain_summary", ""),
+        categories=categories,
+        n=n,
+    )
 
 
 def _to_persona_dict(raw: dict[str, Any], index: int) -> dict[str, Any]:
