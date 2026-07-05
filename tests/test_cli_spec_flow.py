@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from rehearsal.cli import _HANDLERS, build_parser, main
+from rehearsal.codex_backend import CodexError
 from rehearsal.spec import load_spec
 
 FAKE_SERVER = '''
@@ -97,9 +98,18 @@ class CliSpecFlowTest(unittest.TestCase):
         self.assertIn("weak_tool_description", kinds)
         self.assertIn("missing_tool_reference", kinds)
 
-    def test_create_then_discover_by_job_name(self) -> None:
+    @patch(
+        "rehearsal.codex_backend.CodexBackend._bin",
+        side_effect=CodexError("codex not found (test double)"),
+    )
+    def test_create_then_discover_by_job_name(self, _bin_mock) -> None:
         import os
 
+        # Codex is deliberately unavailable here: `create --yes` now runs the
+        # whole discover -> configure-host -> plan -> test -> review wizard
+        # (not just discover), and every codex-backed step must degrade to a
+        # skip instead of crashing the wizard — this was a real regression
+        # (codex._bin() raised outside its try/except in _get_generated_cases).
         jobs_root = self.tmp / "jobs"
         with patch.dict(os.environ, {"GHOSTLAB_JOBS_DIR": str(jobs_root)}):
             code = main(
@@ -110,6 +120,11 @@ class CliSpecFlowTest(unittest.TestCase):
             self.assertTrue(spec_path.is_file())
             self.assertTrue((jobs_root / "notes-eval" / "workspace").is_dir())
             self.assertTrue((jobs_root / "notes-eval" / "runs").is_dir())
+            # The wizard reached plan + test + review despite no codex.
+            self.assertTrue((jobs_root / "notes-eval" / "test-plan.yaml").is_file())
+            self.assertTrue(
+                list((jobs_root / "notes-eval" / "workspace").glob("test/*/results.json"))
+            )
 
             # Resolve the whole loop by job name; artifacts + db land in the job.
             code = main(["discover", "--job", "notes-eval"])
@@ -122,7 +137,11 @@ class CliSpecFlowTest(unittest.TestCase):
         self.assertTrue(list(workspace.glob("discover/*/contract.json")))
         self.assertTrue((workspace / "ghostlab.sqlite3").exists())
 
-    def test_create_from_config_auto_discovers(self) -> None:
+    @patch(
+        "rehearsal.codex_backend.CodexBackend._bin",
+        side_effect=CodexError("codex not found (test double)"),
+    )
+    def test_create_from_config_auto_discovers(self, _bin_mock) -> None:
         server = self.tmp / "fake_mcp.py"
         mcp_json = self.tmp / "mcp.json"
         mcp_json.write_text(
@@ -392,6 +411,31 @@ class CliSpecFlowTest(unittest.TestCase):
         # --regenerate forces a fresh call.
         main(["plan", "--spec", str(self.spec_path), "--regenerate"])
         self.assertEqual(dataset_mock.call_count, 2)
+
+    @patch(
+        "rehearsal.codex_backend.CodexBackend._bin",
+        side_effect=CodexError("codex not found (test double)"),
+    )
+    def test_plan_generate_skips_gracefully_without_codex(self, _bin_mock) -> None:
+        # Regression: `_get_generated_cases` used to resolve the codex binary
+        # for a log line *before* its try/except, so a missing codex crashed
+        # `plan` (and therefore `create`, which now calls `plan`) instead of
+        # falling back to the deterministic-only plan.
+        main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+
+        code = main(["plan", "--spec", str(self.spec_path)])  # --generate is the default
+        self.assertEqual(code, 0)
+
+        from rehearsal.plan import load_test_plan
+
+        plan = load_test_plan(self.spec_path.parent / "test-plan.yaml")
+        ids = {case["id"] for case in plan["cases"]}
+        # Falls back to the inert per-family seeds instead of real scenarios.
+        self.assertTrue(any(cid.startswith("semantic-notes") for cid in ids))
+
+        spec = load_spec(self.spec_path)
+        self.assertNotIn("generated_dataset", spec.test_plan)
 
     def test_test_command_requires_plan(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])

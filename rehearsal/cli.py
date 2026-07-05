@@ -1098,9 +1098,14 @@ def _get_generated_cases(args: argparse.Namespace, spec, inspect_data: dict) -> 
     n_personas = args.personas or DEFAULT_N_PERSONAS
     scenarios_per_persona = args.scenarios_per_persona or DEFAULT_SCENARIOS_PER_PERSONA
     backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    try:
+        codex_bin = backend._bin()
+    except CodexError as exc:
+        print(f"  generation skipped (codex error): {exc}")
+        return None
     print(
         f"  generating {n_personas} persona(s) x {scenarios_per_persona} scenario(s) "
-        f"with codex ({backend._bin()})..."
+        f"with codex ({codex_bin})..."
     )
 
     def progress(event: dict) -> None:
