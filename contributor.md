@@ -55,8 +55,8 @@ Use the full set for release, packaging, workflow, or public CLI changes.
 Use `ghostlab` in public examples:
 
 ```bash
-ghostlab inspect --target targets/cortex-local.json
-ghostlab run --target targets/example-stdio.json --scenario scenarios/basic-discovery.json
+ghostlab inspect --target target.json
+ghostlab run --target target.json --scenario scenario.json
 ```
 
 If you add or change a command, update:

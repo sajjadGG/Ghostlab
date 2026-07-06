@@ -76,7 +76,7 @@ run contains a call to that tool whose arguments include the given key/value pai
 
 ```bash
 ghostlab run-dataset --dataset datasets/cortex \
-  --target targets/cortex-local.json \
+  --target target.json \
   --aut-runner runners/codex-cortex-local-session.json \
   --evaluate --capabilities runs/<id>-inspect/capabilities.json
 ```

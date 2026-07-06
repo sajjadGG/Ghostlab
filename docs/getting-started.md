@@ -95,8 +95,8 @@ Mock runners let you exercise the orchestrator without spending coding-agent cre
 
 ```bash
 ghostlab run \
-  --target targets/example-stdio.json \
-  --scenario scenarios/basic-discovery.json \
+  --target target.json \
+  --scenario scenario.json \
   --aut-runner runners/mock-aut.json \
   --user-runner runners/mock-user.json
 ```
@@ -110,7 +110,7 @@ Run output is written under `runs/<run-id>/`:
 ## Inspect A Real MCP Target
 
 ```bash
-ghostlab inspect --target targets/cortex-local.json
+ghostlab inspect --target target.json
 # or a standard MCP client config:
 ghostlab inspect --target ./mcp.json --server obsidian
 ```

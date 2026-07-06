@@ -20,6 +20,10 @@ agent can actually get a task done through your MCP, end to end.
 
 📖 **Docs wiki:** https://sajjadgg.github.io/Rehearsal/ · 🤖 **For agents:** [`llms.txt`](llms.txt) · 🛠 **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
+<p align="center">
+<img src="static/ghostlablogo.png" width="400" alt="Logo" align="center">
+</p>
+
 ## Quickstart
 
 ```bash
@@ -73,6 +77,30 @@ generation/test defaults, gates — all editable), `test-plan.yaml`, `workspace/
 | **Plan** | A coverage-driven `test-plan.yaml`: deterministic protocol cases for every tool, plus generated persona/scenario cases for the semantic/security suites |
 | **Test** | Multi-host execution results (`results.json`/`results.md`), a standalone HTML dashboard, and — for conversational cases — full dual-agent transcripts with structured tool-call capture |
 | **Review** | A readiness report: pass/fail gate verdict, failure clusters, and prioritized repairs |
+
+## See it in action
+
+**Watch a real coding-agent drive your MCP, turn by turn** — every tool call is
+captured with its pass/fail status. Below is the live trace of a Hugging Face
+MCP run, including two `hf_hub_query` calls that failed against the server:
+
+<p align="center">
+<img src="static/cli-run-trace.png" width="900" alt="CLI run trace showing per-tool-call status">
+</p>
+
+**Get a standalone HTML dashboard** — pass rate, per-case verdicts, and
+suite/host tags at a glance:
+
+<p align="center">
+<img src="static/results-dashboard.png" width="760" alt="HTML results dashboard with pass-rate KPIs and per-case list">
+</p>
+
+**Drill into any case** — the goal and persona, the judge's verdict with its
+reasoning, and the full dual-agent transcript with inline tool calls:
+
+<p align="center">
+<img src="static/case-report-transcript.png" width="760" alt="Per-case report with judge verdict and conversation transcript">
+</p>
 
 ## Goal
 
@@ -178,7 +206,7 @@ Point it at a target and it introspects the server without any coding-agent
 credits or manual `curl`:
 
 ```bash
-ghostlab inspect --target targets/cortex-local.json
+ghostlab inspect --target target.json
 ```
 
 This connects over the configured transport (stdio / streamable-HTTP / SSE),
@@ -239,7 +267,7 @@ confused, non-native, ...), and a domain `context` map (native_language,
 target_exam, level, ...). Pass one to a run with `--persona`:
 
 ```bash
-ghostlab run ... --persona personas/ielts-power-user.json
+ghostlab run ... --persona persona.json
 ```
 
 ### Build a dataset: `generate-dataset`
@@ -289,7 +317,7 @@ ghostlab review-dataset --dataset datasets/cortex \
 ```bash
 ghostlab run-dataset \
   --dataset datasets/cortex \
-  --target targets/cortex-local.json \
+  --target target.json \
   --aut-runner runners/codex-cortex-aut.json \
   --user-runner runners/codex-user-emulator.json \
   --limit 2
@@ -339,7 +367,7 @@ points to a `ui://…` HTML widget a compatible host is expected to render.
 `ui://` resource, and reports render-readiness and CSP diagnostics:
 
 ```bash
-ghostlab apps-probe --target targets/cortex-local.json
+ghostlab apps-probe --target target.json
 ```
 
 `apps-render` actually renders a `ui://` widget in headless Chrome, proving a
@@ -349,7 +377,7 @@ real tool input/result, and can drive a sequence of UI intents:
 
 ```bash
 pip install 'ghostlab[apps]' && playwright install chrome    # one-time
-ghostlab apps-render --target targets/cortex-local.json \
+ghostlab apps-render --target target.json \
   --tool views_generate_sentence_scramble \
   --arguments '{"target_sentence":"The cat sat on the mat","shuffled_elements":["mat","The","on","sat","cat","the"]}' \
   --intent '{"type":"reorder","value":["The","cat","sat","on","the","mat"]}' \
@@ -369,7 +397,7 @@ one codex session alive: turn 1 records the `thread_id`, and later turns run
 repeated cold-start noise.
 
 ```bash
-ghostlab run --target targets/cortex-local.json --scenario <scenario.json> \
+ghostlab run --target target.json --scenario <scenario.json> \
   --aut-runner runners/codex-cortex-local-session.json --user-runner <user.json>
 ```
 

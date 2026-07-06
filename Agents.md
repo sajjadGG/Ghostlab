@@ -7,7 +7,7 @@ This repository is Ghostlab, a Python CLI and optional Streamlit UI for testing 
 - Core package: `rehearsal/`
 - Compatibility package: `ghostlab/`
 - Tests: `tests/`
-- Example configs: `targets/`, `runners/`, `scenarios/`, `personas/`
+- Example runner configs: `runners/`; per-job configs live under `jobs/<name>/`
 - Documentation wiki: `docs/` with `mkdocs.yml`
 - CI and release pipelines: `.github/workflows/`
 

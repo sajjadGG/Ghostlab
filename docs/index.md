@@ -16,11 +16,11 @@ Use it when you want to test an MCP server through the same Codex or Claude Code
 ## Common Flow
 
 ```bash
-ghostlab inspect --target targets/cortex-local.json
+ghostlab inspect --target target.json
 ghostlab profile --inspect runs/<id>-inspect/inspect.json
 ghostlab generate-dataset --profile runs/<id>-inspect/capabilities.json --name cortex
 ghostlab review-dataset --dataset datasets/cortex --profile runs/<id>-inspect/capabilities.json
-ghostlab run-dataset --dataset datasets/cortex --target targets/cortex-local.json --approved-only
+ghostlab run-dataset --dataset datasets/cortex --target target.json --approved-only
 ```
 
 Start with [Getting Started](getting-started.md), then use the [CLI Reference](cli.md) for the full command map.
