@@ -1,0 +1,18 @@
+{
+  "id": "basic-discovery",
+  "title": "Discover what the MCP app can do",
+  "persona": "You are a careful first-time user. You ask direct questions and verify claims before trusting the tool.",
+  "goal": "Understand what the target MCP app can help with, then try one concrete action that should require using the MCP tools.",
+  "max_turns": 4,
+  "success_criteria": [
+    "The assistant explains available capabilities without inventing unsupported ones.",
+    "The assistant attempts a concrete tool-backed action.",
+    "The assistant handles missing or ambiguous input by asking a useful follow-up."
+  ],
+  "failure_signals": [
+    "Claims access to capabilities not present in the target config.",
+    "Pretends a tool action succeeded without evidence.",
+    "Ignores the user's concrete goal."
+  ],
+  "opening_message": "What can you help me do with this app? Pick one small useful thing and show me."
+}

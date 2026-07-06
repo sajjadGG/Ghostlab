@@ -215,7 +215,7 @@ Writes `readiness.json` / `readiness.md` next to the test results:
 Introspect a target MCP server.
 
 ```bash
-ghostlab inspect --target target.json
+ghostlab inspect --target examples/target.json
 ```
 
 ## profile
@@ -282,8 +282,8 @@ Run one scenario.
 
 ```bash
 ghostlab run \
-  --target target.json \
-  --scenario scenario.json \
+  --target examples/target.json \
+  --scenario examples/scenario.json \
   --aut-runner runners/mock-aut.json \
   --user-runner runners/mock-user.json
 ```

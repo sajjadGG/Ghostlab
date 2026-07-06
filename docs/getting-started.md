@@ -3,11 +3,11 @@
 ## Install From A Checkout
 
 ```bash
-python3.13 -m venv .venv
-.venv/bin/pip install -r requirements-dev.txt
+python3 -m venv .venv          # Python 3.10+
+.venv/bin/pip install -e .
 ```
 
-This installs the package in editable mode and adds the `ghostlab` and `rehearsal` console scripts. Prefer `ghostlab` in new docs and scripts.
+This installs the package in editable mode and adds the `ghostlab` and `rehearsal` console scripts. Prefer `ghostlab` in new docs and scripts. (Contributors who also want the test/build/docs toolchain use `pip install -r requirements-dev.txt` instead — see `CONTRIBUTING.md`.)
 
 ```bash
 ghostlab --help
@@ -95,8 +95,8 @@ Mock runners let you exercise the orchestrator without spending coding-agent cre
 
 ```bash
 ghostlab run \
-  --target target.json \
-  --scenario scenario.json \
+  --target examples/target.json \
+  --scenario examples/scenario.json \
   --aut-runner runners/mock-aut.json \
   --user-runner runners/mock-user.json
 ```
@@ -110,7 +110,7 @@ Run output is written under `runs/<run-id>/`:
 ## Inspect A Real MCP Target
 
 ```bash
-ghostlab inspect --target target.json
+ghostlab inspect --target examples/target.json
 # or a standard MCP client config:
 ghostlab inspect --target ./mcp.json --server obsidian
 ```

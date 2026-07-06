@@ -1,0 +1,14 @@
+{
+  "id": "huggingface",
+  "transport": "streamable-http",
+  "connection": {
+    "url": "https://huggingface.co/mcp",
+    "headers": {}
+  },
+  "capabilities": {
+    "tools": []
+  },
+  "startup": {
+    "timeout_seconds": 30
+  }
+}

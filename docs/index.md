@@ -16,7 +16,7 @@ Use it when you want to test an MCP server through the same Codex or Claude Code
 ## Common Flow
 
 ```bash
-ghostlab inspect --target target.json
+ghostlab inspect --target examples/target.json
 ghostlab profile --inspect runs/<id>-inspect/inspect.json
 ghostlab generate-dataset --profile runs/<id>-inspect/capabilities.json --name cortex
 ghostlab review-dataset --dataset datasets/cortex --profile runs/<id>-inspect/capabilities.json

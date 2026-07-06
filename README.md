@@ -20,6 +20,10 @@ agent can actually get a task done through your MCP, end to end.
 
 📖 **Docs wiki:** https://sajjadgg.github.io/Rehearsal/ · 🤖 **For agents:** [`llms.txt`](llms.txt) · 🛠 **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
+> **Naming:** the project is **Ghostlab** (originally *Rehearsal* — some URLs still
+> use that name). The CLI is `ghostlab` (with `rehearsal` kept as an alias); the
+> installed Python package is `rehearsal`. They're all the same thing.
+
 <p align="center">
 <img src="static/ghostlablogo.png" width="400" alt="Logo" align="center">
 </p>
@@ -27,7 +31,7 @@ agent can actually get a task done through your MCP, end to end.
 ## Quickstart
 
 ```bash
-python3.13 -m venv .venv
+python3 -m venv .venv                # Python 3.10+
 .venv/bin/pip install -e .            # add '.[ui]' for the web UI, '.[apps]' for widget rendering
 
 ghostlab create
@@ -178,6 +182,8 @@ The package installs two equivalent console scripts: `ghostlab` and `rehearsal`.
 - `ghostlab review-dataset` / `run-dataset` — curate and run a standalone dataset.
 - `ghostlab run` — run one dual-agent E2E scenario directly.
 - `ghostlab evaluate` — score a run into a pass/fail verdict (codex judge).
+- `ghostlab critique` — rate a run's tool ergonomics from the agent's perspective (codex).
+- `ghostlab scorecard` — roll run verdicts and critiques into a summary scorecard.
 - `ghostlab compare` — diff two dataset runs for regressions.
 - `ghostlab apps-probe` / `apps-render` — probe/render MCP Apps `ui://` widgets.
 - `ghostlab doctor` — check codex and validate runner presets.
@@ -206,7 +212,7 @@ Point it at a target and it introspects the server without any coding-agent
 credits or manual `curl`:
 
 ```bash
-ghostlab inspect --target target.json
+ghostlab inspect --target examples/target.json
 ```
 
 This connects over the configured transport (stdio / streamable-HTTP / SSE),

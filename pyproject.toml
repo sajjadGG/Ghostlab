@@ -90,10 +90,8 @@ include = [
   "/rehearsal",
   "/ghostlab",
   "/tests",
-  "/targets",
-  "/scenarios",
+  "/examples",
   "/runners",
-  "/personas",
 ]
 
 [tool.pytest.ini_options]
