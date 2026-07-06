@@ -1,4 +1,4 @@
-# Contributing to MCP Rehearsal / Ghostlab
+# Contributing to Ghostlab
 
 Thanks for helping improve Ghostlab! This guide is written to be friendly to both
 humans and coding agents. For a machine-readable map of the project, see
@@ -50,7 +50,7 @@ Optional extras:
 
 ## Where to start
 
-Browse the [open issues](https://github.com/sajjadGG/Rehearsal/issues) — they are
+Browse the [open issues](https://github.com/sajjadGG/Ghostlab/issues) — they are
 labeled by pipeline stage (`pipeline:understand`, `pipeline:run`,
 `pipeline:evaluate`, …). Good first contributions: a new target/scenario/runner
 preset, an additional lint or assertion, or a per-widget MCP Apps assertion.

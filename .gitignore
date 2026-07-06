@@ -231,3 +231,6 @@ ghostlab.sqlite3
 jobs/*/workspace/
 jobs/*/runs/
 jobs/*/ghostlab.sqlite3*
+
+# macOS
+.DS_Store

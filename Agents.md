@@ -7,7 +7,7 @@ This repository is Ghostlab, a Python CLI and optional Streamlit UI for testing 
 - Core package: `rehearsal/`
 - Compatibility package: `ghostlab/`
 - Tests: `tests/`
-- Example configs: `targets/`, `runners/`, `scenarios/`, `personas/`
+- Example runner configs: `runners/`; per-job configs live under `jobs/<name>/`
 - Documentation wiki: `docs/` with `mkdocs.yml`
 - CI and release pipelines: `.github/workflows/`
 
@@ -77,4 +77,4 @@ The working tree may contain user or parallel-agent changes. Do not revert chang
 
 - PyPI publishing uses GitHub Actions Trusted Publishing from `.github/workflows/release.yml`.
 - GitHub Pages documentation deploys from `.github/workflows/pages.yml`.
-- The public docs URL is `https://sajjadgg.github.io/Rehearsal/`.
+- The public docs URL is `https://sajjadgg.github.io/Ghostlab/`.

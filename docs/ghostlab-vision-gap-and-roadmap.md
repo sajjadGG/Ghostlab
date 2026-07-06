@@ -283,7 +283,7 @@ review:
 This artifact becomes the center of the system. All commands can still exist, but a new top-level flow should be:
 
 ```bash
-ghostlab init --target targets/cortex-local.json --out ghostlab.yaml
+ghostlab init --target target.json --out ghostlab.yaml
 ghostlab discover --spec ghostlab.yaml
 ghostlab plan --spec ghostlab.yaml
 ghostlab test --spec ghostlab.yaml --suite all --hosts codex-cli,claude-code

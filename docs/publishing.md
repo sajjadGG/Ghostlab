@@ -14,7 +14,7 @@ The `Release` workflow publishes the `ghostlab` package to PyPI when a `v*.*.*` 
 
 PyPI publishing uses Trusted Publishing. Create or claim the `ghostlab` project on PyPI and add a trusted publisher for:
 
-- Repository: `sajjadGG/Rehearsal`
+- Repository: `sajjadGG/Ghostlab`
 - Workflow: `.github/workflows/release.yml`
 - Environment: `pypi`
 

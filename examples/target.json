@@ -1,16 +1,14 @@
 {
-  "id": "example-streamable-http-mcp",
+  "id": "huggingface",
   "transport": "streamable-http",
   "connection": {
-    "url": "http://localhost:8787/mcp",
+    "url": "https://huggingface.co/mcp",
     "headers": {}
   },
   "capabilities": {
     "tools": []
   },
   "startup": {
-    "health_url": "http://localhost:8787/health",
     "timeout_seconds": 30
   }
 }
-

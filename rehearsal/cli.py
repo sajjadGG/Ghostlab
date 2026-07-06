@@ -102,12 +102,14 @@ def _open_store(args: argparse.Namespace, workspace=None):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ghostlab", description="Rehearsal / MCP Ghostlab.")
+    parser = argparse.ArgumentParser(prog="ghostlab", description="Ghostlab — MCP testing lab.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     init_parser = sub.add_parser(
-        "init", help="Create a ghostlab.yaml spec from an existing target JSON."
+        "init",
+        help="Advanced: scaffold a standalone ghostlab.yaml spec (most users want "
+             "`ghostlab create`, which builds a job instead).",
     )
     init_parser.add_argument(
         "--target", required=True, type=Path,
@@ -645,6 +647,12 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"Initialized spec for '{spec.id}' at {path}")
     print(f"  transport={target.transport} workspace={spec.workspace}")
     print("  next: ghostlab discover --spec " + str(path))
+    print(
+        tc.muted(
+            "  note: this is the advanced spec flow. For the standard job-based "
+            "workflow, use `ghostlab create` instead (see README → spec vs job)."
+        )
+    )
     return 0
 
 
@@ -1530,7 +1538,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     finally:
         if store is not None:
             store.close()
-    print(f"Rehearsal run {result.status} ({result.turns} turns)")
+    print(f"Ghostlab run {result.status} ({result.turns} turns)")
     print(f"  report: {result.report_path}")
     return 0
 
@@ -1860,7 +1868,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from .codex_backend import CodexError, resolve_codex_bin
 
     ok = True
-    print("Rehearsal / MCP Ghostlab doctor")
+    print("Ghostlab doctor")
     try:
         codex_bin = args.codex_bin or resolve_codex_bin()
         version = subprocess.run(

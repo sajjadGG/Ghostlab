@@ -10,8 +10,8 @@ the project flow (`init` → `discover` → future `plan`/`test`/`review` stages
 every other command keeps accepting raw target/scenario JSON as before.
 
 ```bash
-ghostlab init --target targets/cortex-local.json          # writes ghostlab.yaml
-ghostlab init --target targets/cortex-local.json --out cortex.ghostlab.json
+ghostlab init --target target.json          # writes ghostlab.yaml
+ghostlab init --target target.json --out cortex.ghostlab.json
 ```
 
 Options: `--name` (display name), `--workspace` (artifact directory, default
@@ -215,7 +215,7 @@ Writes `readiness.json` / `readiness.md` next to the test results:
 Introspect a target MCP server.
 
 ```bash
-ghostlab inspect --target targets/cortex-local.json
+ghostlab inspect --target examples/target.json
 ```
 
 ## profile
@@ -282,8 +282,8 @@ Run one scenario.
 
 ```bash
 ghostlab run \
-  --target targets/example-stdio.json \
-  --scenario scenarios/basic-discovery.json \
+  --target examples/target.json \
+  --scenario examples/scenario.json \
   --aut-runner runners/mock-aut.json \
   --user-runner runners/mock-user.json
 ```
@@ -295,7 +295,7 @@ Run every case in a dataset. Use `--limit` for small development runs and `--app
 ```bash
 ghostlab run-dataset \
   --dataset datasets/cortex \
-  --target targets/cortex-local.json \
+  --target target.json \
   --aut-runner runners/codex-cortex-aut.json \
   --user-runner runners/codex-user-emulator.json \
   --limit 2
