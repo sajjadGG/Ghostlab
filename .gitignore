@@ -227,10 +227,8 @@ ghostlab_workspace/
 .ghostlab/
 ghostlab.sqlite3
 
-# ghostlab jobs — track job.yaml + test-plan.*, ignore per-job run artifacts + db
-jobs/*/workspace/
-jobs/*/runs/
-jobs/*/ghostlab.sqlite3*
+# ghostlab jobs — runtime output (created by `ghostlab create`), not tracked
+jobs/
 
 # macOS
 .DS_Store
