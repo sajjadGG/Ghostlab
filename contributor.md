@@ -70,7 +70,7 @@ If you add or change a command, update:
 
 The wiki lives in `docs/` and is built with MkDocs. GitHub Pages deploys it from the `Pages` workflow on pushes to `main`, release tags, and manual workflow runs.
 
-Public docs: `https://sajjadgg.github.io/Rehearsal/`
+Public docs: `https://sajjadgg.github.io/Ghostlab/`
 
 ## Releases
 

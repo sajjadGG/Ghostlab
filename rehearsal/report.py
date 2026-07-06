@@ -19,7 +19,7 @@ def write_markdown_report(
     tool_calls_by_turn = tool_calls_by_turn or {}
 
     lines = [
-        f"# Rehearsal Run: {scenario.id}",
+        f"# Ghostlab Run: {scenario.id}",
         "",
         f"- Status: `{status}`",
         f"- Target: `{target.id}`",

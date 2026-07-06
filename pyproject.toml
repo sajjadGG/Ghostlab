@@ -66,11 +66,11 @@ ghostlab = "rehearsal.cli:main"
 rehearsal = "rehearsal.cli:main"
 
 [project.urls]
-Documentation = "https://sajjadgg.github.io/Rehearsal/"
-Homepage = "https://github.com/sajjadGG/Rehearsal"
-Repository = "https://github.com/sajjadGG/Rehearsal"
-Issues = "https://github.com/sajjadGG/Rehearsal/issues"
-Changelog = "https://github.com/sajjadGG/Rehearsal/releases"
+Documentation = "https://sajjadgg.github.io/Ghostlab/"
+Homepage = "https://github.com/sajjadGG/Ghostlab"
+Repository = "https://github.com/sajjadGG/Ghostlab"
+Issues = "https://github.com/sajjadGG/Ghostlab/issues"
+Changelog = "https://github.com/sajjadGG/Ghostlab/releases"
 
 [tool.hatch.version]
 path = "rehearsal/__init__.py"

@@ -77,4 +77,4 @@ The working tree may contain user or parallel-agent changes. Do not revert chang
 
 - PyPI publishing uses GitHub Actions Trusted Publishing from `.github/workflows/release.yml`.
 - GitHub Pages documentation deploys from `.github/workflows/pages.yml`.
-- The public docs URL is `https://sajjadgg.github.io/Rehearsal/`.
+- The public docs URL is `https://sajjadgg.github.io/Ghostlab/`.

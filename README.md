@@ -1,12 +1,12 @@
-# MCP Rehearsal / Ghostlab
+# Ghostlab
 
 > A local, end-to-end **testing lab for any MCP server** — coding agents role-play
 > real users, drive your tools over multiple turns, and the harness captures
 > traces, scores outcomes, and even **renders and clicks through MCP Apps UI
 > widgets**.
 
-[![CI](https://github.com/sajjadGG/Rehearsal/actions/workflows/ci.yml/badge.svg)](https://github.com/sajjadGG/Rehearsal/actions)
-[![Docs](https://img.shields.io/badge/docs-wiki-blue)](https://sajjadgg.github.io/Rehearsal/)
+[![CI](https://github.com/sajjadGG/Ghostlab/actions/workflows/ci.yml/badge.svg)](https://github.com/sajjadGG/Ghostlab/actions)
+[![Docs](https://img.shields.io/badge/docs-wiki-blue)](https://sajjadgg.github.io/Ghostlab/)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![llms.txt](https://img.shields.io/badge/llms.txt-✓-purple)](llms.txt)
@@ -18,11 +18,11 @@ user. Protocol-level checks (schema errors, a tool call that 500s) are useful
 sanity checks, but they aren't the real test — the real test is whether an
 agent can actually get a task done through your MCP, end to end.
 
-📖 **Docs wiki:** https://sajjadgg.github.io/Rehearsal/ · 🤖 **For agents:** [`llms.txt`](llms.txt) · 🛠 **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md)
+📖 **Docs wiki:** https://sajjadgg.github.io/Ghostlab/ · 🤖 **For agents:** [`llms.txt`](llms.txt) · 🛠 **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
-> **Naming:** the project is **Ghostlab** (originally *Rehearsal* — some URLs still
-> use that name). The CLI is `ghostlab` (with `rehearsal` kept as an alias); the
-> installed Python package is `rehearsal`. They're all the same thing.
+> **Naming:** the project and repo are **Ghostlab** (formerly *Rehearsal*). The CLI
+> is `ghostlab`, with `rehearsal` kept as an alias, and the installed Python
+> package is `rehearsal` — all the same project.
 
 <p align="center">
 <img src="static/ghostlablogo.png" width="400" alt="Logo" align="center">
@@ -120,7 +120,7 @@ This lets you test with your existing Codex/Claude usage path, instead of wiring
 
 ## Scope
 
-Rehearsal is intentionally **app-agnostic**:
+Ghostlab is intentionally **app-agnostic**:
 
 - Works with any MCP server reachable by stdio/SSE/streamable HTTP.
 - Supports local or remote MCP endpoints.
@@ -132,6 +132,23 @@ No Cortex-specific assumptions are required in the core harness.
 
 Everything below is the individual-command reference and advanced usage —
 useful once you're past the first `ghostlab create` run, or scripting CI.
+
+### Spec vs job
+
+There are two ways to hold an evaluation's config; **for almost everyone the
+answer is a job.**
+
+- **Job** (recommended) — a self-contained `jobs/<name>/` folder created by
+  `ghostlab create`. Every command takes `--job <name>` (or auto-detects
+  `job.yaml` in the current dir). This is the mainstream path the whole
+  Quickstart uses.
+- **Spec** (advanced) — a single standalone `ghostlab.yaml` produced by
+  `ghostlab init`, addressed with `--spec <file>`. Useful for scripting or
+  keeping config outside the `jobs/` layout. Unless you specifically need that,
+  prefer a job.
+
+The commands overlap (`discover`/`plan`/`test`/`review` accept either `--job` or
+`--spec`); pick one model per evaluation and stay with it.
 
 ### Job folder layout
 
@@ -171,7 +188,7 @@ Each test run points to a target definition:
 The package installs two equivalent console scripts: `ghostlab` and `rehearsal`.
 
 - `ghostlab create` — the end-to-end wizard described above.
-- `ghostlab init` — create a `job.yaml`/`ghostlab.yaml` from an existing target JSON, without the wizard prompts.
+- `ghostlab init` — advanced: scaffold a standalone `ghostlab.yaml` **spec** from a target JSON (see [spec vs job](#spec-vs-job) — most users want `ghostlab create`).
 - `ghostlab discover` — inspect the job's target, lint its contract, refresh capabilities.
 - `ghostlab plan` — generate (or curate) the coverage-driven test plan.
 - `ghostlab test` — execute the test plan across the job's host adapters.
