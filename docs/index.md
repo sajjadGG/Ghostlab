@@ -1,11 +1,19 @@
 # Ghostlab Wiki
 
-Ghostlab is a local end-to-end testing harness for MCP-exposed apps. It runs one coding-agent session as the assistant under test and another as a user emulator, then captures the transcript, MCP tool calls, reports, verdicts, and dataset summaries that make failures reproducible.
+Ghostlab is an end-to-end testing harness for configured AI agents. An evaluated
+agent can combine instructions, a runner, MCP servers, skills, workspace files,
+and assets. Ghostlab runs one session as the assistant under test and another as
+a user emulator, then captures the transcript, tool calls, sandbox logs,
+reports, verdicts, and dataset summaries that make failures reproducible.
 
-Use it when you want to test an MCP server through the same Codex or Claude Code path real users rely on, without building a separate LLM-provider harness.
+NVIDIA OpenShell is the default execution backend. Use Ghostlab when you want
+to test an agent through the same Codex, Claude Code, or process-runner path
+real users rely on without granting the evaluated code broad host access.
 
 ## What Ghostlab Gives You
 
+- Agent-centric evaluation with MCP-only and skill-only compatibility shorthands.
+- OpenShell isolation for agent runners and local stdio MCP processes.
 - Direct MCP inspection without spending agent credits.
 - Capability profiles derived from real exposed tools, resources, and prompts.
 - Scenario, persona, and dataset generation for repeatable test coverage.
@@ -16,11 +24,13 @@ Use it when you want to test an MCP server through the same Codex or Claude Code
 ## Common Flow
 
 ```bash
-ghostlab inspect --target examples/target.json
-ghostlab profile --inspect runs/<id>-inspect/inspect.json
-ghostlab generate-dataset --profile runs/<id>-inspect/capabilities.json --name cortex
-ghostlab review-dataset --dataset datasets/cortex --profile runs/<id>-inspect/capabilities.json
-ghostlab run-dataset --dataset datasets/cortex --target target.json --approved-only
+openshell status
+ghostlab doctor
+ghostlab create --name my-agent --agent examples/agent.json --yes
+ghostlab test --job my-agent
+ghostlab review --job my-agent
 ```
 
-Start with [Getting Started](getting-started.md), then use the [CLI Reference](cli.md) for the full command map.
+For trusted host execution, opt out explicitly with `--sandbox local`; Ghostlab
+never falls back automatically. Start with [Getting Started](getting-started.md),
+then use the [CLI Reference](cli.md) for the full command map.

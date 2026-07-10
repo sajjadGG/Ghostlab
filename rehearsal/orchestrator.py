@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -54,6 +55,9 @@ def classify_runner_failure(*, exit_code: int, timed_out: bool, stderr: str, out
         "out of credits", "insufficient_quota", "quota exceeded", "rate limit",
         "too many requests", "authentication", "unauthorized", "model unavailable",
         "service unavailable", "connection refused", "failed to connect",
+        "sandbox_runtime_missing", "sandbox_setup_failed", "sandbox_policy_missing",
+        "sandbox_upload_missing", "sandbox_timeout",
+        "sandbox_gateway_unavailable", "sandbox_policy_invalid", "sandbox_image_unavailable",
     )
     if timed_out or exit_code == 124 or any(marker in text for marker in unavailable):
         return "backend_unavailable"
@@ -86,8 +90,27 @@ def run_scenario(
     if target.transport == "skill":
         skill_path = Path(str(target.connection.get("path", ""))).expanduser().resolve()
         mcp_config_path = skill_path
+    elif target.transport == "agent":
+        mcp_config_path = run_dir / "agent.json"
+        mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+        mcp_config_path.write_text(
+            json.dumps(target.capabilities.get("agent_definition", {}), indent=2) + "\n",
+            encoding="utf-8",
+        )
     else:
         write_mcp_servers_config(mcp_config_path, target)
+
+    def sandbox_for(config: RunnerConfig, role: str, include_target: bool) -> dict[str, Any]:
+        sandbox = {**dict(config.sandbox or {}), "artifact_dir": str(run_dir), "name": run_id}
+        uploads = list(sandbox.get("uploads", []) or [])
+        if include_target and mcp_config_path.exists():
+            uploads.append({
+                "source": str(mcp_config_path),
+                "target": f"/sandbox/workspace/{mcp_config_path.name}",
+            })
+        sandbox["uploads"] = uploads
+        sandbox["role"] = role
+        return sandbox
 
     aut_model = _runner_model(aut_runner_config)
     user_model = _runner_model(user_runner_config)
@@ -119,8 +142,17 @@ def run_scenario(
         env={
             **aut_runner_config.env,
             "REHEARSAL_TARGET_ID": target.id,
-            "REHEARSAL_MCP_CONFIG": str(mcp_config_path.resolve()),
+            "REHEARSAL_MCP_CONFIG": (
+                f"/sandbox/workspace/{mcp_config_path.name}"
+                if (aut_runner_config.sandbox or {}).get("backend") == "openshell"
+                else str(mcp_config_path.resolve())
+            ),
         },
+        sandbox=sandbox_for(aut_runner_config, "aut", True),
+    )
+    user_runner_config = replace(
+        user_runner_config,
+        sandbox=sandbox_for(user_runner_config, "user", False),
     )
 
     aut_runner = create_runner(aut_runner_config, "aut")
@@ -310,6 +342,8 @@ def run_scenario(
 
     if apps_session is not None:
         apps_session.close()
+    aut_runner.close()
+    user_runner.close()
 
     all_tool_calls = [call for turn in sorted(tool_calls_by_turn) for call in tool_calls_by_turn[turn]]
     emit(

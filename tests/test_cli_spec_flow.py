@@ -83,7 +83,8 @@ class CliSpecFlowTest(unittest.TestCase):
         self.assertEqual(spec.capabilities, {})
 
         code = main(
-            ["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)]
+            ["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+             "--sandbox", "local"]
         )
         self.assertEqual(code, 0)
         spec = load_spec(self.spec_path)
@@ -113,7 +114,8 @@ class CliSpecFlowTest(unittest.TestCase):
         jobs_root = self.tmp / "jobs"
         with patch.dict(os.environ, {"GHOSTLAB_JOBS_DIR": str(jobs_root)}):
             code = main(
-                ["create", "--name", "Notes Eval", "--target", str(self.target_path), "--yes"]
+                ["create", "--name", "Notes Eval", "--target", str(self.target_path),
+                 "--sandbox", "local", "--yes"]
             )
             self.assertEqual(code, 0)
             spec_path = jobs_root / "notes-eval" / "job.yaml"
@@ -127,7 +129,7 @@ class CliSpecFlowTest(unittest.TestCase):
             )
 
             # Resolve the whole loop by job name; artifacts + db land in the job.
-            code = main(["discover", "--job", "notes-eval"])
+            code = main(["discover", "--job", "notes-eval", "--sandbox", "local"])
             self.assertEqual(code, 0)
 
         spec = load_spec(spec_path)
@@ -153,7 +155,8 @@ class CliSpecFlowTest(unittest.TestCase):
         jobs_root = self.tmp / "jobs"
         with patch.dict("os.environ", {"GHOSTLAB_JOBS_DIR": str(jobs_root)}):
             # default: create auto-inspects the target, populating capabilities
-            code = main(["create", "--name", "with-disc", "--target", str(mcp_json), "--yes"])
+            code = main(["create", "--name", "with-disc", "--target", str(mcp_json),
+                         "--sandbox", "local", "--yes"])
             self.assertEqual(code, 0)
             spec = load_spec(jobs_root / "with-disc" / "job.yaml")
             self.assertEqual(
@@ -222,6 +225,7 @@ class CliSpecFlowTest(unittest.TestCase):
                 "--spec", str(self.spec_path),
                 "--sample", "safe",
                 "--db", str(self.db_path),
+                "--sandbox", "local",
             ]
         )
         self.assertEqual(code, 0)
@@ -253,12 +257,14 @@ class CliSpecFlowTest(unittest.TestCase):
              "timeout_seconds": 0.3, "interval_seconds": 0.05}
         ]
         save_spec(spec, self.spec_path)
-        code = main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        code = main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+                     "--sandbox", "local"])
         self.assertEqual(code, 1)
 
     def test_plan_after_discover_and_curation(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
-        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+              "--sandbox", "local"])
 
         code = main(["plan", "--spec", str(self.spec_path), "--no-generate"])
         self.assertEqual(code, 0)
@@ -290,7 +296,8 @@ class CliSpecFlowTest(unittest.TestCase):
 
     def test_full_pipeline_through_test_command(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
-        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+              "--sandbox", "local"])
         main(["plan", "--spec", str(self.spec_path), "--no-generate"])
 
         # edge: notes_delete with {} -> fake server answers isError -> graceful pass.
@@ -329,7 +336,8 @@ class CliSpecFlowTest(unittest.TestCase):
 
     def test_review_after_full_pipeline(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
-        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+              "--sandbox", "local"])
         main(["plan", "--spec", str(self.spec_path), "--no-generate"])
         main(["test", "--spec", str(self.spec_path), "--suite", "edge"])
 
@@ -360,7 +368,8 @@ class CliSpecFlowTest(unittest.TestCase):
         self, _bin_mock, profile_mock, dataset_mock
     ) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
-        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+              "--sandbox", "local"])
 
         profile_mock.return_value = {"mcp": "fake-notes@0.0.1"}
         dataset_mock.return_value = {
@@ -422,7 +431,8 @@ class CliSpecFlowTest(unittest.TestCase):
         # `plan` (and therefore `create`, which now calls `plan`) instead of
         # falling back to the deterministic-only plan.
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
-        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+              "--sandbox", "local"])
 
         code = main(["plan", "--spec", str(self.spec_path)])  # --generate is the default
         self.assertEqual(code, 0)
@@ -465,6 +475,19 @@ class HandlerRegistryTest(unittest.TestCase):
         self.assertEqual(len(subparser_actions), 1)
         declared = set(subparser_actions[0].choices)
         self.assertEqual(declared, set(_HANDLERS))
+
+    def test_execution_commands_default_to_openshell_with_local_opt_out(self) -> None:
+        parser = build_parser()
+        run_dataset = parser.parse_args([
+            "run-dataset", "--dataset", "dataset", "--target", "target.json",
+        ])
+        self.assertEqual(run_dataset.sandbox, "openshell")
+        local = parser.parse_args([
+            "run-dataset", "--dataset", "dataset", "--target", "target.json",
+            "--sandbox", "local", "--provider", "openai",
+        ])
+        self.assertEqual(local.sandbox, "local")
+        self.assertEqual(local.provider, ["openai"])
 
 
 if __name__ == "__main__":

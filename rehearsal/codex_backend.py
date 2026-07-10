@@ -49,12 +49,17 @@ class CodexBackend:
     bin_path: str = ""
     model: str = ""  # empty => codex default
     timeout_seconds: int = 600
+    sandbox: dict[str, Any] | None = None
 
     def _bin(self) -> str:
+        if (self.sandbox or {}).get("backend") == "openshell":
+            return str((self.sandbox or {}).get("codex_bin") or "codex")
         return self.bin_path or resolve_codex_bin()
 
     def generate_json(self, prompt: str, schema: dict[str, Any]) -> Any:
         """Run codex with a JSON output schema and return the parsed result."""
+        if (self.sandbox or {}).get("backend") == "openshell":
+            return self._generate_json_openshell(prompt, schema)
         codex = self._bin()
         with tempfile.TemporaryDirectory() as tmp:
             schema_path = Path(tmp) / "schema.json"
@@ -102,3 +107,45 @@ class CodexBackend:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise CodexError(f"codex output was not valid JSON:\n{raw[:2000]}") from exc
+
+    def _generate_json_openshell(self, prompt: str, schema: dict[str, Any]) -> Any:
+        """Run generation/judging inside the configured OpenShell boundary."""
+        from .sandbox import OpenShellSandbox, SandboxError, normalize_sandbox
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            schema_path = root / "schema.json"
+            out_path = root / "last.json"
+            schema_path.write_text(json.dumps(schema), encoding="utf-8")
+            config = normalize_sandbox(self.sandbox)
+            config["uploads"] = [
+                *list(config.get("uploads", []) or []),
+                {"source": str(schema_path), "target": "/sandbox/schema.json"},
+            ]
+            sandbox = OpenShellSandbox(config, role="codex-backend")
+            command = [
+                self._bin(), "exec", "--sandbox", "read-only", "--skip-git-repo-check",
+                "--ephemeral", "--output-schema", "/sandbox/schema.json",
+                "-o", "/sandbox/last.json", "-",
+            ]
+            if self.model:
+                command[2:2] = ["--model", self.model]
+            try:
+                completed = sandbox.exec(
+                    command, input_text=prompt, env={}, timeout=self.timeout_seconds,
+                )
+                if completed.returncode != 0:
+                    detail = (completed.stderr or completed.stdout).strip()[-2000:]
+                    raise CodexError(f"sandboxed codex exited {completed.returncode}:\n{detail}")
+                sandbox.download("/sandbox/last.json", out_path)
+                if not out_path.exists() or not out_path.read_text(encoding="utf-8").strip():
+                    raise CodexError("sandboxed codex produced no output-last-message file")
+                raw = out_path.read_text(encoding="utf-8").strip()
+            except SandboxError as exc:
+                raise CodexError(f"OpenShell {exc.kind}: {exc.detail}") from exc
+            finally:
+                sandbox.close()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise CodexError(f"sandboxed codex output was not valid JSON:\n{raw[:2000]}") from exc

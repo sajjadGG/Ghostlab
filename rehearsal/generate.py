@@ -93,8 +93,8 @@ def _profile_digest(profile: dict[str, Any]) -> str:
     missing = profile.get("gaps", {}).get("missing_referenced_tools", [])
     if missing:
         lines.append(f"Non-exposed tools mentioned in docs (do NOT rely on these): {', '.join(missing)}")
-    if profile.get("target_type") == "skill" and profile.get("instructions"):
-        lines += ["", "Skill instructions:", str(profile["instructions"])[:12000]]
+    if profile.get("target_type") in ("skill", "agent") and profile.get("instructions"):
+        lines += ["", "Capability instructions:", str(profile["instructions"])[:12000]]
     return "\n".join(lines)
 
 

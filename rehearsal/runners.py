@@ -7,6 +7,7 @@ import subprocess
 from dataclasses import dataclass
 
 from .config import RunnerConfig
+from .sandbox import OpenShellSandbox, SandboxError
 
 # Known host noise that should never be treated as conversational content.
 # Matched line-by-line and stripped from the message passed to the other agent.
@@ -75,6 +76,9 @@ class AgentRunner:
 
     def run_turn(self, prompt: str) -> RunnerResult:
         raise NotImplementedError
+
+    def close(self) -> None:
+        """Release runner-owned resources."""
 
 
 class MockRunner(AgentRunner):
@@ -168,9 +172,93 @@ class CodexSessionRunner(AgentRunner):
         return result
 
 
+def _prompt_command(
+    command: list[str], prompt_mode: str, prompt: str
+) -> tuple[list[str], str | None] | RunnerResult:
+    input_text: str | None = prompt
+    if prompt_mode == "append-arg":
+        command.append(prompt)
+        input_text = None
+    elif prompt_mode == "replace-placeholder":
+        command = [part.replace("{prompt}", prompt) for part in command]
+        input_text = None
+    elif prompt_mode != "stdin":
+        return RunnerResult(
+            output=f"Unsupported prompt_mode: {prompt_mode}", exit_code=2,
+        )
+    return command, input_text
+
+
+class OpenShellProcessRunner(AgentRunner):
+    """Run every agent turn inside one policy-enforced OpenShell sandbox."""
+
+    def __init__(self, config: RunnerConfig, name: str) -> None:
+        if not config.command:
+            raise ValueError("OpenShell process runner requires a non-empty command")
+        self.config = config
+        self.sandbox = OpenShellSandbox(config.sandbox, role=name)
+
+    def _run(self, command: list[str], input_text: str | None) -> RunnerResult:
+        try:
+            result = self.sandbox.exec(
+                command, input_text=input_text, env=self.config.env,
+                timeout=self.config.timeout_seconds,
+            )
+            return RunnerResult(
+                output=result.stdout.strip(), exit_code=result.returncode,
+                stderr=result.stderr.strip(),
+            )
+        except SandboxError as exc:
+            return RunnerResult(output="", exit_code=125, stderr=str(exc))
+
+    def run_turn(self, prompt: str) -> RunnerResult:
+        prepared = _prompt_command(list(self.config.command), self.config.prompt_mode, prompt)
+        if isinstance(prepared, RunnerResult):
+            return prepared
+        return self._run(*prepared)
+
+    def close(self) -> None:
+        self.sandbox.close()
+
+
+class OpenShellCodexSessionRunner(OpenShellProcessRunner):
+    """Codex session resume semantics, with every turn executed in OpenShell."""
+
+    stateful = True
+
+    def __init__(self, config: RunnerConfig, name: str) -> None:
+        super().__init__(config, name)
+        if "exec" not in config.command:
+            raise ValueError("codex-session command must contain 'exec'")
+        self.thread_id: str | None = None
+
+    def _command_for_turn(self) -> list[str]:
+        command = list(self.config.command)
+        if self.thread_id:
+            insert_at = command.index("exec") + 1
+            command[insert_at:insert_at] = ["resume", self.thread_id]
+        return command
+
+    def run_turn(self, prompt: str) -> RunnerResult:
+        prepared = _prompt_command(self._command_for_turn(), self.config.prompt_mode, prompt)
+        if isinstance(prepared, RunnerResult):
+            return prepared
+        result = self._run(*prepared)
+        if self.thread_id is None:
+            self.thread_id = CodexSessionRunner._extract_thread_id(result.output)
+        return result
+
+
 def create_runner(config: RunnerConfig, name: str) -> AgentRunner:
     if config.kind == "mock":
         return MockRunner(name)
+    backend = str((config.sandbox or {}).get("backend", "local"))
+    if backend == "openshell" and config.kind == "process":
+        return OpenShellProcessRunner(config, name)
+    if backend == "openshell" and config.kind == "codex-session":
+        return OpenShellCodexSessionRunner(config, name)
+    if backend not in ("local", "openshell"):
+        raise ValueError(f"Unsupported sandbox backend: {backend}")
     if config.kind == "process":
         return ProcessRunner(config)
     if config.kind == "codex-session":

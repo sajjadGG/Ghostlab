@@ -446,7 +446,7 @@ def build_test_plan(
     generated_security = [c for c in (generated_cases or []) if c["suite"] == "security"]
 
     cases: list[dict[str, Any]] = []
-    if target_type == "skill":
+    if target_type in ("skill", "agent"):
         cases += generated_semantic
         cases += generated_security
     else:
@@ -471,7 +471,7 @@ def build_test_plan(
             case["status"] = carried
 
     notes = []
-    if target_type != "skill" and not samples:
+    if target_type not in ("skill", "agent") and not samples:
         notes.append(
             "error-recovery suite is empty: run `ghostlab discover --sample safe` "
             "so sampling findings can seed it"

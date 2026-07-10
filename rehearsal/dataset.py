@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -185,6 +185,7 @@ def run_dataset(
     evaluate: bool = False,
     capabilities: dict[str, Any] | None = None,
     backend: "Any | None" = None,
+    sandbox: dict[str, Any] | None = None,
     store: "Any | None" = None,
     server: str | None = None,
 ) -> Path:
@@ -192,6 +193,9 @@ def run_dataset(
     target = load_target(target_path, server=server)
     aut_runner = load_runner(aut_runner_path)
     user_runner = load_runner(user_runner_path)
+    if sandbox is not None:
+        aut_runner = replace(aut_runner, sandbox={**dict(aut_runner.sandbox or {}), **sandbox})
+        user_runner = replace(user_runner, sandbox={**dict(user_runner.sandbox or {}), **sandbox})
 
     cases = manifest.get("cases", [])
     if approved_only:

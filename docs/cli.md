@@ -4,16 +4,22 @@ Ghostlab installs two equivalent console scripts, `ghostlab` and `rehearsal`. Ne
 
 ## create
 
-Create an end-to-end evaluation job for either an MCP target or a local skill:
+Create an end-to-end evaluation job for a composed agent, an MCP target, or a
+local skill:
 
 ```bash
 ghostlab create --name api-eval --target https://example.com/mcp --yes
 ghostlab create --name notes-skill --skill ./skills/notes --yes
+ghostlab create --name full-agent --agent ./agent.yaml --yes
 ```
 
-`--skill` accepts a `SKILL.md` file or directory and is mutually exclusive with
-`--target`. Skill jobs use conversational semantic/security evaluation and omit
+`--agent`, `--skill`, and `--target` are mutually exclusive. `--agent` accepts
+JSON/YAML combining a runner, MCPs, skills, workspace, and assets. `--skill`
+accepts a `SKILL.md` file or directory. Skill jobs use conversational semantic/security evaluation and omit
 MCP-only protocol and Apps cases.
+
+Generated jobs use `sandbox.backend: openshell`. `--sandbox local` is the only
+CLI opt-out; there is no `--local` shorthand and no automatic fallback.
 
 `ghostlab create --name NAME --resume` continues an existing job without asking
 for the target again. It reuses completed discovery and cached generation
@@ -21,10 +27,9 @@ artifacts, then resumes per-case testing where possible.
 
 ## init
 
-Create a `ghostlab.yaml` spec — the canonical, human-editable description of the
-MCP under test — from an existing target JSON. The spec is the entry point for
-the project flow (`init` → `discover` → future `plan`/`test`/`review` stages);
-every other command keeps accepting raw target/scenario JSON as before.
+Create a `ghostlab.yaml` spec from an existing target JSON. This is the advanced
+single-file entry point for the implemented `init` → `discover` → `plan` →
+`test` → `review` flow; most users should use `ghostlab create` and a job.
 
 ```bash
 ghostlab init --target target.json          # writes ghostlab.yaml
@@ -49,6 +54,7 @@ under `<workspace>/discover/<timestamp>-<id>/`.
 ghostlab discover --spec ghostlab.yaml
 ghostlab discover --spec ghostlab.yaml --strict          # exit 1 when review gates fail
 ghostlab discover --spec ghostlab.yaml --sample safe     # also call read-only tools once
+ghostlab discover --spec ghostlab.yaml --sandbox local   # trusted legacy opt-out
 ```
 
 If the spec declares a `setup` section, discover executes it first and tears it
@@ -85,6 +91,10 @@ take precedence over name heuristics), and MCP Apps metadata compatibility
 `ui://` references). With `--strict`, the spec's `review.gates` get teeth:
 `no_tool_schema_errors: true` fails the run when any error-severity finding
 exists.
+
+For local stdio MCPs, discovery launches the persistent MCP process through
+`openshell sandbox exec`. Declared uploads are staged before startup, environment
+variables are allowlisted, and `openshell-*.log` is retained with artifacts.
 
 ## plan
 
@@ -148,6 +158,7 @@ ghostlab test --spec ghostlab.yaml --suite smoke --suite edge   # CI-able subset
 ghostlab test --spec ghostlab.yaml --hosts direct-mcp --approved-only --strict
 ghostlab test --spec ghostlab.yaml --no-judge                   # skip the codex judge/critique
 ghostlab test --spec ghostlab.yaml --resume                     # resume latest partial run
+ghostlab test --spec ghostlab.yaml --sandbox local               # explicit unsandboxed opt-out
 ```
 
 Every case runs on each capable host (one result per case × host). The
@@ -174,6 +185,10 @@ finished-or-not. Seeds still marked `needs_generation` (no scenario attached
 yet) skip with instructions to run `ghostlab plan --generate`.
 
 Cases no host can execute surface as explicit skips, never silence.
+
+The AUT and user-emulator runner sessions use the job's sandbox configuration.
+OpenShell setup/runtime/policy failures are classified as retryable harness
+errors rather than target failures.
 
 Each case result is checkpointed while the run is active. `--resume` reuses the
 latest matching run directory, skips completed case/host pairs, and retries
@@ -244,6 +259,11 @@ Writes `readiness.json` / `readiness.md` next to the test results:
 
 Introspect a target MCP server.
 
+`inspect` is a low-level direct protocol command. It does not load a job's
+sandbox/uploads. For an untrusted local stdio server, create a job and run
+`ghostlab discover`, which defaults to OpenShell. Remote HTTP/SSE inspection
+does not launch target code locally.
+
 ```bash
 ghostlab inspect --target examples/target.json
 ```
@@ -308,7 +328,8 @@ ghostlab review-dataset --dataset datasets/cortex \
 
 ## run
 
-Run one scenario.
+Run one scenario. Real runner sessions use OpenShell by default; mock runners
+remain in-process deterministic fixtures and do not exercise a sandbox.
 
 ```bash
 ghostlab run \
@@ -318,9 +339,21 @@ ghostlab run \
   --user-runner runners/mock-user.json
 ```
 
+For trusted direct-host execution:
+
+```bash
+ghostlab run --target target.json --scenario scenario.json \
+  --aut-runner aut.json --user-runner user.json --sandbox local
+```
+
 ## run-dataset
 
-Run every case in a dataset. Use `--limit` for small development runs and `--approved-only` to skip unreviewed cases.
+Run every case in a dataset. AUT, user-emulator, and optional judge execution
+use OpenShell by default. Use `--limit` for small development runs,
+`--approved-only` to skip unreviewed cases, or `--sandbox local` for an
+explicit trusted-host opt-out. Attach configured credential/egress providers to
+runner sessions and the optional judge with repeatable `--provider <name>`
+flags; without the flag, each runner file's own sandbox providers are preserved.
 
 ```bash
 ghostlab run-dataset \
@@ -328,6 +361,7 @@ ghostlab run-dataset \
   --target target.json \
   --aut-runner runners/codex-cortex-aut.json \
   --user-runner runners/codex-user-emulator.json \
+  --provider openai \
   --limit 2
 ```
 
@@ -364,9 +398,10 @@ ghostlab compare --base runs/<base>-summary --candidate runs/<candidate>-summary
 
 ## scorecard
 
-Aggregate a whole dataset run into one MCP validation report (pass rate, per-tool
-reliability, hallucination/golden-mismatch counts, efficiency, and recurring
-tool-design recommendations). No model calls — it reads the per-case artifacts.
+Aggregate a whole dataset run into one agent/capability validation report (pass
+rate, per-tool reliability, hallucination/golden-mismatch counts, efficiency,
+and recurring tool-design recommendations). No model calls—it reads the
+per-case artifacts.
 
 ```bash
 ghostlab scorecard --results runs/<id>-summary
@@ -376,9 +411,67 @@ Writes `scorecard.json` and `scorecard.md` into the summary directory.
 
 ## doctor
 
-Validate local agent and runner setup.
+Validate the agent, runner, and OpenShell setup. The default check resolves the
+OpenShell CLI and connects to its gateway; `--sandbox local` deliberately skips
+that runtime check.
 
 ```bash
 ghostlab doctor
 ghostlab doctor --runners runners/codex-cortex-local-session.json
+ghostlab doctor --sandbox local
+```
+
+## apps-probe
+
+Fetch MCP Apps `ui://` resources and report UI-tool metadata and CSP issues:
+
+```bash
+ghostlab apps-probe --target target.json
+ghostlab apps-probe --target target.json --tool calendar_create_event
+```
+
+Like standalone `inspect`, this is a direct protocol utility. Prefer the job
+pipeline for an untrusted local stdio MCP.
+
+## apps-render
+
+Render an MCP Apps widget in headless Chrome, optionally call its tool, and
+execute one or more JSON UI intents:
+
+```bash
+pip install 'ghostlab[apps]'
+playwright install chrome
+ghostlab apps-render --target target.json --tool calendar_create_event \
+  --arguments '{"title":"Demo"}' \
+  --intent '{"type":"submit"}'
+```
+
+Artifacts include JSON/Markdown diagnostics and initial/final screenshots.
+Use `--no-call` to render from tool input without invoking the MCP tool.
+
+## dashboard
+
+Build a standalone HTML dashboard from a `ghostlab test` result directory:
+
+```bash
+ghostlab dashboard jobs/my-agent/workspace/test/<run-id>
+ghostlab dashboard jobs/my-agent/workspace/test/<run-id> --open
+```
+
+## ui
+
+Launch the optional Streamlit interface over the same job artifacts:
+
+```bash
+pip install 'ghostlab[ui]'
+ghostlab ui --port 8501 --server-address localhost
+```
+
+## db
+
+Initialize or verify the optional SQLite system of record:
+
+```bash
+ghostlab db init --db ghostlab.sqlite3
+ghostlab db verify --db ghostlab.sqlite3
 ```

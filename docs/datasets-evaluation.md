@@ -20,7 +20,8 @@ datasets/cortex/
   scenarios/<id>.json
 ```
 
-The manifest records cases, seed, MCP identity, and status. The seed governs case ordering for reproducibility.
+The manifest records cases, seed, primary capability identity, and status. The
+seed governs case ordering for reproducibility.
 
 ## Curate Before Running
 
@@ -78,21 +79,25 @@ run contains a call to that tool whose arguments include the given key/value pai
 ghostlab run-dataset --dataset datasets/cortex \
   --target target.json \
   --aut-runner runners/codex-cortex-local-session.json \
-  --evaluate --capabilities runs/<id>-inspect/capabilities.json
+  --evaluate --provider openai \
+  --capabilities runs/<id>-inspect/capabilities.json
 ```
 
-Per-case verdicts are written into each run directory and aggregated into the dataset summary.
+Per-case verdicts are written into each run directory and aggregated into the
+dataset summary. Real AUT, user-emulator, and judge processes run in OpenShell
+by default. Add `--sandbox local` only for trusted, intentionally unsandboxed
+execution.
 
 ## Scorecard A Dataset Run
 
-Roll a whole dataset run up into one MCP validation report:
+Roll a whole dataset run up into one agent/capability validation report:
 
 ```bash
 ghostlab scorecard --results runs/<id>-summary
 ```
 
 It reads each case's run directory (verdict, critique, and tool calls when
-present) and aggregates server-level signals — pass rate, average tool coverage,
+present) and aggregates evaluation-level signals — pass rate, average tool coverage,
 average tool-ergonomics score, per-tool failure rates, hallucinated-tool and
 golden-mismatch counts, efficiency, and recurring tool-design recommendations —
 into `scorecard.json` and `scorecard.md`. Run `evaluate` and `critique` on the

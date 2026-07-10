@@ -108,6 +108,7 @@ def write_runner_config(config: RunnerConfig, path: Path) -> Path:
         "timeout_seconds": config.timeout_seconds,
         "prompt_mode": config.prompt_mode,
         "parser": config.parser,
+        "sandbox": config.sandbox,
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path

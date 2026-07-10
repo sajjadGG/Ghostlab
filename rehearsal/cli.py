@@ -144,6 +144,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--skill", type=Path, default=None,
         help="Evaluate a local skill instead of an MCP target; accepts SKILL.md or its directory.",
     )
+    create_parser.add_argument(
+        "--agent", type=Path, default=None,
+        help="Agent JSON/YAML composing a runner with MCPs, skills, workspace, and assets.",
+    )
     _add_server_arg(create_parser)
     create_parser.add_argument(
         "--transport", default=None,
@@ -187,6 +191,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume", action="store_true",
         help="Continue an existing job: reuse discovery/generation artifacts and resume tests.",
     )
+    create_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default=None,
+        help="Agent execution backend (default: openshell; local is explicitly unsandboxed).",
+    )
 
     discover_parser = sub.add_parser(
         "discover",
@@ -220,6 +228,10 @@ def build_parser() -> argparse.ArgumentParser:
     discover_parser.add_argument(
         "--strict", action="store_true",
         help="Exit non-zero when the spec's review gates fail (e.g. schema errors).",
+    )
+    discover_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default=None,
+        help="Override local stdio target execution backend (default: openshell).",
     )
     _add_db_arg(discover_parser)
 
@@ -313,6 +325,10 @@ def build_parser() -> argparse.ArgumentParser:
              "retrying unfinished or harness-failed cases (requires --repeat 1).",
     )
     test_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default=None,
+        help="Override the job sandbox backend (default from job.yaml: openshell).",
+    )
+    test_parser.add_argument(
         "--profile", choices=["smoke", "nightly", "release"], default=None,
         help="CI preset: smoke = smoke+edge suites; nightly = all suites; "
              "release = all suites, repeat 3, strict gates. Explicit flags override.",
@@ -356,6 +372,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--aut-runner", type=Path, help="Path to AUT runner JSON config.")
     run_parser.add_argument("--user-runner", type=Path, help="Path to user emulator runner JSON config.")
     run_parser.add_argument("--persona", type=Path, help="Optional persona JSON to drive the user emulator.")
+    run_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default="openshell",
+        help="Runner sandbox backend (default: openshell).",
+    )
     run_parser.add_argument(
         "--job", default=None,
         help="Route output + db into this job's folder (jobs/<name>/runs/) and use its prompt overrides.",
@@ -465,6 +485,14 @@ def build_parser() -> argparse.ArgumentParser:
     rundataset_parser.add_argument("--aut-runner", type=Path, help="Path to AUT runner JSON config.")
     rundataset_parser.add_argument("--user-runner", type=Path, help="Path to user emulator runner JSON config.")
     rundataset_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default="openshell",
+        help="Runner sandbox backend (default: openshell).",
+    )
+    rundataset_parser.add_argument(
+        "--provider", action="append", default=None,
+        help="OpenShell provider for runner sessions and optional judge (repeatable).",
+    )
+    rundataset_parser.add_argument(
         "--job", default=None,
         help="Route output + db into this job's folder (jobs/<name>/runs/) and use its prompt overrides.",
     )
@@ -513,6 +541,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
+    )
+    doctor_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default="openshell",
+        help="Sandbox runtime to validate (default: openshell).",
     )
 
     eval_parser = sub.add_parser(
@@ -721,13 +753,14 @@ def cmd_create(args: argparse.Namespace) -> int:
     if getattr(args, "resume", False):
         return _resume_job_pipeline(args, name, ask_yn)
 
-    if args.skill is not None and args.target:
-        print("Pass either --skill or --target, not both.")
+    selected_targets = sum(bool(value) for value in (args.target, args.skill, args.agent))
+    if selected_targets > 1:
+        print("Pass exactly one of --agent, --skill, or --target.")
         return 1
 
     target = None
     source_target = ""
-    if args.skill is None:
+    if args.skill is None and args.agent is None:
         target_value = args.target or ask("Target MCP URL or config path: ")
         if not target_value:
             print("A target is required (pass --target/--skill or answer the prompt).")
@@ -754,7 +787,21 @@ def cmd_create(args: argparse.Namespace) -> int:
         generation["scenarios_per_persona"] = args.scenarios_per_persona
     review_gates = {"min_pass_rate": args.min_pass_rate} if args.min_pass_rate is not None else None
 
-    if args.skill is not None:
+    if args.agent is not None:
+        from .agents import load_agent_definition
+        from .jobs import default_agent_job_spec
+
+        try:
+            agent, agent_sandbox = load_agent_definition(args.agent)
+            spec = default_agent_job_spec(
+                name, agent=agent, sandbox=agent_sandbox, generation=generation,
+                review_gates=review_gates,
+            )
+            spec.source_target = str(args.agent)
+        except (ConfigError, OSError, ValueError) as exc:
+            print(str(exc))
+            return 1
+    elif args.skill is not None:
         try:
             spec = default_skill_job_spec(
                 name, skill_path=args.skill, generation=generation,
@@ -771,6 +818,8 @@ def cmd_create(args: argparse.Namespace) -> int:
             review_gates=review_gates,
             aut_runner=str(args.aut_runner) if args.aut_runner else None,
         )
+    if getattr(args, "sandbox", None):
+        spec.sandbox["backend"] = args.sandbox
     try:
         spec_path = create_job(name, spec, force=args.force)
     except ConfigError as exc:
@@ -911,17 +960,20 @@ def _configure_aut_host(spec_path: Path, ask_yn) -> None:
     from .spec import load_spec
 
     spec = load_spec(spec_path)  # reload: discover just updated `capabilities`
+    if (spec.agent or {}).get("runner"):
+        return  # An explicit agent config already defines the AUT.
     if any(h.get("kind") in ("process", "codex-session") for h in spec.hosts):
         return  # --aut-runner (or a hand-edited job.yaml) already set one up
 
-    try:
-        resolve_codex_bin()
-    except CodexError:
-        print(tc.muted(
-            "  codex not found — semantic/security suites will skip until an "
-            "agent-under-test host is configured (see README)."
-        ))
-        return
+    if spec.sandbox.get("backend") != "openshell":
+        try:
+            resolve_codex_bin()
+        except CodexError:
+            print(tc.muted(
+                "  codex not found — semantic/security suites will skip until an "
+                "agent-under-test host is configured (see README)."
+            ))
+            return
 
     if not ask_yn("\nSet up semantic/E2E testing with codex?", True):
         print(tc.muted("  skipping — semantic/security suites will skip for now."))
@@ -939,12 +991,29 @@ def cmd_discover(args: argparse.Namespace) -> int:
     from .setup_runtime import SetupError, SetupRuntime
 
     spec = _job_spec(args)
+    if getattr(args, "sandbox", None):
+        spec.sandbox["backend"] = args.sandbox
     target = spec.target_config()
     timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
     out_dir = spec.workspace_dir(args.spec) / "discover" / f"{timestamp}-{spec.id}"
 
     if spec.target_type == "skill":
         return _discover_skill(args, spec, target, out_dir)
+    if spec.target_type == "agent":
+        return _discover_agent(args, spec, target, out_dir)
+
+    sandbox_session = None
+    if target.transport == "stdio":
+        from .sandbox import SandboxError, normalize_sandbox, sandbox_stdio_target
+
+        try:
+            sandbox_config = normalize_sandbox(spec.sandbox, args.spec.resolve().parent)
+            target, sandbox_session = sandbox_stdio_target(
+                target, sandbox_config, role="discover", artifact_dir=out_dir,
+            )
+        except SandboxError as exc:
+            print(tc.verdict(f"  sandbox setup failed [{exc.kind}]: {exc.detail}", "fail"))
+            return 1
 
     print(tc.heading(f"Discovering '{spec.id}' ({target.transport})..."))
     runtime = SetupRuntime({} if args.skip_setup else spec.setup, out_dir)
@@ -971,6 +1040,8 @@ def cmd_discover(args: argparse.Namespace) -> int:
         runtime.teardown()
         if runtime.declared:
             runtime.write_status()  # capture teardown results in setup.json
+        if sandbox_session is not None:
+            sandbox_session.close()
 
 
 def _discover_skill(args, spec, target, out_dir: Path) -> int:
@@ -1008,6 +1079,45 @@ def _discover_skill(args, spec, target, out_dir: Path) -> int:
     save_spec(spec, args.spec)
     print(tc.heading(f"Discovered skill '{result.server_info.get('name', spec.id)}'"))
     print(f"  source: {target.connection.get('path')}")
+    print(f"  wrote {inspect_json}")
+    print(f"  wrote {inspect_md}")
+    print(f"  wrote {contract_json}")
+    return 0
+
+
+def _discover_agent(args, spec, target, out_dir: Path) -> int:
+    """Capture an agent-only definition as discovery input for generation."""
+    from dataclasses import asdict
+
+    from .contract import build_contract, render_contract_md
+    from .inspect import InspectResult, write_inspect_artifacts
+    from .spec import save_spec
+
+    instructions = str((spec.agent or {}).get("instructions", ""))
+    result = InspectResult(
+        target_id=spec.id, transport="agent",
+        server_info={"name": (spec.agent or {}).get("name", spec.id), "version": "configured"},
+        capabilities={"target_type": "agent"}, instructions=instructions,
+    )
+    inspect_json, inspect_md = write_inspect_artifacts(result, out_dir)
+    contract = build_contract(asdict(result))
+    contract.update({"target_type": "agent", "mcp": (spec.agent or {}).get("name", spec.id)})
+    contract_json = out_dir / "contract.json"
+    contract_json.write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+    (out_dir / "contract.md").write_text(
+        render_contract_md(contract).replace("# MCP Contract:", "# Agent Contract:"),
+        encoding="utf-8",
+    )
+    try:
+        generated_from = str(contract_json.resolve().relative_to(args.spec.resolve().parent))
+    except ValueError:
+        generated_from = str(contract_json)
+    spec.capabilities = {
+        "generated_from": generated_from, "discovered_at": contract["generated_at"],
+        "target_type": "agent", "tools": [], "ui_resources": [],
+    }
+    save_spec(spec, args.spec)
+    print(tc.heading(f"Discovered agent '{(spec.agent or {}).get('name', spec.id)}'"))
     print(f"  wrote {inspect_json}")
     print(f"  wrote {inspect_md}")
     print(f"  wrote {contract_json}")
@@ -1230,7 +1340,12 @@ def _get_generated_cases(args: argparse.Namespace, spec, inspect_data: dict) -> 
 
     n_personas = args.personas or DEFAULT_N_PERSONAS
     scenarios_per_persona = args.scenarios_per_persona or DEFAULT_SCENARIOS_PER_PERSONA
-    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    from .sandbox import normalize_sandbox
+
+    backend = CodexBackend(
+        bin_path=args.codex_bin, model=args.model,
+        sandbox=normalize_sandbox(spec.sandbox, args.spec.resolve().parent),
+    )
     try:
         codex_bin = backend._bin()
     except CodexError as exc:
@@ -1326,6 +1441,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     generated_cases = None
     if args.generate:
         generated_cases = _get_generated_cases(args, spec, inspect_data)
+    from .agents import configured_agent_cases
+
+    configured_cases = configured_agent_cases(spec.agent or {})
+    if configured_cases:
+        generated_cases = [*(generated_cases or []), *configured_cases]
 
     plan = build_test_plan(
         spec.id,
@@ -1379,6 +1499,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_test(args: argparse.Namespace) -> int:
+    from dataclasses import replace
     from .hosts import build_hosts
     from .plan import load_test_plan
     from .setup_runtime import SetupError, SetupRuntime
@@ -1394,6 +1515,8 @@ def cmd_test(args: argparse.Namespace) -> int:
         args.strict = True
 
     spec = _job_spec(args)
+    if getattr(args, "sandbox", None):
+        spec.sandbox["backend"] = args.sandbox
     # Editable defaults: explicit flag (or profile) -> spec.test/generation -> code default.
     t = spec.test or {}
     if args.suite is None and t.get("suites"):
@@ -1425,7 +1548,12 @@ def cmd_test(args: argparse.Namespace) -> int:
         from .codex_backend import CodexBackend, CodexError
 
         try:
-            candidate = CodexBackend(bin_path=args.codex_bin, model=args.model)
+            from .sandbox import normalize_sandbox
+
+            candidate = CodexBackend(
+                bin_path=args.codex_bin, model=args.model,
+                sandbox=normalize_sandbox(spec.sandbox, args.spec.resolve().parent),
+            )
             candidate._bin()  # resolve now so a missing codex degrades gracefully
             backend = candidate
         except CodexError as exc:
@@ -1445,6 +1573,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             prompt_mode="stdin",
             parser="text",
         )
+    user_runner_config = replace(user_runner_config, sandbox=dict(spec.sandbox))
     hosts = build_hosts(
         spec, args.spec, timeout=args.timeout, backend=backend,
         user_runner_config=user_runner_config,
@@ -1665,10 +1794,15 @@ def cmd_review_spec(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    from dataclasses import replace
+
     target = load_target(args.target, args.server)
     scenario = load_scenario(args.scenario)
     aut_runner = load_runner(args.aut_runner)
     user_runner = load_runner(args.user_runner)
+    sandbox = {"backend": getattr(args, "sandbox", "openshell")}
+    aut_runner = replace(aut_runner, sandbox={**dict(aut_runner.sandbox or {}), **sandbox})
+    user_runner = replace(user_runner, sandbox={**dict(user_runner.sandbox or {}), **sandbox})
     persona = load_persona(args.persona) if args.persona else None
     output_dir = _job_output_dir(args)
     store = _open_store(args)
@@ -1879,16 +2013,23 @@ def cmd_generate_dataset(args: argparse.Namespace) -> int:
 
 def cmd_run_dataset(args: argparse.Namespace) -> int:
     from .dataset import run_dataset
+    from .sandbox import normalize_sandbox
 
     if not (args.dataset / "dataset.json").exists():
         raise ConfigError(f"No dataset.json in {args.dataset}")
 
+    # Override only the backend on runner files so their image, providers,
+    # uploads, and environment policy remain intact.
+    sandbox = {"backend": args.sandbox}
+    if args.provider:
+        sandbox["providers"] = list(args.provider)
+    judge_sandbox = normalize_sandbox(sandbox)
     backend = None
     capabilities = None
     if args.evaluate:
         from .codex_backend import CodexBackend
 
-        backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+        backend = CodexBackend(bin_path=args.codex_bin, model=args.model, sandbox=judge_sandbox)
         if args.capabilities:
             if not args.capabilities.exists():
                 raise ConfigError(f"capabilities.json not found: {args.capabilities}")
@@ -1908,6 +2049,7 @@ def cmd_run_dataset(args: argparse.Namespace) -> int:
             evaluate=args.evaluate,
             capabilities=capabilities,
             backend=backend,
+            sandbox=sandbox,
             store=store,
             server=args.server,
         )
@@ -2016,6 +2158,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     ok = True
     print("Ghostlab doctor")
+    if args.sandbox == "openshell":
+        openshell = shutil.which("openshell")
+        if not openshell:
+            ok = False
+            print("  [!!] openshell: CLI not found (install NVIDIA OpenShell)")
+        else:
+            try:
+                status = subprocess.run(
+                    [openshell, "status"], capture_output=True, text=True, timeout=20
+                )
+                detail = (status.stdout or status.stderr).strip().replace("\n", " ")[:300]
+                reachable = status.returncode == 0
+                ok = ok and reachable
+                print(f"  [{'ok' if reachable else '!!'}] openshell: {detail or openshell}")
+            except (OSError, subprocess.SubprocessError) as exc:
+                ok = False
+                print(f"  [!!] openshell: {exc}")
+    else:
+        print("  [!!] sandbox: local (explicitly unsandboxed compatibility mode)")
     try:
         codex_bin = args.codex_bin or resolve_codex_bin()
         version = subprocess.run(

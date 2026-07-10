@@ -1,5 +1,5 @@
 site_name: Ghostlab Wiki
-site_description: Documentation for MCP Ghostlab, a dual-agent E2E testing harness for MCP apps.
+site_description: Documentation for Ghostlab, an OpenShell-first E2E evaluation harness for configured AI agents, MCPs, and skills.
 site_url: https://sajjadgg.github.io/Ghostlab/
 repo_url: https://github.com/sajjadGG/Ghostlab
 repo_name: sajjadGG/Ghostlab

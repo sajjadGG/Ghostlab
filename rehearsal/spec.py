@@ -1,4 +1,4 @@
-"""`ghostlab.yaml` — the canonical spec for an MCP under test (roadmap Phase A1).
+"""`ghostlab.yaml` — the canonical spec for an agent under test.
 
 Today the pipeline's knowledge about a target is scattered across target JSON,
 inspect artifacts, profiles, datasets, and runner configs. The spec collects it
@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ConfigError, TargetConfig, load_json
+from .sandbox import DEFAULT_SANDBOX
 
 SPEC_SCHEMA_VERSION = 1
 # Legacy specs (root ghostlab.yaml) used a hidden .ghostlab workspace. Self-
@@ -37,6 +38,8 @@ _TOP_LEVEL_KEYS = (
     "source_target",
     "workspace",
     "target",
+    "agent",
+    "sandbox",
     "setup",
     "hosts",
     "capabilities",
@@ -70,6 +73,7 @@ DEFAULT_TEST = {
 # placeholders each template accepts are documented in the job.yaml header.
 DEFAULT_PROMPTS = {
     "aut": "",
+    "agent_aut": "",
     "skill_aut": "",
     "user_emulator": "",
     "judge": "",
@@ -91,6 +95,11 @@ class GhostlabSpec:
     workspace: str = DEFAULT_WORKSPACE
     # TargetConfig-shaped: transport, connection, capabilities, startup.
     target: dict[str, Any] = field(default_factory=dict)
+    # Canonical evaluation subject. An agent can compose zero or more MCPs,
+    # skills, workspace assets, and an arbitrary runner command.
+    agent: dict[str, Any] = field(default_factory=dict)
+    # Execution boundary for agent and local-target processes.
+    sandbox: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_SANDBOX))
     # Setup runtime primitives (commands/health/reset/teardown) — populated by
     # hand or by `discover-setup` in a later phase; validated loosely for now.
     setup: dict[str, Any] = field(default_factory=dict)
@@ -111,6 +120,26 @@ class GhostlabSpec:
 
     def target_config(self) -> TargetConfig:
         """Materialize the embedded target as the pipeline's TargetConfig."""
+        if not self.target and self.agent:
+            inputs = self.agent.get("inputs", {}) or {}
+            mcps = inputs.get("mcps", []) or []
+            if mcps:
+                entry = dict(mcps[0])
+                return TargetConfig(
+                    id=str(entry.get("id", self.id)),
+                    transport=str(entry.get("transport", "streamable-http")),
+                    connection=dict(entry.get("connection", {})),
+                    capabilities=dict(entry.get("capabilities", {})),
+                    startup=dict(entry.get("startup", {})),
+                )
+            skills = inputs.get("skills", []) or []
+            if skills:
+                entry = skills[0]
+                path = entry.get("path") if isinstance(entry, dict) else entry
+                return TargetConfig(
+                    id=self.id, transport="skill", connection={"path": str(path)},
+                    capabilities={}, startup={},
+                )
         missing = [key for key in ("transport", "connection") if key not in self.target]
         if missing:
             raise ConfigError(
@@ -126,7 +155,44 @@ class GhostlabSpec:
 
     @property
     def target_type(self) -> str:
-        return str(self.target.get("kind", "mcp"))
+        if self.target:
+            return str(self.target.get("kind", "mcp"))
+        return "agent" if self.agent else "mcp"
+
+    def evaluation_target(self, spec_path: Path) -> TargetConfig:
+        """Target-shaped context used by the existing conversation pipeline.
+
+        The target remains the primary discovery input, while the embedded
+        ``agent_definition`` makes prompts/execution aware of the composition.
+        """
+        target = self.target_config()
+        if not self.agent:
+            return target
+        agent = dict(self.agent)
+        inputs = dict(agent.get("inputs", {}) or {})
+        skill_texts: list[str] = []
+        for item in inputs.get("skills", []) or []:
+            raw_path = item.get("path") if isinstance(item, dict) else item
+            path = Path(str(raw_path)).expanduser()
+            if not path.is_absolute():
+                path = spec_path.resolve().parent / path
+            if path.is_dir():
+                path = path / "SKILL.md"
+            try:
+                skill_texts.append(path.read_text(encoding="utf-8"))
+            except OSError:
+                skill_texts.append(f"(skill unavailable: {path})")
+        capabilities = {
+            **target.capabilities,
+            "agent_definition": agent,
+            "agent_instructions": str(agent.get("instructions", "")),
+            "skill_instructions": "\n\n".join(skill_texts),
+        }
+        return TargetConfig(
+            id=str(agent.get("id") or self.id), transport=target.transport,
+            connection=target.connection, capabilities=capabilities,
+            startup=target.startup,
+        )
 
     def workspace_dir(self, spec_path: Path) -> Path:
         """Workspace directory for artifacts, resolved relative to the spec file."""
@@ -146,6 +212,8 @@ class GhostlabSpec:
             data["source_target"] = self.source_target
         data["workspace"] = self.workspace
         data["target"] = self.target
+        data["agent"] = self.agent
+        data["sandbox"] = self.sandbox
         data["setup"] = self.setup
         data["hosts"] = self.hosts
         data["capabilities"] = self.capabilities
@@ -166,6 +234,14 @@ def spec_from_dict(data: dict[str, Any], source: str = "spec") -> GhostlabSpec:
     target = data.get("target", {})
     if not isinstance(target, dict):
         raise ConfigError(f"{source}: 'target' must be a mapping")
+    agent = data.get("agent", {}) or {}
+    if not isinstance(agent, dict):
+        raise ConfigError(f"{source}: 'agent' must be a mapping")
+    sandbox = data.get("sandbox", DEFAULT_SANDBOX) or {}
+    if not isinstance(sandbox, dict):
+        raise ConfigError(f"{source}: 'sandbox' must be a mapping")
+    if not target and not agent:
+        raise ConfigError(f"{source}: provide either 'target' or 'agent'")
     hosts = data.get("hosts", []) or []
     if not isinstance(hosts, list):
         raise ConfigError(f"{source}: 'hosts' must be a list")
@@ -187,6 +263,8 @@ def spec_from_dict(data: dict[str, Any], source: str = "spec") -> GhostlabSpec:
         source_target=str(data.get("source_target", "") or ""),
         workspace=str(data.get("workspace", DEFAULT_WORKSPACE) or DEFAULT_WORKSPACE),
         target=dict(target),
+        agent=dict(agent),
+        sandbox={**DEFAULT_SANDBOX, **dict(sandbox)},
         setup=dict(data.get("setup", {}) or {}),
         hosts=[dict(host) for host in hosts],
         capabilities=dict(data.get("capabilities", {}) or {}),
@@ -218,6 +296,20 @@ def spec_from_target(
             "capabilities": dict(target.capabilities),
             "startup": dict(target.startup),
         },
+        agent={
+            "id": target.id,
+            "runner": {},
+            "inputs": {
+                "mcps": [{
+                    "id": target.id, "transport": target.transport,
+                    "connection": dict(target.connection),
+                    "capabilities": dict(target.capabilities),
+                    "startup": dict(target.startup),
+                }],
+                "skills": [],
+            },
+        },
+        sandbox=dict(DEFAULT_SANDBOX),
         setup={"commands": [], "health": [], "reset": [], "teardown": [], "fixtures": []},
         hosts=[
             {
@@ -259,6 +351,12 @@ def spec_from_skill(
             "kind": "skill", "transport": "skill",
             "connection": {"path": str(path)}, "capabilities": {}, "startup": {},
         },
+        agent={
+            "id": target_id,
+            "runner": {},
+            "inputs": {"mcps": [], "skills": [{"path": str(path)}]},
+        },
+        sandbox=dict(DEFAULT_SANDBOX),
         setup={"commands": [], "health": [], "reset": [], "teardown": [], "fixtures": []},
         hosts=[],
         capabilities={}, generation=dict(DEFAULT_GENERATION), test=dict(DEFAULT_TEST),

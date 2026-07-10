@@ -50,7 +50,12 @@ def build_hosts(
         kind = str(host.get("kind", ""))
         host_id = str(host.get("id", kind or "?"))
         if kind == "direct-mcp":
-            adapters.append(DirectMcpHost(host_id, target, timeout=timeout))
+            adapters.append(
+                DirectMcpHost(
+                    host_id, target, timeout=timeout, sandbox=spec.sandbox,
+                    base_dir=spec_path.resolve().parent,
+                )
+            )
         elif kind in ("process", "codex-session"):
             adapters.append(
                 RunnerHost(host_id, kind, host, spec_path, backend=backend,
@@ -58,6 +63,22 @@ def build_hosts(
                           user_runner_config=user_runner_config,
                           apps_mode=apps_mode)
             )
-    if target.transport != "skill" and not any(isinstance(adapter, DirectMcpHost) for adapter in adapters):
-        adapters.insert(0, DirectMcpHost("direct-mcp", target, timeout=timeout))
+    agent_runner = (spec.agent or {}).get("runner") or {}
+    if agent_runner and not any(isinstance(adapter, RunnerHost) for adapter in adapters):
+        adapters.append(
+            RunnerHost(
+                "agent", "process", {"agent": True}, spec_path, backend=backend,
+                show_progress=show_progress, user_runner_config=user_runner_config,
+                apps_mode=apps_mode,
+            )
+        )
+    if target.transport not in ("skill", "agent") and not any(
+        isinstance(adapter, DirectMcpHost) for adapter in adapters
+    ):
+        adapters.insert(
+            0, DirectMcpHost(
+                "direct-mcp", target, timeout=timeout, sandbox=spec.sandbox,
+                base_dir=spec_path.resolve().parent,
+            ),
+        )
     return adapters

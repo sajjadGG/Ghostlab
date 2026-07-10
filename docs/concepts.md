@@ -2,13 +2,83 @@
 
 ## Spec (`ghostlab.yaml`)
 
-The spec is the canonical, human-editable description of one MCP or skill under test:
-how to connect (`target`), how to set it up (`setup`), which agent hosts should
+The spec is the canonical, human-editable description of one agent under test:
+its composed inputs (`agent`), primary discovery target (`target`), isolation
+boundary (`sandbox`), setup, and agent hosts that
 exercise it (`hosts`), what it exposes (`capabilities`, refreshed by
 `ghostlab discover`), and what quality bar it must clear (`review.gates`).
 `ghostlab init` creates it from a target JSON; discovery artifacts (inventory,
 contract lint, MCP Apps probes) accumulate under its workspace directory
-(default `.ghostlab/`). One spec per MCP is the intended unit of QA.
+(default `.ghostlab/`). One configured agent is the intended unit of QA.
+
+## Agent
+
+`agent` is the canonical evaluation subject:
+
+- `runner`: any process/coding-agent command Ghostlab can drive turn by turn.
+- `instructions`: agent-level behavior and policy.
+- `inputs.mcps`: zero or more native MCP definitions or normalized config references.
+- `inputs.skills`: zero or more `SKILL.md` inputs.
+- `inputs.assets` and `workspace`: files staged into the sandbox.
+
+MCP-only and skill-only jobs are normalized into this shape. Discovery and
+automatic scenario generation currently use the first MCP or skill as the
+primary capability, while execution receives the complete composition.
+
+## Sandbox
+
+NVIDIA OpenShell is the default runtime. Ghostlab creates one policy-enforced
+sandbox per runner session, stages declared files, executes turns with stdin
+and exit-code propagation, captures OpenShell logs, and deletes the sandbox at
+the end unless `keep: true` is configured.
+
+The lifecycle is:
+
+1. Normalize the agent's sandbox declaration and resolve relative paths.
+2. Create a named OpenShell sandbox from `image` with the policy, resource
+   limits, providers, and uploads fixed at creation time.
+3. Execute each runner turn with `openshell sandbox exec --no-tty`, the declared
+   `workdir`, and the filtered environment.
+4. Download requested artifacts, retain `openshell-<role>.log`, and delete the
+   sandbox unless debugging requested `keep: true`.
+
+The agent under test and user emulator receive different sandboxes. A local
+stdio MCP spawned by the job pipeline is also rewritten through OpenShell; a remote
+HTTP/SSE MCP remains remote and is reached only when the policy/provider permits
+that egress.
+
+`network: disabled` adds no user-authored egress rules; OpenShell remains
+default-deny except for rules contributed by attached providers. Set
+`network: policy` with an OpenShell policy file for explicit additional egress.
+Only variables named in `env_allowlist` are
+copied from the parent environment; internal `GHOSTLAB_`/`REHEARSAL_` values are
+added by the harness. `backend: local` is an explicit unsandboxed compatibility
+mode and is never an automatic fallback.
+
+For managed credentials, list existing OpenShell provider names under
+`sandbox.providers`; Ghostlab attaches them during sandbox creation. With no
+providers it uses non-interactive `--no-auto-providers`, so credentials must be
+supplied through the explicit environment allowlist or configured inference.
+
+```yaml
+sandbox:
+  backend: openshell
+  image: base
+  workdir: /sandbox
+  network: disabled
+  providers: []
+  env_allowlist: []
+  uploads: []
+  keep: false
+```
+
+`backend: local` runs the process directly on the host. Select it with
+`--sandbox local` for trusted compatibility work. It is never selected as a
+fallback after an OpenShell error.
+
+The standalone `ghostlab inspect` command is intentionally a low-level direct
+MCP client and does not consume a job sandbox declaration. Use
+`ghostlab create`/`ghostlab discover` for untrusted local stdio MCP code.
 
 ## Contract
 
@@ -21,7 +91,7 @@ for coverage-driven test planning.
 
 ## Target
 
-A target describes either an MCP server or a local skill under test:
+A target describes the primary MCP or skill used for discovery and planning:
 
 - `id`: stable target identifier.
 - `transport`: `stdio`, `sse`, `streamable-http`, or `skill`.

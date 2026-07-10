@@ -14,9 +14,60 @@ ghostlab --help
 ghostlab --version
 ```
 
+## Install And Verify OpenShell
+
+Install [NVIDIA OpenShell](https://docs.nvidia.com/openshell/latest/about/installation)
+and a supported compute driver. Docker Desktop is the simplest local driver on
+macOS; start it before the OpenShell gateway. Then verify both Ghostlab and the
+gateway:
+
+```bash
+openshell status
+ghostlab doctor
+```
+
+`openshell status` must report `Connected`. A CLI binary alone is not enough:
+the gateway also needs a running compute driver. For a Homebrew installation,
+use this recovery sequence when the gateway refuses connections:
+
+```bash
+open -a Docker                       # macOS only; wait until Docker is ready
+docker info                          # must include a Server section
+brew services restart openshell
+openshell status
+```
+
+Ghostlab-generated jobs and direct `ghostlab run` calls default to OpenShell.
+It creates separate sandboxes for the AUT and user emulator, uploads only
+declared inputs, forwards only allowlisted environment variables, captures
+`openshell-*.log`, and removes the sandboxes after the run. Local stdio MCPs
+launched by Ghostlab use the same boundary.
+
+There is no `--local` shorthand. Use `--sandbox local` to opt into direct,
+unsandboxed host execution for trusted code:
+
+```bash
+ghostlab create --name trusted --agent ./agent.yaml --sandbox local --yes
+ghostlab discover --job trusted --sandbox local
+ghostlab test --job trusted --sandbox local
+ghostlab run --target target.json --scenario scenario.json \
+  --aut-runner aut.json --user-runner user.json --sandbox local
+```
+
+Ghostlab never switches to local mode automatically. A missing CLI, stopped
+gateway, unavailable image, bad policy, or denied upload is reported as a
+sandbox/harness error so it cannot be mistaken for an agent failure.
+
+OpenShell currently labels itself alpha software; pin and validate the runtime
+version in CI, and treat gateway/policy upgrades as infrastructure changes.
+
 ## Create A Job (Recommended Starting Point)
 
-A **job** is one MCP evaluation, and everything about it lives in one folder. `ghostlab create` asks only for what it can't infer — a name and a target — then **inspects the target immediately** so the job is validated and its capabilities are populated in one step:
+A **job** is one configured-agent evaluation, and everything about it lives in
+one folder. `ghostlab create` accepts a complete agent definition, an MCP target,
+or a skill; MCP-only and skill-only inputs are normalized into the same agent
+model. In interactive MCP mode it asks only for what it cannot infer—a name and
+target—then inspects the target immediately:
 
 ```bash
 ghostlab create
@@ -39,6 +90,53 @@ Ghostlab reads the skill instructions, generates semantic and adversarial user
 scenarios, runs them through the dual-agent harness, and judges whether the AUT
 followed the skill. Protocol, tool-schema, and MCP Apps suites do not apply to
 skill targets.
+
+### Evaluate a composed agent
+
+An agent config can combine any runner with MCP, skill, workspace, and asset inputs:
+
+```bash
+ghostlab create --name my-agent --agent examples/agent.json --yes
+```
+
+```yaml
+id: my-agent
+instructions: Use the available capabilities and cite evidence.
+runner:
+  kind: process
+  command: [codex, --sandbox, read-only, -a, never, exec, --json, --skip-git-repo-check, -]
+  parser: codex-json
+workspace: ./agent-workspace
+inputs:
+  mcps:
+    - config_ref: ./mcp.json
+      server: notes
+  skills:
+    - ./skills/research
+tests:
+  - id: summarize-evidence
+    goal: Produce a concise evidence-backed summary.
+    opening_message: Summarize what changed and cite the source.
+    success_criteria: [Names the change, cites supporting evidence]
+    failure_signals: [Invents a source]
+sandbox:
+  backend: openshell
+  image: base
+  network: disabled
+  providers: [openai]
+  env_allowlist: []
+```
+
+Relative references resolve from the agent config. Absolute paths under the
+declared workspace are rewritten to its staged OpenShell workdir.
+Inline `tests` are materialized as ordinary scenario files and seeded into
+`test-plan.yaml`; generated cases can be added alongside them later.
+The example assumes an OpenShell provider named `openai` already exists. Check
+providers with `openshell provider list`. Provider attachment is the preferred
+way to make model credentials and matching egress policy available without
+copying secrets into the agent config. Remove `providers: [openai]` for a
+credential-free runner, or deliberately allowlist a required environment
+variable under `env_allowlist`.
 
 It scaffolds a self-contained directory:
 

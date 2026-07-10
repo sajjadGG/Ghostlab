@@ -1,6 +1,6 @@
 # Ghostlab
 
-> A local, end-to-end **testing lab for MCP servers and agent skills** — coding agents role-play
+> A local, end-to-end **testing lab for configured AI agents** — coding agents role-play
 > real users, drive your tools over multiple turns, and the harness captures
 > traces, scores outcomes, and even **renders and clicks through MCP Apps UI
 > widgets**.
@@ -11,12 +11,13 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![llms.txt](https://img.shields.io/badge/llms.txt-✓-purple)](llms.txt)
 
-**Test your MCP server the way it's actually used** — not with unit tests against
+**Test an agent the way it is actually used** — not only with unit tests against
 the protocol, but with a real coding agent (Codex / Claude) that picks tools,
 makes mistakes, and tries to accomplish goals, while a second agent plays the
 user. Protocol-level checks (schema errors, a tool call that 500s) are useful
 sanity checks, but they aren't the real test — the real test is whether an
-agent can actually get a task done through your MCP, end to end.
+agent can actually get a task done with its configured MCPs, skills, workspace,
+instructions, and runner, end to end.
 
 📖 **Docs wiki:** https://sajjadgg.github.io/Ghostlab/ · 🤖 **For agents:** [`llms.txt`](llms.txt) · 🛠 **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
@@ -37,10 +38,46 @@ python3 -m venv .venv                # Python 3.10+
 ghostlab create
 ```
 
+Ghostlab uses [NVIDIA OpenShell](https://docs.nvidia.com/openshell/latest/)
+as its default execution boundary. Install OpenShell, start a supported compute
+driver (Docker Desktop is the simplest local option), and confirm the gateway:
+
+```bash
+openshell status
+ghostlab doctor
+```
+
+`openshell status` must say `Connected`. On a Homebrew installation, a refused
+connection commonly means Docker is stopped or the gateway needs restarting:
+
+```bash
+open -a Docker                       # macOS, when Docker Desktop is installed
+brew services restart openshell
+openshell status
+```
+
+OpenShell is the default; there is no `--local` flag. Use the explicit
+`--sandbox local` escape hatch only for trusted code that you intentionally
+want to execute directly on the host:
+
+```bash
+ghostlab create --name trusted --agent agent.yaml --sandbox local --yes
+ghostlab discover --job trusted --sandbox local
+ghostlab test --job trusted --sandbox local
+ghostlab run ... --sandbox local
+```
+
+With OpenShell, Ghostlab creates separate sandboxes for the agent under test
+and user emulator, stages only declared files, forwards only allowlisted
+environment variables, attaches named OpenShell providers, captures sandbox
+logs with the run artifacts, and deletes the sandboxes at teardown. Local stdio
+MCP processes in the job pipeline are routed through the same boundary. OpenShell failures remain
+`harness_error`s and never silently fall back to host execution.
+
 That's the whole flow. `ghostlab create` walks you through everything, end to end:
 
-1. **Name + target** — the only two prompts. A target is an MCP URL/config, or
-   a local `SKILL.md` supplied with `--skill`.
+1. **Name + agent/target** — an agent JSON/YAML can compose a runner, MCPs,
+   skills, workspace, and assets. `--target` and `--skill` remain simple shorthands.
 2. **Discover** — connects to the target, lints its contract (schema errors,
    risk labels), and probes any MCP Apps `ui://` widgets.
 3. **Configure semantic testing** — if `codex` is on your `$PATH`, offers to
@@ -71,7 +108,7 @@ ghostlab create --name <name> --resume --yes  # continue the full job pipeline
 ghostlab review --job <name>      # the readiness/gate report on its own
 ```
 
-A job is a self-contained folder: `jobs/<name>/job.yaml` (target, hosts,
+A job is a self-contained folder: `jobs/<name>/job.yaml` (agent, target, sandbox, hosts,
 generation/test defaults, gates — all editable), `test-plan.yaml`, `workspace/`
 (discover/generated/test artifacts + a local sqlite db), and `runs/`.
 
@@ -84,6 +121,15 @@ ghostlab create --name release-notes-skill --skill ./skills/release-notes --yes
 Skill discovery reads `SKILL.md`; planning generates persona-grounded semantic
 and adversarial cases; testing injects the skill instructions into the AUT and
 judges observable compliance. MCP-only protocol and Apps suites are omitted.
+
+To evaluate a composed agent:
+
+```bash
+ghostlab create --name my-agent --agent examples/agent.json --yes
+```
+
+The agent definition is the canonical evaluation subject. A one-MCP or
+one-skill job is normalized into the same shape.
 
 ## What you get
 
@@ -122,8 +168,9 @@ reasoning, and the full dual-agent transcript with inline tool calls:
 
 Build a repeatable, sandboxed tester that can:
 
-- Run any target MCP app in an isolated environment.
-- Launch one coding-agent session as the **agent-under-test** (with target MCP injected).
+- Run arbitrary configured agents inside NVIDIA OpenShell.
+- Compose zero or more MCPs, skills, instructions, workspace files, and assets.
+- Launch one coding-agent session as the **agent-under-test**.
 - Launch another coding-agent session as the **user emulator** (persona + goal driven).
 - Drive multi-turn interactions between them.
 - Capture full traces, tool activity, failures, and outcomes.
@@ -134,7 +181,8 @@ This lets you test with your existing Codex/Claude usage path, instead of wiring
 
 Ghostlab is intentionally **app-agnostic**:
 
-- Works with any MCP server reachable by stdio/SSE/streamable HTTP.
+- Treats an agent configuration—not a single MCP—as the evaluation boundary.
+- Works with MCP servers reachable by stdio/SSE/streamable HTTP and local skills.
 - Supports local or remote MCP endpoints.
 - Supports multiple coding-agent runners (Codex, Claude Code, and future adapters).
 
@@ -174,11 +222,12 @@ jobs/<name>/
 
 ### Core dual-harness architecture
 
-1. **AUT Harness (Agent Under Test)** — starts a coding-agent session (Codex or
-   Claude Code), injects the target MCP server config into it, and exposes a
+1. **AUT Harness (Agent Under Test)** — starts the configured runner (Codex,
+   Claude Code, or another process) inside OpenShell, supplies its complete
+   MCP/skill/workspace composition, and exposes a
    controlled I/O bridge so it can receive user messages and return
    replies/tool results.
-2. **User Emulator Harness** — starts a second coding-agent session, gives it a
+2. **User Emulator Harness** — starts a second isolated coding-agent session, gives it a
    scenario file (persona, goals, constraints, success criteria), and asks it
    to act like a realistic user, sending messages turn-by-turn to the AUT.
 3. **Orchestrator** — coordinates turn-taking, timeouts, retries, and stop
@@ -187,13 +236,20 @@ jobs/<name>/
 
 ### Target configuration model
 
-Each test run points to a target definition:
+Each test run points to an agent definition. Legacy target fields remain the
+primary discovery input for one-MCP/one-skill jobs:
 
 - `target.id`: unique name (`filesystem-mcp-local`, `my-app-staging`)
 - `transport`: `stdio` | `sse` | `streamable-http` | `skill`
 - `connection`: command+args+env (stdio) or URL+headers (network transports)
 - `capabilities`: optional expected tools/resources/prompts
 - `startup`: optional health checks and boot timeout
+
+The canonical `agent` section contains `runner`, `instructions`, and composable
+`inputs.mcps`, `inputs.skills`, and assets. The sibling `sandbox` section defaults
+to OpenShell and controls the image, uploads, workdir, policy, resource limits,
+network mode, environment allowlist, providers, logs, and cleanup.
+`backend: local` is explicit unsandboxed compatibility—not a fallback.
 
 ### Commands
 
@@ -355,12 +411,15 @@ ghostlab run-dataset \
   --target target.json \
   --aut-runner runners/codex-cortex-aut.json \
   --user-runner runners/codex-user-emulator.json \
+  --provider openai \
   --limit 2
 ```
 
 Each case runs through the orchestrator (with its persona) into its own run
 directory, and a dataset-level `summary.md` + `results.json` capture per-case
-status and turn counts.
+status and turn counts. `--provider` attaches an existing OpenShell provider to
+the runner sandboxes (and judge when `--evaluate` is used); repeat it when the
+composition needs more than one provider.
 
 ### Tool-call capture & output hygiene
 
@@ -441,18 +500,25 @@ ghostlab run --target target.json --scenario <scenario.json> \
 ```bash
 ghostlab doctor               # validates runners/*.json
 ghostlab doctor --runners runners/codex-cortex-local-session.json
+ghostlab doctor --sandbox local  # trusted local mode; skips OpenShell checks
 ```
 
-Reports the codex binary + version and validates each runner's kind, command,
-and parser.
+Reports the Codex binary and version, validates each runner's kind, command,
+and parser, and checks the OpenShell CLI/gateway by default.
 
-### Default agent backend
+### Default coding-agent backend
 
 `codex` is the default coding-agent backend for generation, the
 agent-under-test, and judging. `inspect` needs no agent — it is a direct MCP
 client. The codex binary is auto-detected from `$PATH`, then the macOS app
 bundle (`/Applications/Codex.app/Contents/Resources/codex`); override with
 `$REHEARSAL_CODEX_BIN` or `--codex-bin`.
+
+This is separate from the execution backend: Codex is the default agent
+program, while OpenShell is the default sandbox in which agent programs run.
+Standalone `ghostlab inspect` is a low-level direct protocol command; for an
+untrusted local stdio MCP, create a job and use `ghostlab discover` so its
+declared uploads and sandbox policy are applied.
 
 ### Colored output
 

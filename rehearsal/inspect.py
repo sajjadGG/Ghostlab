@@ -185,7 +185,7 @@ def write_inspect_artifacts(result: InspectResult, out_dir: Path) -> tuple[Path,
     )
 
     server = result.server_info or {}
-    noun = "Skill" if result.transport == "skill" else "MCP"
+    noun = result.transport.title() if result.transport in ("skill", "agent") else "MCP"
     lines = [
         f"# {noun} Inspect: {result.target_id}",
         "",
