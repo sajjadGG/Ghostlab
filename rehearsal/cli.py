@@ -102,7 +102,7 @@ def _open_store(args: argparse.Namespace, workspace=None):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ghostlab", description="Ghostlab — MCP testing lab.")
+    parser = argparse.ArgumentParser(prog="ghostlab", description="Ghostlab — agent evaluation lab.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
 
@@ -194,6 +194,14 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument(
         "--sandbox", choices=["openshell", "local"], default=None,
         help="Agent execution backend (default: openshell; local is explicitly unsandboxed).",
+    )
+    create_parser.add_argument(
+        "--provider", action="append", default=None,
+        help="OpenShell provider to attach to agent sessions (repeatable).",
+    )
+    create_parser.add_argument(
+        "--image", default=None,
+        help="OpenShell sandbox image/community sandbox (default: base).",
     )
 
     discover_parser = sub.add_parser(
@@ -723,6 +731,49 @@ def _discover_new_job(slug: str) -> int:
     return cmd_discover(disc_args)
 
 
+def _create_stage(index: int, title: str, detail: str = "") -> None:
+    """Render one stable, grep-friendly stage marker for the create pipeline."""
+    print()
+    print(tc.heading(f"[{index}/5] {title}"))
+    if detail:
+        print(tc.muted(f"      {detail}"))
+
+
+def _create_summary(spec, source: str = "") -> list[tuple[str, str]]:
+    """Build the same concise configuration summary used by CLI/UI tests."""
+    target = spec.target_config()
+    agent = spec.agent or {}
+    inputs = agent.get("inputs", {}) or {}
+    location = (
+        source or target.connection.get("path") or target.connection.get("url")
+        or target.connection.get("command") or "configured inline"
+    )
+    sandbox = spec.sandbox or {}
+    providers = ", ".join(sandbox.get("providers", []) or []) or "none"
+    runner = agent.get("runner", {}) or {}
+    runner_kind = runner.get("kind") or next(
+        (host.get("kind") for host in spec.hosts if host.get("kind") in ("process", "codex-session")),
+        "auto-configure",
+    )
+    return [
+        ("subject", f"{spec.target_type} · {target.id}"),
+        ("source", str(location)),
+        ("composition", f"{len(inputs.get('mcps', []) or [])} MCP · {len(inputs.get('skills', []) or [])} skill"),
+        ("runner", str(runner_kind)),
+        ("sandbox", f"{sandbox.get('backend', 'openshell')} · image {sandbox.get('image', 'base')}"),
+        ("providers", providers),
+        ("generation", f"{(spec.generation or {}).get('personas', 2)} personas × {(spec.generation or {}).get('scenarios_per_persona', 2)} scenarios"),
+        ("pass gate", f"{float((spec.review or {}).get('gates', {}).get('min_pass_rate', 0.9)):.0%}"),
+    ]
+
+
+def _print_create_summary(name: str, spec, source: str = "") -> None:
+    print(tc.heading("Configuration preview"))
+    print(f"  {'job':<13} {name}")
+    for label, value in _create_summary(spec, source):
+        print(f"  {label:<13} {value}")
+
+
 def cmd_create(args: argparse.Namespace) -> int:
     from .config import load_target
     from .jobs import (
@@ -744,8 +795,19 @@ def cmd_create(args: argparse.Namespace) -> int:
         raw = ask(f"{prompt} [{'Y/n' if default else 'y/N'}] ", "y" if default else "n")
         return raw.strip().lower() not in ("n", "no")
 
-    # Only the two things GhostLab can't infer are ever prompted for; everything
-    # else comes from flags or documented defaults (all editable in job.yaml).
+    def ask_choice(prompt: str, choices: dict[str, str], default: str) -> str:
+        while True:
+            raw = ask(prompt, default).strip().lower()
+            selected = choices.get(raw)
+            if selected:
+                return selected
+            print(f"  choose one of: {', '.join(sorted(set(choices.values())))}")
+
+    if interactive:
+        print(tc.heading("Ghostlab · create an evaluation"))
+        print(tc.muted("Configure once, preview the resolved job, then run the full pipeline."))
+        print()
+
     name = args.name or ask("Job name: ")
     if not name:
         print("A job name is required (pass --name or answer the prompt).")
@@ -756,6 +818,52 @@ def cmd_create(args: argparse.Namespace) -> int:
     selected_targets = sum(bool(value) for value in (args.target, args.skill, args.agent))
     if selected_targets > 1:
         print("Pass exactly one of --agent, --skill, or --target.")
+        return 1
+    if selected_targets == 0 and interactive:
+        subject = ask_choice(
+            "Evaluate [agent/mcp/skill] (agent): ",
+            {"agent": "agent", "a": "agent", "mcp": "mcp", "m": "mcp", "skill": "skill", "s": "skill"},
+            "agent",
+        )
+        if subject == "agent":
+            value = ask("Agent config path (JSON/YAML): ")
+            args.agent = Path(value) if value else None
+        elif subject == "skill":
+            value = ask("Skill path (SKILL.md or directory): ")
+            args.skill = Path(value) if value else None
+        else:
+            args.target = ask("MCP URL or config path: ") or None
+
+    if not any((args.target, args.skill, args.agent)):
+        print("An agent, MCP target, or skill is required.")
+        return 1
+
+    if interactive and args.sandbox is None:
+        args.sandbox = ask_choice(
+            "Execution [openshell/local] (openshell): ",
+            {"openshell": "openshell", "o": "openshell", "local": "local", "l": "local"},
+            "openshell",
+        )
+    if interactive and args.personas is None:
+        try:
+            args.personas = max(1, int(ask("Personas (2): ", "2")))
+        except ValueError:
+            print("Personas must be an integer.")
+            return 1
+    if interactive and args.scenarios_per_persona is None:
+        try:
+            args.scenarios_per_persona = max(1, int(ask("Scenarios per persona (2): ", "2")))
+        except ValueError:
+            print("Scenarios per persona must be an integer.")
+            return 1
+    if interactive and args.min_pass_rate is None:
+        try:
+            args.min_pass_rate = float(ask("Minimum pass rate (0.90): ", "0.90"))
+        except ValueError:
+            print("Minimum pass rate must be a number between 0 and 1.")
+            return 1
+    if args.min_pass_rate is not None and not 0 <= args.min_pass_rate <= 1:
+        print("Minimum pass rate must be between 0 and 1.")
         return 1
 
     target = None
@@ -820,6 +928,29 @@ def cmd_create(args: argparse.Namespace) -> int:
         )
     if getattr(args, "sandbox", None):
         spec.sandbox["backend"] = args.sandbox
+    if getattr(args, "image", None):
+        spec.sandbox["image"] = args.image
+    if getattr(args, "provider", None):
+        spec.sandbox["providers"] = list(dict.fromkeys([
+            *list(spec.sandbox.get("providers", []) or []), *args.provider,
+        ]))
+
+    source_preview = str(args.agent or args.skill or source_target or args.target or "")
+    _print_create_summary(name, spec, source_preview)
+    run_pipeline = bool(args.discover)
+    if interactive and run_pipeline:
+        run_pipeline = ask_yn("Run discover → plan → test → review now?", True)
+    if interactive and run_pipeline and spec.sandbox.get("backend") == "openshell":
+        ready, detail = _openshell_status()
+        print(tc.verdict(f"  {'✓' if ready else '!'} OpenShell · {detail}", "pass" if ready else "fail"))
+        if not ready and not ask_yn("OpenShell is not ready. Create the job anyway?", True):
+            print(tc.muted("Cancelled; start OpenShell and try again."))
+            return 0
+    if interactive and not ask_yn("Create this job?", True):
+        print(tc.muted("Cancelled; no files were written."))
+        return 0
+
+    _create_stage(1, "Create job", "Write the resolved configuration and workspace.")
     try:
         spec_path = create_job(name, spec, force=args.force)
     except ConfigError as exc:
@@ -836,13 +967,13 @@ def cmd_create(args: argparse.Namespace) -> int:
     )
     print(f"  target: {created_target.transport} {target_location}")
 
-    if not args.discover:
+    if not run_pipeline:
         print(tc.muted(f"  next: ghostlab discover --job {slug}"))
         return 0
 
     # Inspect the target right away so the job is validated + capabilities are
     # populated — especially the point when a config file was handed in.
-    print()
+    _create_stage(2, "Discover", "Inspect capabilities, contract quality, and MCP Apps metadata.")
     try:
         rc = _discover_new_job(slug)
     except Exception as exc:  # noqa: BLE001 — never lose the created job over a bad target
@@ -852,9 +983,10 @@ def cmd_create(args: argparse.Namespace) -> int:
         print(tc.muted(f"  job created; fix the target/auth then: ghostlab discover --job {slug}"))
         return 0
 
+    _create_stage(3, "Configure agent", "Resolve the AUT runner and semantic test host.")
     _configure_aut_host(spec_path, ask_yn)
 
-    print()
+    _create_stage(4, "Build test plan", "Generate coverage, personas, and scenarios.")
     plan_args = argparse.Namespace(
         job=slug, spec=None, db=None, out=None, approve=None, reject=None,
         generate=True, regenerate=False,
@@ -879,7 +1011,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                 print(f"  (ignoring unknown suite(s): {', '.join(unknown)})")
             chosen_suites = [s for s in picked if s in suite_names] or None
 
-    print()
+    _create_stage(5, "Run and review", "Execute selected suites and apply readiness gates.")
     test_args = argparse.Namespace(
         job=slug, spec=None, db=None, plan=None, suite=chosen_suites, hosts=None,
         approved_only=False, user_runner=None, apps_mode=False, skip_setup=False,
@@ -888,15 +1020,14 @@ def cmd_create(args: argparse.Namespace) -> int:
     )
     cmd_test(test_args)
 
-    print()
     review_args = argparse.Namespace(job=slug, spec=None, db=None, results=None, strict=False)
     cmd_review_spec(review_args)
 
     print()
-    print(tc.muted(
-        f"  rerun anytime: ghostlab test --job {slug}   |   "
-        f"gate report: ghostlab review --job {slug}"
-    ))
+    print(tc.heading(f"Evaluation ready · jobs/{slug}"))
+    print(f"  rerun       ghostlab test --job {slug}")
+    print(f"  review      ghostlab review --job {slug}")
+    print(f"  dashboard   ghostlab ui")
     return 0
 
 
@@ -916,6 +1047,7 @@ def _resume_job_pipeline(args: argparse.Namespace, name: str, ask_yn) -> int:
 
     generated_from = (spec.capabilities or {}).get("generated_from", "")
     discovered = bool(generated_from and (spec_path.parent / generated_from).exists())
+    _create_stage(2, "Discover", "Reuse completed evidence or refresh missing discovery.")
     if discovered:
         print(tc.muted("  discover: reused completed artifacts"))
     else:
@@ -923,7 +1055,9 @@ def _resume_job_pipeline(args: argparse.Namespace, name: str, ask_yn) -> int:
             print(tc.muted(f"  resume stopped; fix target/auth then rerun with --resume"))
             return 0
 
+    _create_stage(3, "Configure agent", "Reuse or resolve the AUT runner.")
     _configure_aut_host(spec_path, ask_yn)
+    _create_stage(4, "Build test plan", "Reuse cached generation where possible.")
     plan_args = argparse.Namespace(
         job=slug, spec=None, db=None, out=None, approve=None, reject=None,
         generate=True, regenerate=False, personas=args.personas,
@@ -935,6 +1069,7 @@ def _resume_job_pipeline(args: argparse.Namespace, name: str, ask_yn) -> int:
     spec = load_spec(spec_path)
     test_root = spec.workspace_dir(spec_path) / "test"
     has_results = any(test_root.glob(f"*-{spec.id}/results*.json"))
+    _create_stage(5, "Run and review", "Skip completed cases and retry unfinished work.")
     test_args = argparse.Namespace(
         job=slug, spec=None, db=None, plan=None, suite=None, hosts=None,
         approved_only=False, user_runner=None, apps_mode=False, skip_setup=False,
@@ -2150,8 +2285,22 @@ def _validate_runner(path: Path) -> tuple[bool, str]:
     return True, f"kind={runner.kind} parser={runner.parser}"
 
 
-def cmd_doctor(args: argparse.Namespace) -> int:
+def _openshell_status() -> tuple[bool, str]:
     import shutil
+    import subprocess
+
+    openshell = shutil.which("openshell")
+    if not openshell:
+        return False, "CLI not found (install NVIDIA OpenShell)"
+    try:
+        status = subprocess.run([openshell, "status"], capture_output=True, text=True, timeout=20)
+        detail = (status.stdout or status.stderr).strip().replace("\n", " ")[:300]
+        return status.returncode == 0, detail or openshell
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
     import subprocess
 
     from .codex_backend import CodexError, resolve_codex_bin
@@ -2159,22 +2308,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     ok = True
     print("Ghostlab doctor")
     if args.sandbox == "openshell":
-        openshell = shutil.which("openshell")
-        if not openshell:
-            ok = False
-            print("  [!!] openshell: CLI not found (install NVIDIA OpenShell)")
-        else:
-            try:
-                status = subprocess.run(
-                    [openshell, "status"], capture_output=True, text=True, timeout=20
-                )
-                detail = (status.stdout or status.stderr).strip().replace("\n", " ")[:300]
-                reachable = status.returncode == 0
-                ok = ok and reachable
-                print(f"  [{'ok' if reachable else '!!'}] openshell: {detail or openshell}")
-            except (OSError, subprocess.SubprocessError) as exc:
-                ok = False
-                print(f"  [!!] openshell: {exc}")
+        reachable, detail = _openshell_status()
+        ok = ok and reachable
+        print(f"  [{'ok' if reachable else '!!'}] openshell: {detail}")
     else:
         print("  [!!] sandbox: local (explicitly unsandboxed compatibility mode)")
     try:
@@ -2475,7 +2611,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
         "--browser.gatherUsageStats",
         "false",
     ]
-    print(f"Launching MCP Ghostlab UI at http://{args.server_address}:{args.port}")
+    print(f"Launching Ghostlab UI at http://{args.server_address}:{args.port}")
     return subprocess.call(command)
 
 

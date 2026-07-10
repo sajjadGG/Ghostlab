@@ -129,6 +129,14 @@ def build_dashboard_data(results_dir: Path) -> dict[str, Any]:
                 "turns": turns,
             }
         )
+    tool_calls = [
+        call for case in cases for turn in case["turns"] for call in turn.get("tool_calls", [])
+    ]
+    durations = [case["duration_ms"] for case in cases if isinstance(case.get("duration_ms"), (int, float))]
+    suites: dict[str, int] = {}
+    for case in cases:
+        suite = case.get("suite") or "unknown"
+        suites[suite] = suites.get(suite, 0) + 1
     return {
         "id": results.get("id", "run"),
         "generated_at": results.get("generated_at", ""),
@@ -136,6 +144,14 @@ def build_dashboard_data(results_dir: Path) -> dict[str, Any]:
         "totals": results.get("totals", {}),
         "pass_rate": results.get("pass_rate"),
         "cases": cases,
+        "summary": {
+            "cases": len(cases),
+            "conversations": sum(1 for case in cases if case.get("kind") == "conversational"),
+            "tool_calls": len(tool_calls),
+            "tool_failures": sum(1 for call in tool_calls if call.get("status") not in ("completed", "pass", "success")),
+            "avg_duration_ms": (sum(durations) / len(durations)) if durations else None,
+            "suites": suites,
+        },
     }
 
 
@@ -260,8 +276,14 @@ def _case_html(case: dict[str, Any]) -> str:
             f"<div class='models'>agent: <code>{_esc(models.get('agent_under_test', '?'))}</code>"
             f" · user: <code>{_esc(models.get('user_emulator', '?'))}</code></div>"
         )
+    search_text = " ".join(
+        str(value) for value in (
+            case.get("case", ""), case.get("suite", ""), case.get("host", ""),
+            meta.get("goal", ""), meta.get("persona", ""), summary,
+        )
+    ).lower()
     return (
-        f"<details class='case' data-status='{_esc(status)}' data-suite='{_esc(case.get('suite',''))}'>"
+        f"<details class='case' data-status='{_esc(status)}' data-suite='{_esc(case.get('suite',''))}' data-search='{_esc(search_text)}'>"
         f"<summary>"
         f"<span class='badge {_esc(status)}'>{_esc(status)}</span>"
         f"<span class='casename'>{_esc(case.get('case', '?'))}</span>"
@@ -282,8 +304,11 @@ def _case_html(case: dict[str, Any]) -> str:
 
 def render_dashboard_html(data: dict[str, Any]) -> str:
     totals = data.get("totals", {})
+    summary = data.get("summary", {})
     rate = data.get("pass_rate")
     rate_txt = "n/a" if rate is None else f"{rate:.0%}"
+    rate_deg = 0 if rate is None else max(0, min(360, int(rate * 360)))
+    health = "No executed cases" if rate is None else "Ready" if not totals.get("fail") and not totals.get("error") else "Needs attention"
     stat = lambda label, value, cls="": (
         f"<div class='stat {cls}'><div class='num'>{value}</div><div class='lbl'>{label}</div></div>"
     )
@@ -294,6 +319,8 @@ def render_dashboard_html(data: dict[str, Any]) -> str:
             stat("fail", totals.get("fail", 0), "fail"),
             stat("error", totals.get("error", 0), "error"),
             stat("skip", totals.get("skip", 0), "skip"),
+            stat("tool calls", summary.get("tool_calls", 0)),
+            stat("conversations", summary.get("conversations", 0)),
         ]
     )
     # Semantic/conversational cases first — they're the point of the dashboard.
@@ -305,11 +332,19 @@ def render_dashboard_html(data: dict[str, Any]) -> str:
     host_names = ", ".join(
         h.get("id", "?") if isinstance(h, dict) else str(h) for h in data.get("hosts", [])
     )
+    suite_buttons = "".join(
+        f"<button data-f='{_esc(suite)}'>{_esc(suite)} <span>{count}</span></button>"
+        for suite, count in sorted((summary.get("suites") or {}).items())
+    )
     return _TEMPLATE.format(
         title=_esc(data.get("id", "run")),
         generated=_esc(data.get("generated_at", "")),
         hosts=_esc(host_names),
+        health=_esc(health),
+        rate=rate_txt,
+        rate_deg=rate_deg,
         stats=stats,
+        suite_buttons=suite_buttons,
         cases=cases_html,
     )
 
@@ -329,38 +364,51 @@ _TEMPLATE = """<!doctype html>
 <title>GhostLab · {title}</title>
 <style>
 :root {{
-  --bg:#f6f7f9; --panel:#fff; --ink:#1a1d21; --muted:#6b7280; --border:#e4e7eb;
+  --bg:#f4f5f8; --panel:#fff; --ink:#161922; --muted:#6b7280; --border:#e1e4ea;
+  --accent:#6c4df2; --accent-soft:#eeeaff;
   --user:#0a6cbf; --user-bg:#e7f1fb; --asst:#1f7a4d; --asst-bg:#e8f6ee;
   --tool:#8a5a00; --tool-bg:#fbf3e2; --widget:#8a2fb0; --widget-bg:#f6e9fb;
   --pass:#1f7a4d; --fail:#c0392b; --error:#a3211a; --skip:#6b7280; --partial:#8a5a00;
 }}
 @media (prefers-color-scheme: dark) {{
   :root {{
-    --bg:#0f1216; --panel:#171b21; --ink:#e6e8eb; --muted:#9aa3ad; --border:#262c34;
+    --bg:#0d1015; --panel:#171b21; --ink:#e6e8eb; --muted:#9aa3ad; --border:#29303a;
+    --accent:#9d8aff; --accent-soft:#251f42;
     --user:#5db1ff; --user-bg:#12283d; --asst:#5fd398; --asst-bg:#12291e;
     --tool:#e0b054; --tool-bg:#2c2413; --widget:#d98fee; --widget-bg:#28162f;
     --pass:#5fd398; --fail:#ff7062; --error:#ff8a7a; --skip:#9aa3ad; --partial:#e0b054;
   }}
 }}
 * {{ box-sizing:border-box; }}
-body {{ margin:0; background:var(--bg); color:var(--ink);
+body {{ margin:0; background:radial-gradient(circle at 80% -10%,var(--accent-soft),transparent 32rem),var(--bg); color:var(--ink);
   font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }}
-.wrap {{ max-width:960px; margin:0 auto; padding:28px 20px 80px; }}
-header h1 {{ margin:0 0 4px; font-size:22px; letter-spacing:-0.01em; }}
-header .meta {{ color:var(--muted); font-size:13px; margin-bottom:20px; }}
+.wrap {{ max-width:1120px; margin:0 auto; padding:34px 24px 90px; }}
+.hero {{ display:grid; grid-template-columns:1fr auto; gap:24px; align-items:center; margin-bottom:24px; }}
+.eyebrow {{ color:var(--accent); font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.13em; }}
+header h1 {{ margin:5px 0 6px; font-size:clamp(26px,4vw,42px); letter-spacing:-0.045em; line-height:1.05; }}
+header .meta {{ color:var(--muted); font-size:13px; }}
+.health {{ display:flex; align-items:center; gap:12px; background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:12px 16px; box-shadow:0 12px 35px rgba(25,20,55,.07); }}
+.ring {{ width:58px; height:58px; border-radius:50%; display:grid; place-items:center; background:conic-gradient(var(--accent) 0deg,var(--accent) {{rate_deg}}deg,var(--border) {{rate_deg}}deg); position:relative; }}
+.ring:before {{ content:""; position:absolute; width:44px; height:44px; border-radius:50%; background:var(--panel); }}
+.ring strong {{ position:relative; font-size:12px; }}
+.health-label strong,.health-label span {{ display:block; }} .health-label span {{ color:var(--muted); font-size:12px; }}
 .stats {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:22px; }}
 .stat {{ background:var(--panel); border:1px solid var(--border); border-radius:12px;
-  padding:12px 18px; min-width:96px; }}
+  padding:12px 18px; min-width:110px; flex:1; box-shadow:0 8px 25px rgba(25,20,55,.035); }}
 .stat .num {{ font-size:24px; font-weight:700; }}
 .stat .lbl {{ font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }}
 .stat.pass .num {{ color:var(--pass); }} .stat.fail .num {{ color:var(--fail); }}
 .stat.error .num {{ color:var(--error); }} .stat.skip .num {{ color:var(--skip); }}
-.filters {{ margin-bottom:14px; display:flex; gap:8px; flex-wrap:wrap; }}
+.toolbar {{ display:flex; gap:12px; align-items:center; justify-content:space-between; margin:26px 0 14px; flex-wrap:wrap; }}
+.filters {{ display:flex; gap:8px; flex-wrap:wrap; }}
 .filters button {{ background:var(--panel); color:var(--ink); border:1px solid var(--border);
   border-radius:999px; padding:5px 14px; font-size:13px; cursor:pointer; }}
+.filters button span {{ color:var(--muted); margin-left:4px; }}
 .filters button.active {{ background:var(--ink); color:var(--bg); border-color:var(--ink); }}
+.search {{ min-width:240px; flex:1; max-width:360px; background:var(--panel); color:var(--ink); border:1px solid var(--border); border-radius:10px; padding:9px 12px; font:inherit; }}
+.case-count {{ color:var(--muted); font-size:12px; margin:0 0 10px; }}
 .case {{ background:var(--panel); border:1px solid var(--border); border-radius:12px;
-  margin-bottom:12px; overflow:hidden; }}
+  margin-bottom:12px; overflow:hidden; box-shadow:0 8px 24px rgba(25,20,55,.035); }}
 .case > summary {{ list-style:none; cursor:pointer; padding:14px 16px; display:flex;
   align-items:center; gap:10px; }}
 .case > summary::-webkit-details-marker {{ display:none; }}
@@ -414,41 +462,57 @@ header .meta {{ color:var(--muted); font-size:13px; margin-bottom:20px; }}
 .widget .uri {{ font-size:11px; color:var(--muted); margin-left:auto; }}
 .widget.interaction {{ border-left:3px solid var(--widget); }}
 em {{ color:var(--muted); }}
+@media (max-width:700px) {{ .hero {{ grid-template-columns:1fr; }} .health {{ width:max-content; }} .tools,.widget {{ margin-left:0; }} .pill {{ display:none; }} .wrap {{ padding:24px 14px 70px; }} }}
 </style>
 </head>
 <body>
 <div class="wrap">
-<header>
-  <h1>GhostLab · {title}</h1>
-  <div class="meta">generated {generated} · hosts: {hosts}</div>
+<header class="hero">
+  <div><div class="eyebrow">Ghostlab evaluation report</div><h1>{title}</h1>
+  <div class="meta">generated {generated} · hosts: {hosts}</div></div>
+  <div class="health"><div class="ring"><strong>{rate}</strong></div><div class="health-label"><strong>{health}</strong><span>evaluation health</span></div></div>
 </header>
 <div class="stats">{stats}</div>
-<div class="filters" id="filters">
-  <button data-f="all" class="active">all</button>
-  <button data-f="fail">fail</button>
-  <button data-f="error">error</button>
-  <button data-f="pass">pass</button>
-  <button data-f="semantic">semantic</button>
+<div class="toolbar">
+  <div class="filters" id="filters">
+    <button data-f="all" class="active">all</button>
+    <button data-f="fail">fail</button><button data-f="error">error</button>
+    <button data-f="pass">pass</button>{suite_buttons}
+  </div>
+  <input class="search" id="search" type="search" placeholder="Search cases, goals, personas…" aria-label="Search cases">
 </div>
+<div class="case-count" id="case-count"></div>
 <div id="cases">{cases}</div>
 </div>
 <script>
 (function() {{
   var buttons = document.querySelectorAll('#filters button');
   var cases = document.querySelectorAll('.case');
+  var search = document.getElementById('search');
+  var count = document.getElementById('case-count');
+  var active = 'all';
+  function applyFilters() {{
+    var query = (search.value || '').trim().toLowerCase();
+    var visible = 0;
+    cases.forEach(function(c) {{
+      var matchesFilter = active === 'all' || c.getAttribute('data-status') === active || c.getAttribute('data-suite') === active;
+      var matchesSearch = !query || (c.getAttribute('data-search') || '').indexOf(query) !== -1;
+      var show = matchesFilter && matchesSearch;
+      c.style.display = show ? '' : 'none';
+      if (show) visible += 1;
+    }});
+    count.textContent = 'Showing ' + visible + ' of ' + cases.length + ' case results';
+  }}
   buttons.forEach(function(btn) {{
     btn.addEventListener('click', function() {{
       buttons.forEach(function(b) {{ b.classList.remove('active'); }});
       btn.classList.add('active');
-      var f = btn.getAttribute('data-f');
-      cases.forEach(function(c) {{
-        var show = f === 'all'
-          || c.getAttribute('data-status') === f
-          || c.getAttribute('data-suite') === f;
-        c.style.display = show ? '' : 'none';
-      }});
+      active = btn.getAttribute('data-f');
+      applyFilters();
     }});
   }});
+  search.addEventListener('input', applyFilters);
+  applyFilters();
 }})();
 </script>
 </body>

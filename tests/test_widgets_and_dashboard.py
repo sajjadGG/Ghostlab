@@ -114,6 +114,8 @@ class DashboardTest(unittest.TestCase):
             self.assertEqual(case["status"], "pass")
             self.assertEqual(case["meta"]["persona"], "Impatient Retaker")
             self.assertEqual(len(case["turns"]), 1)
+            self.assertEqual(data["summary"]["tool_calls"], 1)
+            self.assertEqual(data["summary"]["conversations"], 1)
             turn = case["turns"][0]
             self.assertEqual(turn["user"], "Give me a task.")
             self.assertEqual(len(turn["tool_calls"]), 1)
@@ -129,6 +131,9 @@ class DashboardTest(unittest.TestCase):
             self.assertIn("semantic-writing", html)
             self.assertIn("interactive widget", html)
             self.assertIn("goal met", html)
+            self.assertIn("Ghostlab evaluation report", html)
+            self.assertIn("Search cases, goals, personas", html)
+            self.assertIn("data-search=", html)
             # Self-contained: no external asset references.
             self.assertNotIn("http://", html.replace("http://www.w3.org", ""))
             self.assertNotIn("src=", html)

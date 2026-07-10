@@ -71,12 +71,18 @@ target—then inspects the target immediately:
 
 ```bash
 ghostlab create
-# ? Job name: cortex-eval
-# ? Target MCP URL or config path: http://localhost:8000/mcp
-# → Created job 'cortex-eval' … then runs discover and prints the tool inventory
+# Job name: release-agent
+# Evaluate [agent/mcp/skill] (agent): agent
+# Agent config path (JSON/YAML): examples/agent.json
+# Execution [openshell/local] (openshell): openshell
+# → configuration preview → OpenShell preflight → [1/5] … [5/5]
 ```
 
-Everything else (persona/scenario counts, gates, prompts) uses documented defaults you edit in `job.yaml` — pass `--personas`, `--scenarios-per-persona`, `--min-pass-rate`, or `--aut-runner` to set them up front. Add `--no-discover` to just scaffold without inspecting.
+The guided creator configures persona/scenario counts, the release gate,
+OpenShell image/providers, and whether to run immediately. It previews the
+resolved job before writing. For automation, pass `--yes` plus flags such as
+`--personas`, `--scenarios-per-persona`, `--min-pass-rate`, `--image`,
+`--provider`, or `--aut-runner`. Add `--no-discover` to scaffold only.
 
 ### Evaluate an agent skill
 

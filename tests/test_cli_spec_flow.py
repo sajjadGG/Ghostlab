@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from rehearsal.cli import _HANDLERS, build_parser, main
+from rehearsal.cli import _HANDLERS, _create_summary, build_parser, main
 from rehearsal.codex_backend import CodexError
 from rehearsal.spec import load_spec
 
@@ -138,6 +139,28 @@ class CliSpecFlowTest(unittest.TestCase):
         workspace = jobs_root / "notes-eval" / "workspace"
         self.assertTrue(list(workspace.glob("discover/*/contract.json")))
         self.assertTrue((workspace / "ghostlab.sqlite3").exists())
+
+    def test_interactive_create_guides_configuration_and_previews_job(self) -> None:
+        import os
+
+        jobs_root = self.tmp / "guided-jobs"
+        answers = [
+            "Guided Eval", "mcp", str(self.target_path), "local", "3", "2", "0.85", "y",
+        ]
+        with (
+            patch.dict(os.environ, {"GHOSTLAB_JOBS_DIR": str(jobs_root)}),
+            patch("builtins.input", side_effect=answers),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            code = main(["create", "--no-discover"])
+        self.assertEqual(code, 0)
+        rendered = output.getvalue()
+        self.assertIn("Configuration preview", rendered)
+        self.assertIn("[1/5] Create job", rendered)
+        spec = load_spec(jobs_root / "guided-eval" / "job.yaml")
+        self.assertEqual(spec.sandbox["backend"], "local")
+        self.assertEqual(spec.generation["personas"], 3)
+        self.assertEqual(spec.review["gates"]["min_pass_rate"], 0.85)
 
     @patch(
         "rehearsal.codex_backend.CodexBackend._bin",
@@ -488,6 +511,31 @@ class HandlerRegistryTest(unittest.TestCase):
         ])
         self.assertEqual(local.sandbox, "local")
         self.assertEqual(local.provider, ["openai"])
+
+    def test_create_accepts_sandbox_configuration_flags(self) -> None:
+        args = build_parser().parse_args([
+            "create", "--name", "agent", "--agent", "agent.yaml",
+            "--provider", "openai", "--provider", "github", "--image", "base",
+            "--no-discover", "--yes",
+        ])
+        self.assertEqual(args.provider, ["openai", "github"])
+        self.assertEqual(args.image, "base")
+
+    def test_create_summary_exposes_resolved_configuration(self) -> None:
+        from rehearsal.config import TargetConfig
+        from rehearsal.jobs import default_job_spec
+
+        spec = default_job_spec(
+            "Notes", target=TargetConfig(
+                id="notes", transport="streamable-http", connection={"url": "https://example.test/mcp"},
+            ),
+            generation={"personas": 3, "scenarios_per_persona": 2},
+        )
+        spec.sandbox["providers"] = ["openai"]
+        summary = dict(_create_summary(spec))
+        self.assertEqual(summary["subject"], "mcp · notes")
+        self.assertEqual(summary["providers"], "openai")
+        self.assertEqual(summary["generation"], "3 personas × 2 scenarios")
 
 
 if __name__ == "__main__":

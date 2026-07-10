@@ -74,7 +74,14 @@ logs with the run artifacts, and deletes the sandboxes at teardown. Local stdio
 MCP processes in the job pipeline are routed through the same boundary. OpenShell failures remain
 `harness_error`s and never silently fall back to host execution.
 
-That's the whole flow. `ghostlab create` walks you through everything, end to end:
+That's the whole flow. Interactive `ghostlab create` guides you through the
+evaluation subject (agent/MCP/skill), OpenShell image/providers, generation
+size, release gate, and whether to run immediately. It previews the resolved
+configuration before writing anything, checks OpenShell readiness, and shows
+numbered progress through the pipeline. The same choices remain available as
+flags for scripts and CI.
+
+`ghostlab create` walks through everything, end to end:
 
 1. **Name + agent/target** — an agent JSON/YAML can compose a runner, MCPs,
    skills, workspace, and assets. `--target` and `--skill` remain simple shorthands.
@@ -285,11 +292,12 @@ pip install 'ghostlab[ui]'       # installs streamlit
 ghostlab ui                      # opens http://localhost:8501
 ```
 
-The app mirrors the same job-based flow as `ghostlab create`: pick or create a
-job, discover its target, configure the agent-under-test host, generate and
-curate the test plan, run selected suites, and review colored results and full
-conversation traces — the same `job.yaml`/`test-plan.yaml`/`results.json` a CLI
-run of the same job would produce.
+The app mirrors the same job-based flow as `ghostlab create`. Its new-evaluation
+screen accepts composed agents, MCPs, or skills and configures OpenShell,
+providers, generation size, and gates in one place. An overview shows pipeline
+completion and resolved configuration; long stages stream their CLI logs live;
+results can be filtered and exported as the standalone dashboard. It reads and
+writes the same `job.yaml`/`test-plan.yaml`/`results.json` artifacts as the CLI.
 
 ### Understand a new MCP: `inspect`
 

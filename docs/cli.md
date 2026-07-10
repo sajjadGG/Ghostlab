@@ -11,6 +11,8 @@ local skill:
 ghostlab create --name api-eval --target https://example.com/mcp --yes
 ghostlab create --name notes-skill --skill ./skills/notes --yes
 ghostlab create --name full-agent --agent ./agent.yaml --yes
+ghostlab create --name full-agent --agent ./agent.yaml \
+  --image base --provider openai --yes
 ```
 
 `--agent`, `--skill`, and `--target` are mutually exclusive. `--agent` accepts
@@ -20,6 +22,14 @@ MCP-only protocol and Apps cases.
 
 Generated jobs use `sandbox.backend: openshell`. `--sandbox local` is the only
 CLI opt-out; there is no `--local` shorthand and no automatic fallback.
+Use repeatable `--provider NAME` flags and `--image IMAGE` to configure
+OpenShell without editing the generated job.
+
+Without `--yes`, the guided creator asks for the subject type and source,
+sandbox settings, persona/scenario counts, and minimum pass rate. It then shows
+a resolved configuration preview, checks OpenShell, asks before writing, and
+prints stable `[1/5]` through `[5/5]` pipeline progress. `--yes` preserves the
+non-interactive behavior for automation.
 
 `ghostlab create --name NAME --resume` continues an existing job without asking
 for the target again. It reuses completed discovery and cached generation
@@ -458,6 +468,11 @@ ghostlab dashboard jobs/my-agent/workspace/test/<run-id>
 ghostlab dashboard jobs/my-agent/workspace/test/<run-id> --open
 ```
 
+The self-contained report includes evaluation health, pass/fail/tool-call and
+conversation metrics, status/suite filters, full-text case search, judge
+evidence, transcripts, tool payloads, and widget interactions. It works offline
+and adapts to light/dark mode and mobile widths.
+
 ## ui
 
 Launch the optional Streamlit interface over the same job artifacts:
@@ -466,6 +481,11 @@ Launch the optional Streamlit interface over the same job artifacts:
 pip install 'ghostlab[ui]'
 ghostlab ui --port 8501 --server-address localhost
 ```
+
+The UI can create agent-, MCP-, and skill-based jobs, configure OpenShell and
+generation defaults, show pipeline completion, stream long-running command
+output, curate cases, filter results, inspect traces, and export the standalone
+HTML dashboard.
 
 ## db
 
