@@ -426,6 +426,7 @@ def build_test_plan(
     contract_ref: str = "",
     fixtures: Optional[list[dict[str, Any]]] = None,
     generated_cases: Optional[list[dict[str, Any]]] = None,
+    target_type: str = "mcp",
 ) -> dict[str, Any]:
     """Assemble the test plan document.
 
@@ -445,14 +446,18 @@ def build_test_plan(
     generated_security = [c for c in (generated_cases or []) if c["suite"] == "security"]
 
     cases: list[dict[str, Any]] = []
-    cases += _smoke_cases(contract, tools_by_name, fixture_by_tool)
-    cases += generated_semantic if generated_semantic else _semantic_cases(contract)
-    cases += _edge_cases(tools_by_name)
-    cases += _error_recovery_cases(samples)
-    cases += _apps_cases(contract)
-    cases += _security_cases(contract)
-    cases += generated_security
-    cases += _host_compat_cases(hosts or [])
+    if target_type == "skill":
+        cases += generated_semantic
+        cases += generated_security
+    else:
+        cases += _smoke_cases(contract, tools_by_name, fixture_by_tool)
+        cases += generated_semantic if generated_semantic else _semantic_cases(contract)
+        cases += _edge_cases(tools_by_name)
+        cases += _error_recovery_cases(samples)
+        cases += _apps_cases(contract)
+        cases += _security_cases(contract)
+        cases += generated_security
+        cases += _host_compat_cases(hosts or [])
 
     # Curation survives regeneration: carry statuses forward by case id.
     prior_status = {
@@ -466,16 +471,15 @@ def build_test_plan(
             case["status"] = carried
 
     notes = []
-    if not samples:
+    if target_type != "skill" and not samples:
         notes.append(
             "error-recovery suite is empty: run `ghostlab discover --sample safe` "
             "so sampling findings can seed it"
         )
     if not generated_cases:
         notes.append(
-            "semantic/security suites are placeholder seeds, not runnable scenarios: "
-            "run `ghostlab plan --generate` to turn them into real persona-grounded "
-            "dual-agent cases"
+            "no runnable semantic/security scenarios were generated; run "
+            "`ghostlab plan --generate` with a working codex backend"
         )
     notes.append(
         "regression suite is reserved; it fills from previous run failures once "
@@ -486,7 +490,11 @@ def build_test_plan(
         "schema_version": PLAN_SCHEMA_VERSION,
         "id": spec_id,
         "generated_at": utc_now(),
-        "source": {"contract": contract_ref, "mcp": contract.get("mcp", "?")},
+        "source": {
+            "contract": contract_ref, "target": contract.get("mcp", "?"),
+            "target_type": target_type,
+            **({"mcp": contract.get("mcp", "?")} if target_type == "mcp" else {}),
+        },
         "suites": _suite_summary(cases),
         "coverage": _coverage(contract, cases),
         "notes": notes,

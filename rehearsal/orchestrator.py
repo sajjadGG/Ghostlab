@@ -8,10 +8,19 @@ from .config import PersonaConfig, RunnerConfig, ScenarioConfig, TargetConfig
 from .logging import JsonlLogger
 from .mcp_apps import widgets_from_tool_calls
 from .mcp_config import write_mcp_servers_config
-from .prompts import build_aut_prompt, build_user_emulator_prompt
+from .prompts import (
+    build_aut_prompt,
+    build_user_emulator_prompt,
+    normalize_user_emulator_message,
+)
 from .report import write_markdown_report
 from .runners import create_runner, redact_host_noise
-from .tool_capture import parse_codex_output, parse_tool_calls, summarize_tool_calls
+from .tool_capture import (
+    annotate_tool_failures,
+    parse_codex_output,
+    parse_tool_calls,
+    summarize_tool_calls,
+)
 from .types import Event, TranscriptTurn, utc_now
 
 
@@ -38,6 +47,19 @@ def _runner_model(config: RunnerConfig) -> str:
     return "codex default"
 
 
+def classify_runner_failure(*, exit_code: int, timed_out: bool, stderr: str, output: str) -> str:
+    """Separate retryable agent-backend outages from failures of the target."""
+    text = f"{stderr}\n{output}".lower()
+    unavailable = (
+        "out of credits", "insufficient_quota", "quota exceeded", "rate limit",
+        "too many requests", "authentication", "unauthorized", "model unavailable",
+        "service unavailable", "connection refused", "failed to connect",
+    )
+    if timed_out or exit_code == 124 or any(marker in text for marker in unavailable):
+        return "backend_unavailable"
+    return "runner_failed"
+
+
 def run_scenario(
     *,
     target: TargetConfig,
@@ -61,7 +83,11 @@ def run_scenario(
     report_path = run_dir / "report.md"
     mcp_config_path = run_dir / "target.mcp.json"
     logger = JsonlLogger(event_log_path)
-    write_mcp_servers_config(mcp_config_path, target)
+    if target.transport == "skill":
+        skill_path = Path(str(target.connection.get("path", ""))).expanduser().resolve()
+        mcp_config_path = skill_path
+    else:
+        write_mcp_servers_config(mcp_config_path, target)
 
     aut_model = _runner_model(aut_runner_config)
     user_model = _runner_model(user_runner_config)
@@ -185,6 +211,7 @@ def run_scenario(
         else:
             aut_message = redact_host_noise(aut_result.output)
             tool_calls = parse_tool_calls(aut_result.output, aut_result.stderr)
+        annotate_tool_failures(tool_calls, aut_result.stderr)
         tool_calls_by_turn[turn_index] = tool_calls
         emit(
             Event.create(
@@ -200,7 +227,13 @@ def run_scenario(
         )
 
         if aut_result.timed_out or aut_result.exit_code != 0:
-            status = "aut_failed"
+            cause = classify_runner_failure(
+                exit_code=aut_result.exit_code, timed_out=aut_result.timed_out,
+                stderr=aut_result.stderr, output=aut_result.output,
+            )
+            status = "backend_unavailable" if cause == "backend_unavailable" else "aut_failed"
+            emit(Event.create("harness_failure", actor="agent_under_test", cause=cause,
+                              exit_code=aut_result.exit_code, timed_out=aut_result.timed_out))
             transcript.append(TranscriptTurn(role="assistant", content=aut_message))
             break
 
@@ -253,10 +286,20 @@ def run_scenario(
         )
 
         if user_result.timed_out or user_result.exit_code != 0:
-            status = "user_emulator_failed"
+            cause = classify_runner_failure(
+                exit_code=user_result.exit_code, timed_out=user_result.timed_out,
+                stderr=user_result.stderr, output=user_result.output,
+            )
+            status = "backend_unavailable"
+            emit(Event.create("harness_failure", actor="user_emulator", cause=cause,
+                              exit_code=user_result.exit_code, timed_out=user_result.timed_out))
             break
 
-        next_message = user_message_out.strip()
+        # A text-only widget can legitimately ask for a long essay/form value;
+        # ordinary chat turns keep the tighter realism budget.
+        next_message = normalize_user_emulator_message(
+            user_message_out, max_chars=4000 if widgets else 500
+        )
         if next_message == "REHEARSAL_DONE":
             status = "completed"
             break

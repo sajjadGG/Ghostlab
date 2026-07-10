@@ -2,6 +2,23 @@
 
 Ghostlab installs two equivalent console scripts, `ghostlab` and `rehearsal`. New examples use `ghostlab`.
 
+## create
+
+Create an end-to-end evaluation job for either an MCP target or a local skill:
+
+```bash
+ghostlab create --name api-eval --target https://example.com/mcp --yes
+ghostlab create --name notes-skill --skill ./skills/notes --yes
+```
+
+`--skill` accepts a `SKILL.md` file or directory and is mutually exclusive with
+`--target`. Skill jobs use conversational semantic/security evaluation and omit
+MCP-only protocol and Apps cases.
+
+`ghostlab create --name NAME --resume` continues an existing job without asking
+for the target again. It reuses completed discovery and cached generation
+artifacts, then resumes per-case testing where possible.
+
 ## init
 
 Create a `ghostlab.yaml` spec — the canonical, human-editable description of the
@@ -130,6 +147,7 @@ ghostlab test --spec ghostlab.yaml
 ghostlab test --spec ghostlab.yaml --suite smoke --suite edge   # CI-able subset
 ghostlab test --spec ghostlab.yaml --hosts direct-mcp --approved-only --strict
 ghostlab test --spec ghostlab.yaml --no-judge                   # skip the codex judge/critique
+ghostlab test --spec ghostlab.yaml --resume                     # resume latest partial run
 ```
 
 Every case runs on each capable host (one result per case × host). The
@@ -156,6 +174,18 @@ finished-or-not. Seeds still marked `needs_generation` (no scenario attached
 yet) skip with instructions to run `ghostlab plan --generate`.
 
 Cases no host can execute surface as explicit skips, never silence.
+
+Each case result is checkpointed while the run is active. `--resume` reuses the
+latest matching run directory, skips completed case/host pairs, and retries
+unfinished or `harness_error` cases. Backend quota, timeout, authentication,
+and judge outages are reported as `harness_error` and excluded from the target
+pass rate; `--resume` currently requires `--repeat 1`.
+
+Failed tool calls record a specific cause (`client_timeout`,
+`permission_denied`, `client_cancelled`, `backend_cancelled`, or
+`server_stream_error`) in `events.jsonl` and `report.md`. In particular, a
+closed event stream with `INTERNAL_ERROR` is a server-stream failure, not a
+human cancellation.
 
 The spec's `setup` section runs before and tears down after, exactly as in
 `discover`. With `--strict`, `review.gates.min_pass_rate` fails the run when

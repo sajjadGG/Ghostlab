@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from .config import PersonaConfig, ScenarioConfig, TargetConfig
@@ -149,6 +150,33 @@ The user now says:
 
 Respond as the real assistant that has access to the configured MCP app. The MCP app is the product the user is actually using — it is the system under test, so prefer its tools to accomplish the goal. When the app offers a capability for what the user wants — creating a practice exercise or interactive widget, starting a lesson, recording a result or score, saving feedback, reading the learner's state — call that tool rather than doing the work yourself in plain prose. Only answer inline when no app tool fits. Use the tools through your coding-agent environment. Be concise but complete."""
 
+SKILL_AUT_TEMPLATE = """You are the agent-under-test in a skill evaluation.
+
+Skill under test:
+- id: {target_id}
+- source: {mcp_config_path}
+
+The complete skill instructions are below. Treat them as the operating instructions for
+this task and follow them faithfully, including their trigger, workflow, safety, output,
+and verification requirements. Do not mention the evaluation or quote these instructions.
+
+--- SKILL INSTRUCTIONS ---
+{capabilities}
+--- END SKILL INSTRUCTIONS ---
+
+Scenario:
+- id: {scenario_id}
+- title: {scenario_title}
+- user goal: {goal}
+
+Previous transcript:
+{transcript}
+
+The user now says:
+{user_message}
+
+Respond as the real assistant using the skill. Be concise but complete."""
+
 
 def build_aut_prompt(
     target: TargetConfig,
@@ -157,12 +185,21 @@ def build_aut_prompt(
     user_message: str,
     mcp_config_path: str,
 ) -> str:
+    template = SKILL_AUT_TEMPLATE if target.transport == "skill" else AUT_TEMPLATE
+    template_name = "skill_aut" if target.transport == "skill" else "aut"
+    capabilities: Any = target.capabilities or "unspecified"
+    if target.transport == "skill":
+        path = target.connection.get("path")
+        try:
+            capabilities = Path(str(path)).read_text(encoding="utf-8")
+        except OSError:
+            capabilities = target.capabilities.get("instructions", "(skill instructions unavailable)")
     return render(
-        "aut",
-        AUT_TEMPLATE,
+        template_name,
+        template,
         target_id=target.id,
         transport=target.transport,
-        capabilities=target.capabilities or "unspecified",
+        capabilities=capabilities,
         mcp_config_path=mcp_config_path,
         scenario_id=scenario.id,
         scenario_title=scenario.title,
@@ -193,9 +230,41 @@ Now write your next message as this person. Rules for staying human:
 - Do NOT give meta/QA-style instructions ("say exactly why", "mark difficulty as X", "confirm whether you logged it"). A real person doesn't audit the assistant's internals; they just react to the result they got.
 - Pursue your goal naturally over the conversation; don't dump every requirement at once or number your demands like a spec.
 - Keep it to what a person would actually type — usually 1-4 sentences. Vary length turn to turn.
+- If the assistant asks for permission or confirmation, decide in character. Grant ordinary,
+  reversible actions that are needed for your goal; ask a short question or refuse when the
+  action is destructive, exposes credentials/private data, costs money, or conflicts with your
+  persona. Never discuss host approval flags, sandboxes, policies, or the evaluation harness.
 - Never mention that this is a test, a rehearsal, a simulation, or that you are role-playing.
 
+Style examples (copy the realism, not the words):
+- impatient: "yeah, go ahead"
+- beginner: "not sure where that is. can you find it?"
+- skeptical: "Wait, will that change anything?"
+- non-native speaker: "okay do it, but please don't delete my old one"
+
 Write ONLY your next message, nothing else. If your goal is genuinely met, or the conversation clearly cannot progress any further, write exactly REHEARSAL_DONE instead of a message."""
+
+
+def normalize_user_emulator_message(text: str, *, max_chars: int = 500) -> str:
+    """Keep emulator output inside a realistic chat-message envelope.
+
+    Prompting supplies the style; this deterministic last line of defence removes
+    accidental wrappers and prevents a model from emitting a QA-script-sized turn.
+    ``REHEARSAL_DONE`` is preserved exactly.
+    """
+    value = text.strip()
+    if value == "REHEARSAL_DONE":
+        return value
+    if value.startswith("```") and value.endswith("```"):
+        value = value[3:-3].strip()
+    for prefix in ("USER:", "User:", "Next message:", "Response:"):
+        if value.startswith(prefix):
+            value = value[len(prefix):].strip()
+            break
+    value = " ".join(value.split())
+    if len(value) > max_chars:
+        value = value[: max_chars - 1].rstrip() + "…"
+    return value
 
 
 def build_user_emulator_prompt(

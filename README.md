@@ -1,6 +1,6 @@
 # Ghostlab
 
-> A local, end-to-end **testing lab for any MCP server** — coding agents role-play
+> A local, end-to-end **testing lab for MCP servers and agent skills** — coding agents role-play
 > real users, drive your tools over multiple turns, and the harness captures
 > traces, scores outcomes, and even **renders and clicks through MCP Apps UI
 > widgets**.
@@ -39,8 +39,8 @@ ghostlab create
 
 That's the whole flow. `ghostlab create` walks you through everything, end to end:
 
-1. **Name + target** — the only two prompts. A target is an MCP URL, or a path
-   to a target JSON / standard `mcpServers` config.
+1. **Name + target** — the only two prompts. A target is an MCP URL/config, or
+   a local `SKILL.md` supplied with `--skill`.
 2. **Discover** — connects to the target, lints its contract (schema errors,
    risk labels), and probes any MCP Apps `ui://` widgets.
 3. **Configure semantic testing** — if `codex` is on your `$PATH`, offers to
@@ -66,12 +66,24 @@ repeating the whole wizard:
 ghostlab discover --job <name>    # re-inspect after the target changes
 ghostlab plan --job <name>        # regenerate/curate the test plan
 ghostlab test --job <name>        # rerun (add --suite semantic to narrow it)
+ghostlab test --job <name> --resume  # keep completed cases; retry harness outages
+ghostlab create --name <name> --resume --yes  # continue the full job pipeline
 ghostlab review --job <name>      # the readiness/gate report on its own
 ```
 
 A job is a self-contained folder: `jobs/<name>/job.yaml` (target, hosts,
 generation/test defaults, gates — all editable), `test-plan.yaml`, `workspace/`
 (discover/generated/test artifacts + a local sqlite db), and `runs/`.
+
+To evaluate a skill instead of an MCP server:
+
+```bash
+ghostlab create --name release-notes-skill --skill ./skills/release-notes --yes
+```
+
+Skill discovery reads `SKILL.md`; planning generates persona-grounded semantic
+and adversarial cases; testing injects the skill instructions into the AUT and
+judges observable compliance. MCP-only protocol and Apps suites are omitted.
 
 ## What you get
 
@@ -178,7 +190,7 @@ jobs/<name>/
 Each test run points to a target definition:
 
 - `target.id`: unique name (`filesystem-mcp-local`, `my-app-staging`)
-- `transport`: `stdio` | `sse` | `streamable-http`
+- `transport`: `stdio` | `sse` | `streamable-http` | `skill`
 - `connection`: command+args+env (stdio) or URL+headers (network transports)
 - `capabilities`: optional expected tools/resources/prompts
 - `startup`: optional health checks and boot timeout

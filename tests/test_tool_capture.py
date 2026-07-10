@@ -5,6 +5,7 @@ import unittest
 
 from rehearsal.runners import redact_host_noise
 from rehearsal.tool_capture import (
+    classify_tool_failure,
     efficiency_metrics,
     parse_codex_output,
     parse_tool_calls,
@@ -25,6 +26,14 @@ mcp: cortex/views_generate_sentence_scramble (completed)
 
 
 class ParseToolCallsTest(unittest.TestCase):
+    def test_classifies_cancel_causes_without_blading_a_user(self) -> None:
+        self.assertEqual(
+            classify_tool_failure("HTTP 200 text/event-stream closed with INTERNAL_ERROR"),
+            "server_stream_error",
+        )
+        self.assertEqual(classify_tool_failure("approval denied"), "permission_denied")
+        self.assertEqual(classify_tool_failure("cancelled from client side"), "client_cancelled")
+
     def test_pairs_started_with_end_state(self) -> None:
         calls = parse_tool_calls(STDERR)
         self.assertEqual(len(calls), 4)

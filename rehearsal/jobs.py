@@ -27,6 +27,7 @@ from .spec import (
     GhostlabSpec,
     save_spec,
     spec_from_target,
+    spec_from_skill,
 )
 
 JOB_FILE = "job.yaml"
@@ -42,6 +43,8 @@ _BEARER_ENV_RE = re.compile(r"Bearer\s+\$\{(\w+)\}")
 _PROMPT_PLACEHOLDERS = {
     "aut": "target_id, transport, capabilities, mcp_config_path, scenario_id, "
            "scenario_title, goal, transcript, user_message",
+    "skill_aut": "target_id, transport, capabilities, mcp_config_path, scenario_id, "
+                 "scenario_title, goal, transcript, user_message",
     "user_emulator": "persona, goal, widget_section, transcript, last_assistant_message",
     "judge": "goal, criteria_block, signals_block, tools_line, tool_calls, transcript",
     "critique": "goal, tools, transcript",
@@ -162,6 +165,23 @@ def default_job_spec(
     return spec
 
 
+def default_skill_job_spec(
+    name: str, *, skill_path: Path, generation: dict | None = None,
+    review_gates: dict | None = None, aut_runner: str | None = None,
+) -> GhostlabSpec:
+    spec = spec_from_skill(skill_path, name=name, workspace=JOB_WORKSPACE)
+    if generation:
+        spec.generation = {**spec.generation, **generation}
+    if review_gates:
+        spec.review = {"gates": {**spec.review.get("gates", {}), **review_gates}}
+    if aut_runner:
+        spec.hosts.append({
+            "id": "aut", "kind": "process", "config_ref": aut_runner,
+            "roles": ["agent_under_test"],
+        })
+    return spec
+
+
 def build_codex_aut_runner(spec: GhostlabSpec) -> dict:
     """Synthesize a codex agent-under-test runner config for this job's target.
 
@@ -178,7 +198,9 @@ def build_codex_aut_runner(spec: GhostlabSpec) -> dict:
     command = [
         "codex", "--sandbox", "read-only", "-a", "never",
     ]
-    if target.transport == "stdio":
+    if target.transport == "skill":
+        pass  # Skill instructions are injected into the AUT prompt, not as MCP config.
+    elif target.transport == "stdio":
         parts = connection.get("command") or []
         if isinstance(parts, str):
             parts = [parts]

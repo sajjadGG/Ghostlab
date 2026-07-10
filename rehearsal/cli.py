@@ -140,6 +140,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target MCP URL, or a path to a GhostLab target JSON or a standard "
              "MCP config (mcpServers). Skips the target prompt.",
     )
+    create_parser.add_argument(
+        "--skill", type=Path, default=None,
+        help="Evaluate a local skill instead of an MCP target; accepts SKILL.md or its directory.",
+    )
     _add_server_arg(create_parser)
     create_parser.add_argument(
         "--transport", default=None,
@@ -178,6 +182,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     create_parser.add_argument(
         "--force", action="store_true", help="Overwrite an existing job of the same name."
+    )
+    create_parser.add_argument(
+        "--resume", action="store_true",
+        help="Continue an existing job: reuse discovery/generation artifacts and resume tests.",
     )
 
     discover_parser = sub.add_parser(
@@ -298,6 +306,11 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--repeat", type=int, default=1,
         help="Run the plan N times and report per-case variance / flaky cases.",
+    )
+    test_parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume the latest matching test run, keeping completed case/host results and "
+             "retrying unfinished or harness-failed cases (requires --repeat 1).",
     )
     test_parser.add_argument(
         "--profile", choices=["smoke", "nightly", "release"], default=None,
@@ -680,7 +693,9 @@ def _discover_new_job(slug: str) -> int:
 
 def cmd_create(args: argparse.Namespace) -> int:
     from .config import load_target
-    from .jobs import create_job, default_job_spec, slugify, target_from_url
+    from .jobs import (
+        create_job, default_job_spec, default_skill_job_spec, slugify, target_from_url,
+    )
 
     interactive = not args.yes
 
@@ -703,29 +718,34 @@ def cmd_create(args: argparse.Namespace) -> int:
     if not name:
         print("A job name is required (pass --name or answer the prompt).")
         return 1
+    if getattr(args, "resume", False):
+        return _resume_job_pipeline(args, name, ask_yn)
 
-    target_value = args.target or ask("Target MCP URL or config path: ")
-    if not target_value:
-        print("A target is required (pass --target or answer the prompt).")
+    if args.skill is not None and args.target:
+        print("Pass either --skill or --target, not both.")
         return 1
 
+    target = None
     source_target = ""
-    target_path = Path(target_value)
-    is_config_file = target_path.suffix.lower() == ".json" and target_path.exists()
-    if is_config_file:
-        # A config file already carries transport + headers/env — don't re-ask.
-        try:
-            target = load_target(target_path, server=args.server)
-        except ConfigError as exc:
-            print(str(exc))
+    if args.skill is None:
+        target_value = args.target or ask("Target MCP URL or config path: ")
+        if not target_value:
+            print("A target is required (pass --target/--skill or answer the prompt).")
             return 1
-        source_target = str(target_path)
-    else:
-        target = target_from_url(
-            target_value,
-            transport=args.transport or "streamable-http",
-            headers=_parse_header_lines(list(args.header or [])),
-        )
+        target_path = Path(target_value)
+        is_config_file = target_path.suffix.lower() == ".json" and target_path.exists()
+        if is_config_file:
+            try:
+                target = load_target(target_path, server=args.server)
+            except ConfigError as exc:
+                print(str(exc))
+                return 1
+            source_target = str(target_path)
+        else:
+            target = target_from_url(
+                target_value, transport=args.transport or "streamable-http",
+                headers=_parse_header_lines(list(args.header or [])),
+            )
 
     generation: dict = {}
     if args.personas is not None:
@@ -734,14 +754,23 @@ def cmd_create(args: argparse.Namespace) -> int:
         generation["scenarios_per_persona"] = args.scenarios_per_persona
     review_gates = {"min_pass_rate": args.min_pass_rate} if args.min_pass_rate is not None else None
 
-    spec = default_job_spec(
-        name,
-        target=target,
-        source_target=source_target,
-        generation=generation,
-        review_gates=review_gates,
-        aut_runner=str(args.aut_runner) if args.aut_runner else None,
-    )
+    if args.skill is not None:
+        try:
+            spec = default_skill_job_spec(
+                name, skill_path=args.skill, generation=generation,
+                review_gates=review_gates,
+                aut_runner=str(args.aut_runner) if args.aut_runner else None,
+            )
+        except ConfigError as exc:
+            print(str(exc))
+            return 1
+    else:
+        assert target is not None
+        spec = default_job_spec(
+            name, target=target, source_target=source_target, generation=generation,
+            review_gates=review_gates,
+            aut_runner=str(args.aut_runner) if args.aut_runner else None,
+        )
     try:
         spec_path = create_job(name, spec, force=args.force)
     except ConfigError as exc:
@@ -751,7 +780,12 @@ def cmd_create(args: argparse.Namespace) -> int:
     slug = slugify(name)
     job_dir = spec_path.parent
     print(tc.heading(f"Created job '{slug}' at {job_dir}/  (job.yaml + workspace/ + runs/)"))
-    print(f"  target: {target.transport} {target.connection.get('url') or target.connection.get('command') or ''}")
+    created_target = spec.target_config()
+    target_location = (
+        created_target.connection.get("path") or created_target.connection.get("url")
+        or created_target.connection.get("command") or ""
+    )
+    print(f"  target: {created_target.transport} {target_location}")
 
     if not args.discover:
         print(tc.muted(f"  next: ghostlab discover --job {slug}"))
@@ -817,6 +851,53 @@ def cmd_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resume_job_pipeline(args: argparse.Namespace, name: str, ask_yn) -> int:
+    """Continue the create pipeline while preserving completed stage artifacts."""
+    from .jobs import resolve_job, slugify
+    from .spec import load_spec
+
+    slug = slugify(name)
+    try:
+        spec_path = resolve_job(slug)
+        spec = load_spec(spec_path)
+    except ConfigError as exc:
+        print(str(exc))
+        return 1
+    print(tc.heading(f"Resuming job '{slug}' at {spec_path.parent}/"))
+
+    generated_from = (spec.capabilities or {}).get("generated_from", "")
+    discovered = bool(generated_from and (spec_path.parent / generated_from).exists())
+    if discovered:
+        print(tc.muted("  discover: reused completed artifacts"))
+    else:
+        if _discover_new_job(slug) != 0:
+            print(tc.muted(f"  resume stopped; fix target/auth then rerun with --resume"))
+            return 0
+
+    _configure_aut_host(spec_path, ask_yn)
+    plan_args = argparse.Namespace(
+        job=slug, spec=None, db=None, out=None, approve=None, reject=None,
+        generate=True, regenerate=False, personas=args.personas,
+        scenarios_per_persona=args.scenarios_per_persona, codex_bin="", model="",
+    )
+    if cmd_plan(plan_args) != 0:
+        return 0
+
+    spec = load_spec(spec_path)
+    test_root = spec.workspace_dir(spec_path) / "test"
+    has_results = any(test_root.glob(f"*-{spec.id}/results*.json"))
+    test_args = argparse.Namespace(
+        job=slug, spec=None, db=None, plan=None, suite=None, hosts=None,
+        approved_only=False, user_runner=None, apps_mode=False, skip_setup=False,
+        timeout=30.0, repeat=1, profile=None, strict=False, judge=None,
+        codex_bin="", model="", resume=has_results,
+    )
+    cmd_test(test_args)
+    review_args = argparse.Namespace(job=slug, spec=None, db=None, results=None, strict=False)
+    cmd_review_spec(review_args)
+    return 0
+
+
 def _configure_aut_host(spec_path: Path, ask_yn) -> None:
     """Offer to wire an agent-under-test host so semantic/security suites run.
 
@@ -862,6 +943,9 @@ def cmd_discover(args: argparse.Namespace) -> int:
     timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
     out_dir = spec.workspace_dir(args.spec) / "discover" / f"{timestamp}-{spec.id}"
 
+    if spec.target_type == "skill":
+        return _discover_skill(args, spec, target, out_dir)
+
     print(tc.heading(f"Discovering '{spec.id}' ({target.transport})..."))
     runtime = SetupRuntime({} if args.skip_setup else spec.setup, out_dir)
     try:
@@ -887,6 +971,47 @@ def cmd_discover(args: argparse.Namespace) -> int:
         runtime.teardown()
         if runtime.declared:
             runtime.write_status()  # capture teardown results in setup.json
+
+
+def _discover_skill(args, spec, target, out_dir: Path) -> int:
+    """Inspect a local SKILL.md without attempting MCP protocol discovery."""
+    from dataclasses import asdict
+
+    from .contract import build_contract, render_contract_md
+    from .inspect import write_inspect_artifacts
+    from .skills import inspect_skill
+    from .spec import save_spec
+
+    result = inspect_skill(Path(str(target.connection.get("path", ""))), spec.id)
+    inspect_json, inspect_md = write_inspect_artifacts(result, out_dir)
+    contract = build_contract(asdict(result))
+    contract["target_type"] = "skill"
+    contract["mcp"] = result.server_info.get("name", spec.id)
+    contract_json = out_dir / "contract.json"
+    contract_md = out_dir / "contract.md"
+    contract_json.write_text(json.dumps(contract, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    contract_md.write_text(render_contract_md(contract).replace("# MCP Contract:", "# Skill Contract:"), encoding="utf-8")
+    try:
+        generated_from = str(contract_json.resolve().relative_to(args.spec.resolve().parent))
+    except ValueError:
+        generated_from = str(contract_json)
+    description = result.capabilities.get("description", "")
+    spec.capabilities = {
+        "generated_from": generated_from, "discovered_at": contract["generated_at"],
+        "target_type": "skill", "name": result.server_info.get("name", spec.id),
+        "description": description, "tools": [], "ui_resources": [],
+    }
+    spec.target["capabilities"] = {
+        "target_type": "skill", "description": description,
+        "instructions": result.instructions,
+    }
+    save_spec(spec, args.spec)
+    print(tc.heading(f"Discovered skill '{result.server_info.get('name', spec.id)}'"))
+    print(f"  source: {target.connection.get('path')}")
+    print(f"  wrote {inspect_json}")
+    print(f"  wrote {inspect_md}")
+    print(f"  wrote {contract_json}")
+    return 0
 
 
 def _discover_inspect(args, spec, target, out_dir: Path, runtime) -> int:
@@ -1212,6 +1337,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         contract_ref=generated_from,
         fixtures=(spec.setup or {}).get("fixtures"),
         generated_cases=generated_cases,
+        target_type=spec.target_type,
     )
     write_test_plan(plan, plan_path)
     md_path = plan_path.with_suffix(".md")
@@ -1331,15 +1457,30 @@ def cmd_test(args: argparse.Namespace) -> int:
             raise ConfigError(f"Unknown host id(s): {', '.join(sorted(unknown))}")
         hosts = [host for host in hosts if host.id in wanted]
 
-    timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
-    out_dir = spec.workspace_dir(args.spec) / "test" / f"{timestamp}-{spec.id}"
+    test_root = spec.workspace_dir(args.spec) / "test"
+    resume_results = None
+    if getattr(args, "resume", False):
+        if args.repeat != 1:
+            raise ConfigError("--resume currently requires --repeat 1")
+        candidates = sorted(test_root.glob(f"*-{spec.id}/results.partial.json"))
+        candidates += sorted(test_root.glob(f"*-{spec.id}/results.json"))
+        if candidates:
+            resume_path = max(candidates, key=lambda path: path.stat().st_mtime)
+            out_dir = resume_path.parent
+            resume_results = json.loads(resume_path.read_text(encoding="utf-8"))
+            print(tc.muted(f"  resuming {out_dir} ({len(resume_results.get('results', []))} saved result(s))"))
+        else:
+            raise ConfigError(f"No prior test results found under {test_root}")
+    else:
+        timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
+        out_dir = test_root / f"{timestamp}-{spec.id}"
     print(tc.heading(
         f"Testing '{spec.id}' with host(s): {', '.join(host.id for host in hosts)}"
         + (f" (suites: {', '.join(args.suite)})" if args.suite else "")
     ))
 
     def progress(line: str) -> None:
-        match = re.match(r"^(\s*)-> (pass|fail|error|skip)\b(.*)$", line)
+        match = re.match(r"^(\s*)-> (pass|fail|error|skip|harness_error)\b(.*)$", line)
         if match:
             indent, status, rest = match.groups()
             print(f"{indent}-> {tc.verdict(status, status)}{rest}")
@@ -1371,6 +1512,8 @@ def cmd_test(args: argparse.Namespace) -> int:
             suites=args.suite,
             approved_only=args.approved_only,
             progress=progress,
+            resume_results=resume_results,
+            checkpoint_path=out_dir / "results.partial.json",
         )
     finally:
         runtime.teardown()
@@ -1383,12 +1526,16 @@ def cmd_test(args: argparse.Namespace) -> int:
         json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     results_md.write_text(render_results_md(results), encoding="utf-8")
+    partial_path = out_dir / "results.partial.json"
+    if partial_path.exists():
+        partial_path.unlink()
 
     totals = results["totals"]
     rate = results["pass_rate"]
     print(tc.heading(
         f"  executed {results['executed']} case-run(s): "
-        f"{totals['pass']} pass, {totals['fail']} fail, {totals['error']} error "
+        f"{totals['pass']} pass, {totals['fail']} fail, {totals['error']} error, "
+        f"{totals.get('harness_error', 0)} harness error "
         f"({totals['skip']} skipped)"
     ))
     rate_status = "pass" if rate is not None and rate >= 0.9 else ("fail" if rate is not None else "skip")

@@ -24,7 +24,7 @@ class CaseResult:
     case_id: str
     suite: str
     host: str
-    status: str  # pass | fail | skip | error
+    status: str  # pass | fail | skip | error | harness_error
     kind: str = ""  # protocol | conversational | ui
     detail: str = ""
     duration_ms: float = 0.0

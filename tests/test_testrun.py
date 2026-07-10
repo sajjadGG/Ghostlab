@@ -178,6 +178,42 @@ class ExecutePlanTest(unittest.TestCase):
         self.assertEqual(results["results"][0]["status"], "error")
         self.assertIn("kaboom", results["results"][0]["detail"])
 
+    def test_resume_keeps_completed_and_retries_harness_errors(self) -> None:
+        class CountingHost(StubHost):
+            def __init__(self):
+                super().__init__("p", HostCapabilities(executes_protocol=True))
+                self.calls = []
+
+            def execute(self, case, out_dir):
+                self.calls.append(case["id"])
+                return super().execute(case, out_dir)
+
+        host = CountingHost()
+        plan = _plan([
+            _case("done", "smoke", "protocol", {}),
+            _case("retry", "smoke", "protocol", {}),
+        ])
+        prior = {
+            "results": [
+                {"case": "done", "suite": "smoke", "kind": "protocol", "host": "p", "status": "pass"},
+                {"case": "retry", "suite": "smoke", "kind": "protocol", "host": "p", "status": "harness_error"},
+            ]
+        }
+        checkpoint = self.out / "results.partial.json"
+        results = execute_plan(
+            plan, [host], self.out, resume_results=prior, checkpoint_path=checkpoint,
+        )
+        self.assertEqual(host.calls, ["retry"])
+        self.assertEqual(results["totals"]["pass"], 2)
+        self.assertTrue(checkpoint.exists())
+
+    def test_harness_error_is_excluded_from_pass_rate(self) -> None:
+        host = StubHost("p", HostCapabilities(executes_protocol=True), status="harness_error")
+        results = execute_plan(_plan([_case("c", "smoke", "protocol", {})]), [host], self.out)
+        self.assertEqual(results["executed"], 0)
+        self.assertIsNone(results["pass_rate"])
+        self.assertEqual(results["totals"]["harness_error"], 1)
+
     def test_repeat_aggregates_variance_and_detects_flakes(self) -> None:
         from rehearsal.testrun import execute_plan_repeated
 

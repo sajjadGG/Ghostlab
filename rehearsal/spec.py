@@ -70,6 +70,7 @@ DEFAULT_TEST = {
 # placeholders each template accepts are documented in the job.yaml header.
 DEFAULT_PROMPTS = {
     "aut": "",
+    "skill_aut": "",
     "user_emulator": "",
     "judge": "",
     "critique": "",
@@ -122,6 +123,10 @@ class GhostlabSpec:
             capabilities=dict(self.target.get("capabilities", {})),
             startup=dict(self.target.get("startup", {})),
         )
+
+    @property
+    def target_type(self) -> str:
+        return str(self.target.get("kind", "mcp"))
 
     def workspace_dir(self, spec_path: Path) -> Path:
         """Workspace directory for artifacts, resolved relative to the spec file."""
@@ -234,6 +239,31 @@ def spec_from_target(
                 "no_high_security_findings": True,
             }
         },
+    )
+
+
+def spec_from_skill(
+    skill_path: Path, *, name: str = "", workspace: str = DEFAULT_WORKSPACE,
+) -> GhostlabSpec:
+    """Starter spec for a local SKILL.md target."""
+    from .skills import resolve_skill_path
+
+    path = resolve_skill_path(skill_path)
+    target_id = re.sub(r"[^a-z0-9]+", "-", (name or path.parent.name).lower()).strip("-") or "skill"
+    return GhostlabSpec(
+        id=target_id,
+        name=name or path.parent.name,
+        workspace=workspace,
+        source_target=str(path),
+        target={
+            "kind": "skill", "transport": "skill",
+            "connection": {"path": str(path)}, "capabilities": {}, "startup": {},
+        },
+        setup={"commands": [], "health": [], "reset": [], "teardown": [], "fixtures": []},
+        hosts=[],
+        capabilities={}, generation=dict(DEFAULT_GENERATION), test=dict(DEFAULT_TEST),
+        prompts=dict(DEFAULT_PROMPTS), test_plan={},
+        review={"gates": {"min_pass_rate": 0.9}},
     )
 
 

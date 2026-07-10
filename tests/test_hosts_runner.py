@@ -266,7 +266,7 @@ class RunnerHostExecuteTest(unittest.TestCase):
 
     @patch("rehearsal.evaluate.evaluate_run")
     @patch("rehearsal.orchestrator.run_scenario")
-    def test_judge_codex_error_falls_back_to_run_status(self, run_scenario_mock, evaluate_mock) -> None:
+    def test_judge_codex_error_is_retryable_harness_error(self, run_scenario_mock, evaluate_mock) -> None:
         from rehearsal.codex_backend import CodexError
 
         run_dir = self.out_dir / "run1"
@@ -277,7 +277,7 @@ class RunnerHostExecuteTest(unittest.TestCase):
         host = RunnerHost("h", "codex-session", {}, self.spec_path, backend=MagicMock(),
                           show_progress=False, user_runner_config=FAKE_USER_RUNNER)
         result = host.execute(self._case({"scenario": str(self.scenario_path)}), self.out_dir)
-        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.status, "harness_error")
         self.assertIn("judge unavailable", result.detail)
 
 

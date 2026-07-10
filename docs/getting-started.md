@@ -27,6 +27,19 @@ ghostlab create
 
 Everything else (persona/scenario counts, gates, prompts) uses documented defaults you edit in `job.yaml` — pass `--personas`, `--scenarios-per-persona`, `--min-pass-rate`, or `--aut-runner` to set them up front. Add `--no-discover` to just scaffold without inspecting.
 
+### Evaluate an agent skill
+
+Pass a `SKILL.md` file or its containing directory instead of `--target`:
+
+```bash
+ghostlab create --name release-notes --skill ./skills/release-notes --yes
+```
+
+Ghostlab reads the skill instructions, generates semantic and adversarial user
+scenarios, runs them through the dual-agent harness, and judges whether the AUT
+followed the skill. Protocol, tool-schema, and MCP Apps suites do not apply to
+skill targets.
+
 It scaffolds a self-contained directory:
 
 ```
@@ -84,6 +97,7 @@ Then run the loop against the job by name (`--job`), no paths to juggle:
 ghostlab discover --job cortex-eval    # inspect + lint + refresh capabilities
 ghostlab plan     --job cortex-eval    # coverage-driven test-plan.yaml
 ghostlab test     --job cortex-eval    # execute across host adapters
+ghostlab test     --job cortex-eval --resume  # resume completed case/host pairs
 ghostlab review   --job cortex-eval    # readiness report / release gate
 ```
 
