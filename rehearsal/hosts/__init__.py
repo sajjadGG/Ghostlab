@@ -58,6 +58,6 @@ def build_hosts(
                           user_runner_config=user_runner_config,
                           apps_mode=apps_mode)
             )
-    if not any(isinstance(adapter, DirectMcpHost) for adapter in adapters):
+    if target.transport != "skill" and not any(isinstance(adapter, DirectMcpHost) for adapter in adapters):
         adapters.insert(0, DirectMcpHost("direct-mcp", target, timeout=timeout))
     return adapters

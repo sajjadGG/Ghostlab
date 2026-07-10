@@ -31,6 +31,38 @@ _END_STATES = {
 }
 
 
+def classify_tool_failure(error: Any) -> str:
+    """Classify a failed/cancelled tool call without blaming a nonexistent user."""
+    text = json.dumps(error, ensure_ascii=False).lower() if not isinstance(error, str) else error.lower()
+    if any(token in text for token in ("permission denied", "approval denied", "not approved")):
+        return "permission_denied"
+    if any(token in text for token in ("timed out", "timeout", "deadline exceeded")):
+        return "client_timeout"
+    if any(token in text for token in (
+        "text/event-stream", "stream closed", "stream error", "internal_error", "zero bytes",
+    )):
+        return "server_stream_error"
+    if any(token in text for token in ("backend cancelled", "backend canceled", "upstream cancelled")):
+        return "backend_cancelled"
+    if "cancel" in text or "abort" in text:
+        return "client_cancelled"
+    if text and text not in ("null", "\"\""):
+        return "tool_error"
+    return "unknown_failure"
+
+
+def annotate_tool_failures(calls: list[dict[str, Any]], diagnostic: str = "") -> list[dict[str, Any]]:
+    """Attach stable cause/detail fields to failed calls for logs and reports."""
+    for call in calls:
+        if call.get("status") != "failed":
+            continue
+        detail = call.get("error") or diagnostic
+        call["failure_cause"] = classify_tool_failure(detail)
+        if detail:
+            call["failure_detail"] = " ".join(str(detail).split())[:500]
+    return calls
+
+
 def parse_tool_calls(*streams: str) -> list[dict[str, Any]]:
     """Extract ordered tool-call records from one or more output streams.
 
@@ -118,6 +150,10 @@ def parse_codex_output(jsonl_text: str) -> dict[str, Any]:
                 "result": item.get("result"),
                 "error": error,
             }
+            if status == "failed":
+                record["failure_cause"] = classify_tool_failure(error)
+                if error:
+                    record["failure_detail"] = " ".join(str(error).split())[:500]
             # Capture per-call latency when the stream provides it (forward
             # compatible: absent in current codex output, so simply omitted).
             duration = item.get("duration_ms")
@@ -131,11 +167,18 @@ def summarize_tool_calls(calls: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate counts by tool and by status for quick reporting."""
     by_tool: dict[str, int] = {}
     by_status: dict[str, int] = {}
+    by_failure_cause: dict[str, int] = {}
     for call in calls:
         name = f"{call['server']}/{call['tool']}"
         by_tool[name] = by_tool.get(name, 0) + 1
         by_status[call["status"]] = by_status.get(call["status"], 0) + 1
-    return {"total": len(calls), "by_tool": by_tool, "by_status": by_status}
+        cause = call.get("failure_cause")
+        if cause:
+            by_failure_cause[cause] = by_failure_cause.get(cause, 0) + 1
+    return {
+        "total": len(calls), "by_tool": by_tool, "by_status": by_status,
+        "by_failure_cause": by_failure_cause,
+    }
 
 
 def _args_key(arguments: Any) -> str:

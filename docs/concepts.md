@@ -2,7 +2,7 @@
 
 ## Spec (`ghostlab.yaml`)
 
-The spec is the canonical, human-editable description of one MCP under test:
+The spec is the canonical, human-editable description of one MCP or skill under test:
 how to connect (`target`), how to set it up (`setup`), which agent hosts should
 exercise it (`hosts`), what it exposes (`capabilities`, refreshed by
 `ghostlab discover`), and what quality bar it must clear (`review.gates`).
@@ -21,13 +21,17 @@ for coverage-driven test planning.
 
 ## Target
 
-A target describes the MCP server under test:
+A target describes either an MCP server or a local skill under test:
 
 - `id`: stable target identifier.
-- `transport`: `stdio`, `sse`, or `streamable-http`.
+- `transport`: `stdio`, `sse`, `streamable-http`, or `skill`.
 - `connection`: command and environment for stdio, or URL and headers for network transports.
 - `capabilities`: optional expected tools/resources/prompts.
 - `startup`: optional boot and health-check settings.
+
+For a skill, `target.kind` and `transport` are `skill`, while
+`connection.path` points to `SKILL.md`. Skill evaluation uses the conversational
+harness and judge; direct MCP protocol checks do not apply.
 
 ## Scenario
 
@@ -44,6 +48,19 @@ A dataset is a persona x scenario matrix. It contains a manifest, generated pers
 ## Runner
 
 A runner controls how Ghostlab talks to an agent host. Mock runners are deterministic. Process runners start a fresh command per turn. Codex session runners keep one live Codex thread across turns by resuming the thread id captured from JSONL output.
+
+## Permissions and approvals
+
+There are two separate layers. Host-level approval mode (for example Codex
+`-a never` and its sandbox) determines whether the AUT process may execute a
+tool at all; the user emulator cannot override that layer. An assistant may
+also ask the user a conversational permission question. The emulator answers
+that question in persona: it normally approves reversible actions needed for
+the goal, but asks or refuses when an action is destructive, exposes private
+data or credentials, costs money, or conflicts with the persona. It never
+discusses host flags or the test harness. Host auto-denials and conversational
+user refusals are logged separately as `permission_denied` tool failures versus
+ordinary user messages.
 
 ## Outputs
 

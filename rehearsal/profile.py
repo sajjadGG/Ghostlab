@@ -85,12 +85,17 @@ def state_surfaces(tools: list[dict[str, Any]]) -> dict[str, list[str]]:
 def _digest(inspect: dict[str, Any]) -> str:
     """Compact, token-cheap description of the MCP for the codex prompt."""
     server = inspect.get("server_info", {})
+    is_skill = inspect.get("transport") == "skill"
     lines = [
-        f"MCP server: {server.get('name', '?')}@{server.get('version', '?')}",
+        (f"Skill: {server.get('name', '?')}" if is_skill else
+         f"MCP server: {server.get('name', '?')}@{server.get('version', '?')}")
     ]
     instructions = (inspect.get("instructions") or "").strip()
     if instructions:
-        lines.append(f"Server instructions: {_one_line(instructions, 400)}")
+        lines.append(
+            f"{'Skill' if is_skill else 'Server'} instructions: "
+            f"{_one_line(instructions, 6000 if is_skill else 400)}"
+        )
     lines.append("")
     lines.append("Tools (name | read-only? | one-line description):")
     for tool in inspect.get("tools", []):
@@ -106,14 +111,14 @@ def _digest(inspect: dict[str, Any]) -> str:
 
 
 # Placeholders: {digest} {families}
-PROFILE_TEMPLATE = """You are analyzing an MCP (Model Context Protocol) server to produce a capability profile.
+PROFILE_TEMPLATE = """You are analyzing an evaluation target (an MCP server or an agent skill) to produce a capability profile.
 
 {digest}
 
 The tool name families present are: {families}.
 
 Produce a JSON object with:
-- domain_summary: 1-3 sentences on what this MCP is for and who would use it.
+- domain_summary: 1-3 sentences on what this target is for and who would use it.
 - categories: one entry per tool name family above. `key` is the family string; `label` is a short human label; `description` says what that category of tools does.
 - workflows: 3-6 realistic multi-step workflows a client agent would perform with these tools. Each `steps` array lists tool names IN ORDER. Only use tool names that appear in the tool list above. Do NOT invent tools, and do not reference the non-exposed tools.
 
@@ -159,6 +164,8 @@ def build_capability_profile(inspect: dict[str, Any], backend: CodexBackend) -> 
 
     return {
         "mcp": f"{server.get('name', '?')}@{server.get('version', '?')}",
+        "target_type": "skill" if inspect.get("transport") == "skill" else "mcp",
+        "instructions": inspect.get("instructions", "") if inspect.get("transport") == "skill" else "",
         "domain_summary": generated.get("domain_summary", ""),
         "taxonomy": tax,
         "categories": generated.get("categories", []),

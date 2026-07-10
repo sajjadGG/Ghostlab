@@ -48,11 +48,16 @@ def write_markdown_report(
                 + (f"  — covered {len(covered)}/{len(scenario.exercises)}"),
                 "",
             ]
-        lines += ["## Tool calls", "", "| turn | # | tool | status |", "| --- | --- | --- | --- |"]
+        lines += [
+            "## Tool calls", "",
+            "| turn | # | tool | status | cause |",
+            "| --- | --- | --- | --- | --- |",
+        ]
         for turn in sorted(tool_calls_by_turn):
             for call in tool_calls_by_turn[turn]:
                 lines.append(
-                    f"| {turn} | {call['index']} | `{call['server']}/{call['tool']}` | {call['status']} |"
+                    f"| {turn} | {call['index']} | `{call['server']}/{call['tool']}` | "
+                    f"{call['status']} | {call.get('failure_cause', '')} |"
                 )
         lines.append("")
 
@@ -61,4 +66,3 @@ def write_markdown_report(
         lines.extend([f"### {index}. {turn.role}", "", turn.content, ""])
 
     path.write_text("\n".join(lines), encoding="utf-8")
-

@@ -10,6 +10,7 @@ explicit uncovered work, not silence.
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Any, Callable, Optional
 
 from .hosts import CaseResult, HostAdapter
@@ -63,6 +64,8 @@ def execute_plan(
     suites: Optional[list[str]] = None,
     approved_only: bool = False,
     progress: ProgressFn = print,
+    resume_results: Optional[dict[str, Any]] = None,
+    checkpoint_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Run every selected case, printing progress as each one starts/finishes.
 
@@ -75,26 +78,65 @@ def execute_plan(
     out_dir.mkdir(parents=True, exist_ok=True)
     total = len(cases)
 
-    results: list[CaseResult] = []
+    prior_entries = list((resume_results or {}).get("results", []))
+    selected_ids = {case.get("id") for case in cases}
+    selected_hosts = {host.id for host in hosts} | {"-"}
+    prior_entries = [
+        entry for entry in prior_entries
+        if entry.get("case") in selected_ids and entry.get("host") in selected_hosts
+    ]
+    terminal = {"pass", "fail", "skip"}
+    completed_keys = {
+        (entry.get("case"), entry.get("host"))
+        for entry in prior_entries
+        if entry.get("status") in terminal
+    }
+    results: list[CaseResult] = [
+        CaseResult(
+            case_id=str(entry.get("case", "?")), suite=str(entry.get("suite", "?")),
+            host=str(entry.get("host", "-")), status=str(entry.get("status", "error")),
+            kind=str(entry.get("kind", "")), detail=str(entry.get("detail", "")),
+            duration_ms=float(entry.get("duration_ms", 0) or 0),
+            artifacts=dict(entry.get("artifacts") or {}),
+        )
+        for entry in prior_entries if entry.get("status") in terminal
+    ]
+
+    def checkpoint() -> None:
+        if checkpoint_path is None:
+            return
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = _result_bundle(plan, hosts, results, suites, approved_only, partial=True)
+        checkpoint_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
     try:
         for index, case in enumerate(cases, start=1):
             capable, skip_reason = _hosts_for_case(case, hosts)
             label = f"[{index}/{total}] {case['id']} [{case.get('suite', '?')}/{case.get('kind', '?')}]"
             if not capable:
+                if (case["id"], "-") in completed_keys:
+                    progress(f"{label}: resume skip (already completed)")
+                    continue
                 progress(f"{label}: skip ({skip_reason})")
                 results.append(CaseResult(
                     case_id=case["id"], suite=case.get("suite", "?"),
                     host="-", status="skip", kind=case.get("kind", ""),
                     detail=skip_reason,
                 ))
+                checkpoint()
                 continue
             for host in capable:
+                if (case["id"], host.id) in completed_keys:
+                    progress(f"{label} on {host.id}: resume skip (already completed)")
+                    continue
                 progress(f"{label} on {host.id}...")
                 try:
                     result = host.execute(case, out_dir)
                     detail = f": {result.detail}" if result.detail else ""
                     progress(f"  -> {result.status}{detail}")
                     results.append(result)
+                    checkpoint()
                 except Exception as exc:  # noqa: BLE001 — isolate case crashes
                     progress(f"  -> error: {exc}")
                     results.append(CaseResult(
@@ -102,6 +144,7 @@ def execute_plan(
                         host=host.id, status="error", kind=case.get("kind", ""),
                         detail=str(exc),
                     ))
+                    checkpoint()
     finally:
         for host in hosts:
             try:
@@ -109,13 +152,22 @@ def execute_plan(
             except Exception:  # noqa: BLE001 — best-effort cleanup
                 pass
 
+    return _result_bundle(plan, hosts, results, suites, approved_only)
+
+
+def _result_bundle(
+    plan: dict[str, Any], hosts: list[HostAdapter], results: list[CaseResult],
+    suites: Optional[list[str]], approved_only: bool, *, partial: bool = False,
+) -> dict[str, Any]:
     totals = {"pass": 0, "fail": 0, "skip": 0, "error": 0}
     for result in results:
         totals[result.status] = totals.get(result.status, 0) + 1
+    # Harness outages are retryable infrastructure failures, not product
+    # failures, and therefore never dilute the target's readiness pass rate.
     executed = totals["pass"] + totals["fail"] + totals["error"]
     pass_rate = round(totals["pass"] / executed, 4) if executed else None
 
-    return {
+    bundle = {
         "id": plan.get("id", "?"),
         "generated_at": utc_now(),
         "plan_generated_at": plan.get("generated_at", "?"),
@@ -127,6 +179,9 @@ def execute_plan(
         "results": [result.to_json() for result in results],
         "fingerprint": environment_fingerprint(),
     }
+    if partial:
+        bundle["partial"] = True
+    return bundle
 
 
 def execute_plan_repeated(
@@ -138,6 +193,8 @@ def execute_plan_repeated(
     suites: Optional[list[str]] = None,
     approved_only: bool = False,
     progress: ProgressFn = print,
+    resume_results: Optional[dict[str, Any]] = None,
+    checkpoint_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Run the plan ``repeat`` times and aggregate variance (roadmap A7).
 
@@ -148,8 +205,11 @@ def execute_plan_repeated(
     """
     if repeat <= 1:
         return execute_plan(
-            plan, hosts, out_dir, suites=suites, approved_only=approved_only, progress=progress
+            plan, hosts, out_dir, suites=suites, approved_only=approved_only, progress=progress,
+            resume_results=resume_results, checkpoint_path=checkpoint_path,
         )
+    if resume_results:
+        raise ValueError("--resume currently supports --repeat 1 only")
 
     attempts: list[dict[str, Any]] = []
     for attempt in range(1, repeat + 1):
@@ -173,7 +233,8 @@ def execute_plan_repeated(
         stats = per_case.setdefault(
             key,
             {"case": entry["case"], "host": entry["host"], "suite": entry["suite"],
-             "runs": 0, "pass": 0, "fail": 0, "error": 0, "skip": 0},
+             "runs": 0, "pass": 0, "fail": 0, "error": 0, "skip": 0,
+             "harness_error": 0},
         )
         stats["runs"] += 1
         stats[entry["status"]] += 1
@@ -221,7 +282,7 @@ def render_results_md(results: dict[str, Any]) -> str:
         "",
         f"- Executed: {results.get('executed', 0)} "
         f"(pass {totals['pass']}, fail {totals['fail']}, error {totals['error']}, "
-        f"skip {totals['skip']})",
+        f"skip {totals['skip']}, harness error {totals.get('harness_error', 0)})",
         f"- Pass rate: {'n/a' if rate is None else f'{rate:.0%}'}",
         f"- Hosts: {', '.join(host['id'] for host in results.get('hosts', []))}",
         "",

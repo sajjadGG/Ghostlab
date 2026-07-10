@@ -247,6 +247,12 @@ class RunnerHost(HostAdapter):
         self, case, scenario, result, prefix: str, done, capabilities=None, inspect_data=None
     ) -> CaseResult:
         artifacts = {"run_dir": str(result.run_dir), "report": str(result.report_path)}
+        if result.status == "backend_unavailable":
+            return done(
+                "harness_error",
+                f"retryable harness/backend outage after {result.turns} turn(s)",
+                **artifacts,
+            )
         if self.backend is None:
             # No judge available: the conversation finishing is the best signal
             # we have, but that's not the same as the goal being met.
@@ -264,10 +270,9 @@ class RunnerHost(HostAdapter):
         try:
             verdict = evaluate_run(result.run_dir, self.backend, capabilities=capabilities)
         except CodexError as exc:
-            status = "pass" if result.status == "completed" else "fail"
             return done(
-                status,
-                f"run {result.status} in {result.turns} turn(s) (judge unavailable: {exc})",
+                "harness_error",
+                f"judge unavailable (retryable; target verdict withheld): {exc}",
                 **artifacts,
             )
         write_verdict_artifacts(verdict, result.run_dir)
@@ -283,12 +288,15 @@ class RunnerHost(HostAdapter):
             summary = verdict["judge"].get("summary", "")
             print(f"{prefix}judge: {color_verdict(v, v)} — {summary}{muted(gate_note)}")
 
-        try:
-            critique = critique_run(result.run_dir, self.backend, inspect=inspect_data)
-            write_critique_artifacts(critique, result.run_dir)
-            artifacts["critique"] = str(result.run_dir / "critique.json")
-        except Exception:  # noqa: BLE001 — a bonus signal; never fails the case
-            pass
+        # Tool-ergonomics critique is MCP-specific. Skill compliance is already
+        # scored against scenario criteria by the judge above.
+        if not (inspect_data and inspect_data.get("transport") == "skill"):
+            try:
+                critique = critique_run(result.run_dir, self.backend, inspect=inspect_data)
+                write_critique_artifacts(critique, result.run_dir)
+                artifacts["critique"] = str(result.run_dir / "critique.json")
+            except Exception:  # noqa: BLE001 — a bonus signal; never fails the case
+                pass
 
         detail = f"verdict={verdict['verdict']}: {verdict['judge'].get('summary', '')}{gate_note}"
         status = "pass" if verdict["verdict"] in ("pass", "partial") else "fail"

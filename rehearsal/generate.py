@@ -93,6 +93,8 @@ def _profile_digest(profile: dict[str, Any]) -> str:
     missing = profile.get("gaps", {}).get("missing_referenced_tools", [])
     if missing:
         lines.append(f"Non-exposed tools mentioned in docs (do NOT rely on these): {', '.join(missing)}")
+    if profile.get("target_type") == "skill" and profile.get("instructions"):
+        lines += ["", "Skill instructions:", str(profile["instructions"])[:12000]]
     return "\n".join(lines)
 
 
@@ -118,14 +120,14 @@ def _persona_block(persona: dict[str, Any]) -> str:
 
 
 # Placeholders: {profile_digest} {persona_section} {n} {persona_field_help}
-SCENARIO_GEN_TEMPLATE = """You design end-to-end test scenarios for an MCP (Model Context Protocol) server.
-In each test, one agent role-plays a user and another agent uses the MCP tools to help them.
+SCENARIO_GEN_TEMPLATE = """You design end-to-end test scenarios for an agent capability (an MCP server or a skill).
+In each test, one agent role-plays a user and another agent uses the target capability to help them.
 
 Capability profile:
 
 {profile_digest}{persona_section}
 
-Generate exactly {n} diverse, realistic scenarios that this MCP can support. Spread them across intents:
+Generate exactly {n} diverse, realistic scenarios that this capability can support. Spread them across intents:
 - happy_path: a primary, well-supported use case.
 - edge_case: ambiguous requests, missing prerequisites, or conflicting/stale state.
 - adversarial: the user asks for something the MCP can't do, or pushes on the known gaps/failure modes.
@@ -140,7 +142,7 @@ For each scenario provide:
 - opening_message: the user's first message, in their voice.
 - success_criteria: 2-4 observable things the assistant should do (reference real behavior/tools).
 - failure_signals: 2-4 things that would indicate a bug or bad behavior to probe for.
-- exercises: the tool names (from the lists above) this scenario should cause the assistant to use. Use ONLY real tool names; never the non-exposed ones.
+- exercises: for MCP targets, the real tool names this should exercise; for skill targets with no tools, use an empty array.
 
 Output only the JSON object with a `scenarios` array."""
 

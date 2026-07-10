@@ -54,10 +54,10 @@ def _slug(text: str) -> str:
 
 
 # Placeholders: {mcp} {domain_summary} {categories} {n}
-PERSONA_GEN_TEMPLATE = """You design a library of realistic user personas for testing an MCP (Model Context Protocol) server.
-Each persona will later role-play a user in end-to-end conversations against the server's tools.
+PERSONA_GEN_TEMPLATE = """You design a library of realistic user personas for testing an agent capability.
+Each persona will later role-play a user in end-to-end conversations against that capability.
 
-MCP: {mcp}
+Target: {mcp}
 Domain: {domain_summary}
 Tool categories: {categories}
 
