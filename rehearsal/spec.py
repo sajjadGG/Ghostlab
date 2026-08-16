@@ -87,6 +87,7 @@ DEFAULT_PROMPTS = {
     "persona_gen": "",
     "scenario_gen": "",
     "profile": "",
+    "agent_profile": "",
 }
 
 

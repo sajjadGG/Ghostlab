@@ -120,6 +120,38 @@ with the server's contract.
 OpenShell currently labels itself alpha software; pin and validate the runtime
 version in CI, and treat gateway/policy upgrades as infrastructure changes.
 
+## Evaluate A Configured Agent (`ghostlab lab`)
+
+When the thing you want to test is an *agent* — a model plus instructions,
+skills, MCPs, permissions, and a codebase — rather than a bare MCP server,
+`ghostlab lab` walks you through it:
+
+```bash
+ghostlab lab --name release-bot
+```
+
+It asks for the agent's source (an existing `opencode.json`, an agent config, or
+from scratch), its purpose in your own words, model, MCP servers, instruction
+files, skill folders, the workspace it operates on, and a permission preset.
+Then it infers what the agent is *for*, shows you that reading, and generates
+personas and scenarios from it — so the scenarios are about the agent's job, not
+about its tool families. Every generated artifact is shown before it is used,
+and every answer is written to `job.yaml`.
+
+The whole evaluation runs inside OpenShell: the OpenCode CLI comes from the
+sandbox image, its MCPs are launched inside that same container, and the
+workspace is an uploaded copy — so an agent granted `edit` or `bash` cannot
+touch your machine. Provider credentials are an explicit opt-in, uploaded
+outside the workspace and redacted from every report.
+
+Add `--pdf` to `ghostlab test` for a complete rollout document (configuration,
+inferred purpose, personas, transcript with every tool call, judge verdict with
+evidence, and the usability critique):
+
+```bash
+ghostlab test --job release-bot --pdf
+```
+
 ## Create A Job (Recommended Starting Point)
 
 A **job** is one configured-agent evaluation, and everything about it lives in

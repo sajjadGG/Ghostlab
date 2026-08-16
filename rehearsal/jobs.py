@@ -444,7 +444,23 @@ def update_agent_runtime(
     timeout_seconds: int, approval_mode: str, codex_sandbox: str, codex_bin: str,
     user_model: str, generation_model: str, judge_model: str,
 ) -> None:
-    """Persist runtime choices to the inline agent and any materialized host file."""
+    """Persist runtime choices to the inline agent and any materialized host file.
+
+    An agent config that declares its own non-codex runtime is left alone: those
+    settings are the agent under test, not wizard defaults to be overwritten.
+    """
+    existing = dict((spec.agent or {}).get("runtime") or {})
+    if existing and str(existing.get("backend") or "") not in ("", "codex"):
+        spec.generation = {
+            **(spec.generation or {}),
+            "backend": str(existing["backend"]),
+            "model": generation_model or str(existing.get("model") or ""),
+        }
+        spec.test = {
+            **(spec.test or {}), "user_model": user_model, "judge_model": judge_model,
+        }
+        return
+
     runner = dict((spec.agent or {}).get("runner") or {})
     if not runner:
         runner = build_codex_aut_runner(spec)

@@ -77,6 +77,17 @@ class AutoUploadTest(unittest.TestCase):
         self.assertEqual(len(uploads), 1)
         self.assertEqual(uploads[0]["source"], str(pkg.resolve()))
 
+    def test_a_standalone_script_does_not_climb_into_an_enclosing_repo(self) -> None:
+        """Otherwise an example inside a monorepo uploads the whole repository."""
+        repo = self.tmp / "monorepo"
+        (repo / "examples" / "demo").mkdir(parents=True)
+        (repo / "pyproject.toml").write_text("", encoding="utf-8")
+        script = repo / "examples" / "demo" / "server.js"
+        script.write_text("// mcp", encoding="utf-8")
+
+        uploads = auto_uploads_for_command(["node", str(script)], [])
+        self.assertEqual(uploads[0]["source"], str((repo / "examples" / "demo").resolve()))
+
     def test_interpreter_paths_are_never_uploaded(self) -> None:
         """A venv interpreter would otherwise drag in the whole enclosing repo."""
         venv_bin = self.tmp / "repo" / ".venv" / "bin"

@@ -238,15 +238,22 @@ class OpenShellSandbox:
         return path
 
     def ssh_command(
-        self, command: list[str], *, env: dict[str, str], workdir: str = ""
+        self, command: list[str], *, env: dict[str, str], workdir: str = "",
+        base_env: "dict[str, str] | None" = None,
     ) -> list[str]:
-        """Build an `ssh` invocation that runs ``command`` inside this sandbox."""
+        """Build an `ssh` invocation that runs ``command`` inside this sandbox.
+
+        ``env`` is caller-supplied and filtered through the allowlist, so host
+        secrets cannot leak in by accident. ``base_env`` is Ghostlab's own
+        runtime wiring (data dirs and the like) and is applied verbatim — the
+        allowlist exists to gate the user's environment, not ours.
+        """
         import shlex
 
         remote = ""
         if workdir:
             remote += f"cd {shlex.quote(workdir)} && "
-        allowed = self.allowed_env(env)
+        allowed = {**dict(base_env or {}), **self.allowed_env(env)}
         if allowed:
             exports = " ".join(
                 f"{key}={shlex.quote(value)}" for key, value in sorted(allowed.items())
@@ -263,6 +270,26 @@ class OpenShellSandbox:
             return ""
         result = self._call([self.binary, "logs", self.name, "--since", "1h"], timeout=30)
         return "\n".join(part for part in (result.stdout.strip(), result.stderr.strip()) if part)
+
+    def upload_file(self, source: Path, destination: str, *, mode: str = "") -> None:
+        """Copy one host file into the sandbox after creation.
+
+        `--upload` at create time is restricted to `/sandbox`, which is the
+        agent's own workspace. Credentials must land somewhere the agent cannot
+        read or rewrite, so they are pushed separately to an absolute path.
+        """
+        source = Path(source).expanduser()
+        if not source.exists():
+            raise SandboxError("sandbox_upload_missing", str(source))
+        self._call(
+            [self.binary, "sandbox", "upload", self.name, str(source), destination],
+            timeout=120, check=True,
+        )
+        if mode:
+            self.exec(
+                ["/bin/sh", "-c", f"chmod {mode} {shlex_quote(destination)}"],
+                input_text=None, env={}, timeout=30,
+            )
 
     def download(self, source: str, destination: Path) -> None:
         """Copy one sandbox artifact back to the host workspace."""
@@ -312,9 +339,11 @@ PROJECT_MARKERS = (
     "package.json", "node_modules", "pyproject.toml", "requirements.txt",
     "setup.py", ".venv", "venv", "go.mod", "Cargo.toml", "deno.json",
 )
-# How far to walk up looking for a marker. Deep enough for `build/index.js` or
-# `src/server/main.py`, shallow enough never to reach a home directory.
-_MARKER_SEARCH_DEPTH = 4
+# How far to walk up looking for a marker. Two levels covers the real layouts
+# (`build/index.js`, `dist/server.js`, `src/main.py`) while keeping a standalone
+# script from climbing out of its own directory into an enclosing monorepo —
+# which would upload that whole repository instead of the server.
+_MARKER_SEARCH_DEPTH = 2
 
 
 def program_root(path: Path) -> Path:
