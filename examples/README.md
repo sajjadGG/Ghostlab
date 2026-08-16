@@ -10,8 +10,16 @@ work with zero setup.
 | `target.json` | Native Ghostlab target (`id` + `transport` + `connection`) | `ghostlab inspect`, `ghostlab run` |
 | `scenario.json` | A dual-agent scenario (persona, goal, success/failure criteria) | `ghostlab run` |
 | `mcp-config.json` | Standard `mcpServers` client config | `ghostlab create`, `ghostlab inspect` |
+| `agent.json` | Composed agent (runner + skill + OpenShell policy) | `ghostlab create --agent` |
 
 ## Try it
+
+Real runner examples use OpenShell by default. Verify it before starting:
+
+```bash
+openshell status
+ghostlab doctor
+```
 
 Introspect the target with no auth (writes `inspect.json` + `inspect.md`):
 
@@ -19,8 +27,9 @@ Introspect the target with no auth (writes `inspect.json` + `inspect.md`):
 ghostlab inspect --target examples/target.json
 ```
 
-Run the mock dual-agent scenario end to end — no coding-agent credits, no
-network to the target (the mock runners don't call it):
+Run the mock dual-agent scenario end to end—no coding-agent credits and no
+network to the target. Mock runners are in-process fixtures, so this particular
+example does not create an OpenShell sandbox:
 
 ```bash
 ghostlab run \
@@ -34,6 +43,21 @@ Scaffold a job straight from a standard `mcpServers` config:
 
 ```bash
 ghostlab create --target examples/mcp-config.json
+```
+
+Scaffold an agent-centric evaluation:
+
+```bash
+ghostlab create --name concise-helper --agent examples/agent.json --yes
+```
+
+`agent.json` attaches an OpenShell provider named `openai`. Confirm it exists
+with `openshell provider list`, or edit the example to use a provider already
+configured on your gateway. For a trusted local-only trial, opt out explicitly:
+
+```bash
+ghostlab create --name concise-helper --agent examples/agent.json \
+  --sandbox local --yes
 ```
 
 ## Adding auth

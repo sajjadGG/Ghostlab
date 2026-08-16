@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from rehearsal.cli import _HANDLERS, build_parser, main
+from rehearsal.cli import _HANDLERS, _create_summary, build_parser, main
 from rehearsal.codex_backend import CodexError
 from rehearsal.spec import load_spec
 
@@ -83,7 +84,8 @@ class CliSpecFlowTest(unittest.TestCase):
         self.assertEqual(spec.capabilities, {})
 
         code = main(
-            ["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)]
+            ["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+             "--sandbox", "local"]
         )
         self.assertEqual(code, 0)
         spec = load_spec(self.spec_path)
@@ -105,29 +107,29 @@ class CliSpecFlowTest(unittest.TestCase):
     def test_create_then_discover_by_job_name(self, _bin_mock) -> None:
         import os
 
-        # Codex is deliberately unavailable here: `create --yes` now runs the
-        # whole discover -> configure-host -> plan -> test -> review wizard
-        # (not just discover), and every codex-backed step must degrade to a
-        # skip instead of crashing the wizard — this was a real regression
-        # (codex._bin() raised outside its try/except in _get_generated_cases).
+        # Codex is deliberately unavailable here. The job and diagnostic plan
+        # are still written, but create must fail rather than claiming that a
+        # semantic evaluation completed when all conversational cases are inert.
         jobs_root = self.tmp / "jobs"
         with patch.dict(os.environ, {"GHOSTLAB_JOBS_DIR": str(jobs_root)}):
             code = main(
-                ["create", "--name", "Notes Eval", "--target", str(self.target_path), "--yes"]
+                ["create", "--name", "Notes Eval", "--target", str(self.target_path),
+                 "--sandbox", "local", "--yes"]
             )
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 1)
             spec_path = jobs_root / "notes-eval" / "job.yaml"
             self.assertTrue(spec_path.is_file())
             self.assertTrue((jobs_root / "notes-eval" / "workspace").is_dir())
             self.assertTrue((jobs_root / "notes-eval" / "runs").is_dir())
-            # The wizard reached plan + test + review despite no codex.
+            # Planning leaves useful diagnostics, but testing never reports a
+            # false successful run.
             self.assertTrue((jobs_root / "notes-eval" / "test-plan.yaml").is_file())
-            self.assertTrue(
+            self.assertFalse(
                 list((jobs_root / "notes-eval" / "workspace").glob("test/*/results.json"))
             )
 
             # Resolve the whole loop by job name; artifacts + db land in the job.
-            code = main(["discover", "--job", "notes-eval"])
+            code = main(["discover", "--job", "notes-eval", "--sandbox", "local"])
             self.assertEqual(code, 0)
 
         spec = load_spec(spec_path)
@@ -136,6 +138,30 @@ class CliSpecFlowTest(unittest.TestCase):
         workspace = jobs_root / "notes-eval" / "workspace"
         self.assertTrue(list(workspace.glob("discover/*/contract.json")))
         self.assertTrue((workspace / "ghostlab.sqlite3").exists())
+
+    def test_interactive_create_guides_configuration_and_previews_job(self) -> None:
+        import os
+
+        jobs_root = self.tmp / "guided-jobs"
+        answers = [
+            "Guided Eval", "mcp", str(self.target_path), "local",
+            "", "process", "600", "never", "read-only", "", "", "",
+            "3", "2", "0.85", "y",
+        ]
+        with (
+            patch.dict(os.environ, {"GHOSTLAB_JOBS_DIR": str(jobs_root)}),
+            patch("builtins.input", side_effect=answers),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            code = main(["create", "--no-discover"])
+        self.assertEqual(code, 0)
+        rendered = output.getvalue()
+        self.assertIn("Configuration preview", rendered)
+        self.assertIn("[1/5] Create job", rendered)
+        spec = load_spec(jobs_root / "guided-eval" / "job.yaml")
+        self.assertEqual(spec.sandbox["backend"], "local")
+        self.assertEqual(spec.generation["personas"], 3)
+        self.assertEqual(spec.review["gates"]["min_pass_rate"], 0.85)
 
     @patch(
         "rehearsal.codex_backend.CodexBackend._bin",
@@ -152,9 +178,11 @@ class CliSpecFlowTest(unittest.TestCase):
         )
         jobs_root = self.tmp / "jobs"
         with patch.dict("os.environ", {"GHOSTLAB_JOBS_DIR": str(jobs_root)}):
-            # default: create auto-inspects the target, populating capabilities
-            code = main(["create", "--name", "with-disc", "--target", str(mcp_json), "--yes"])
-            self.assertEqual(code, 0)
+            # Discovery still populates capabilities, but the full command is
+            # non-zero because no real semantic plan can be generated.
+            code = main(["create", "--name", "with-disc", "--target", str(mcp_json),
+                         "--sandbox", "local", "--yes"])
+            self.assertEqual(code, 1)
             spec = load_spec(jobs_root / "with-disc" / "job.yaml")
             self.assertEqual(
                 {t["name"] for t in spec.capabilities["tools"]}, {"notes_list", "notes_delete"}
@@ -222,6 +250,7 @@ class CliSpecFlowTest(unittest.TestCase):
                 "--spec", str(self.spec_path),
                 "--sample", "safe",
                 "--db", str(self.db_path),
+                "--sandbox", "local",
             ]
         )
         self.assertEqual(code, 0)
@@ -253,12 +282,14 @@ class CliSpecFlowTest(unittest.TestCase):
              "timeout_seconds": 0.3, "interval_seconds": 0.05}
         ]
         save_spec(spec, self.spec_path)
-        code = main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        code = main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+                     "--sandbox", "local"])
         self.assertEqual(code, 1)
 
     def test_plan_after_discover_and_curation(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
-        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+              "--sandbox", "local"])
 
         code = main(["plan", "--spec", str(self.spec_path), "--no-generate"])
         self.assertEqual(code, 0)
@@ -290,7 +321,8 @@ class CliSpecFlowTest(unittest.TestCase):
 
     def test_full_pipeline_through_test_command(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
-        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+              "--sandbox", "local"])
         main(["plan", "--spec", str(self.spec_path), "--no-generate"])
 
         # edge: notes_delete with {} -> fake server answers isError -> graceful pass.
@@ -300,6 +332,9 @@ class CliSpecFlowTest(unittest.TestCase):
                 "test",
                 "--spec", str(self.spec_path),
                 "--suite", "edge", "--suite", "semantic",
+                # --sandbox is a per-invocation override, not a job setting, so
+                # it has to be repeated here (as the docs show).
+                "--sandbox", "local",
             ]
         )
         self.assertEqual(code, 0)
@@ -316,6 +351,14 @@ class CliSpecFlowTest(unittest.TestCase):
         self.assertEqual(results["pass_rate"], 1.0)
         self.assertIn("fingerprint", results)
 
+        # A skipped placeholder is not a semantic execution when the stricter
+        # contract is requested.
+        code = main([
+            "test", "--spec", str(self.spec_path), "--suite", "semantic",
+            "--require-semantic", "--sandbox", "local",
+        ])
+        self.assertEqual(code, 1)
+
         # Strict mode passes here (100% >= 0.9 gate from the starter spec).
         code = main(
             [
@@ -323,15 +366,47 @@ class CliSpecFlowTest(unittest.TestCase):
                 "--spec", str(self.spec_path),
                 "--suite", "edge",
                 "--strict",
+                "--sandbox", "local",
             ]
         )
         self.assertEqual(code, 0)
 
+    def test_require_semantic_accepts_a_real_conversation_trace(self) -> None:
+        from rehearsal.jobs import create_job, default_agent_job_spec
+
+        agent = {
+            "id": "semantic-agent",
+            "instructions": "Reply to the user.",
+            "runner": {"kind": "mock"},
+            "inputs": {"mcps": [], "skills": []},
+            "tests": [{
+                "id": "hello", "goal": "Complete a short conversation",
+                "opening_message": "Hello", "max_turns": 4,
+                "success_criteria": ["The assistant replies"],
+            }],
+        }
+        spec = default_agent_job_spec("Semantic Agent", agent=agent)
+        spec.sandbox["backend"] = "local"
+        spec_path = create_job("Semantic Agent", spec, jobs_root=self.tmp / "jobs")
+        code = main([
+            "test", "--spec", str(spec_path), "--user-runner",
+            str((Path(__file__).parents[1] / "runners" / "mock-user.json").resolve()),
+            "--no-judge", "--require-semantic",
+        ])
+        self.assertEqual(code, 0)
+        results_path = max((spec_path.parent / "workspace" / "test").glob("*/results.json"))
+        results = json.loads(results_path.read_text(encoding="utf-8"))
+        semantic = next(entry for entry in results["results"] if entry["suite"] == "semantic")
+        self.assertEqual(semantic["status"], "pass")
+        self.assertTrue(semantic["artifacts"]["run_dir"])
+
     def test_review_after_full_pipeline(self) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
-        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+              "--sandbox", "local"])
         main(["plan", "--spec", str(self.spec_path), "--no-generate"])
-        main(["test", "--spec", str(self.spec_path), "--suite", "edge"])
+        main(["test", "--spec", str(self.spec_path), "--suite", "edge",
+              "--sandbox", "local"])
 
         code = main(["review", "--spec", str(self.spec_path)])
         self.assertEqual(code, 0)
@@ -360,7 +435,8 @@ class CliSpecFlowTest(unittest.TestCase):
         self, _bin_mock, profile_mock, dataset_mock
     ) -> None:
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
-        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+              "--sandbox", "local"])
 
         profile_mock.return_value = {"mcp": "fake-notes@0.0.1"}
         dataset_mock.return_value = {
@@ -386,6 +462,9 @@ class CliSpecFlowTest(unittest.TestCase):
 
         code = main(["plan", "--spec", str(self.spec_path)])  # --generate is the default
         self.assertEqual(code, 0)
+        self.assertEqual(
+            main(["plan", "--spec", str(self.spec_path), "--require-semantic"]), 0
+        )
         dataset_mock.assert_called_once()
         self.assertEqual(dataset_mock.call_args.kwargs["n_personas"], 2)
         self.assertEqual(dataset_mock.call_args.kwargs["scenarios_per_persona"], 2)
@@ -422,10 +501,14 @@ class CliSpecFlowTest(unittest.TestCase):
         # `plan` (and therefore `create`, which now calls `plan`) instead of
         # falling back to the deterministic-only plan.
         main(["init", "--target", str(self.target_path), "--out", str(self.spec_path)])
-        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path)])
+        main(["discover", "--spec", str(self.spec_path), "--db", str(self.db_path),
+              "--sandbox", "local"])
 
         code = main(["plan", "--spec", str(self.spec_path)])  # --generate is the default
         self.assertEqual(code, 0)
+        self.assertEqual(
+            main(["plan", "--spec", str(self.spec_path), "--require-semantic"]), 1
+        )
 
         from rehearsal.plan import load_test_plan
 
@@ -465,6 +548,60 @@ class HandlerRegistryTest(unittest.TestCase):
         self.assertEqual(len(subparser_actions), 1)
         declared = set(subparser_actions[0].choices)
         self.assertEqual(declared, set(_HANDLERS))
+
+    def test_execution_commands_default_to_openshell_with_local_opt_out(self) -> None:
+        parser = build_parser()
+        run_dataset = parser.parse_args([
+            "run-dataset", "--dataset", "dataset", "--target", "target.json",
+        ])
+        self.assertEqual(run_dataset.sandbox, "openshell")
+        local = parser.parse_args([
+            "run-dataset", "--dataset", "dataset", "--target", "target.json",
+            "--sandbox", "local", "--provider", "openai",
+        ])
+        self.assertEqual(local.sandbox, "local")
+        self.assertEqual(local.provider, ["openai"])
+
+    def test_create_accepts_sandbox_configuration_flags(self) -> None:
+        args = build_parser().parse_args([
+            "create", "--name", "agent", "--agent", "agent.yaml",
+            "--provider", "openai", "--provider", "github", "--image", "base",
+            "--no-discover", "--yes",
+        ])
+        self.assertEqual(args.provider, ["openai", "github"])
+        self.assertEqual(args.image, "base")
+
+    def test_create_accepts_explicit_runtime_and_model_configuration(self) -> None:
+        args = build_parser().parse_args([
+            "create", "--name", "agent", "--agent", "agent.yaml",
+            "--model", "gpt-aut", "--user-model", "gpt-user",
+            "--generation-model", "gpt-generate", "--judge-model", "gpt-judge",
+            "--runner-kind", "codex-session", "--runner-timeout", "900",
+            "--approval-mode", "on-request", "--codex-sandbox", "workspace-write",
+            "--codex-bin", "/opt/codex", "--no-discover", "--yes",
+        ])
+        self.assertEqual(args.model, "gpt-aut")
+        self.assertEqual(args.user_model, "gpt-user")
+        self.assertEqual(args.generation_model, "gpt-generate")
+        self.assertEqual(args.judge_model, "gpt-judge")
+        self.assertEqual(args.runner_kind, "codex-session")
+        self.assertEqual(args.runner_timeout, 900)
+
+    def test_create_summary_exposes_resolved_configuration(self) -> None:
+        from rehearsal.config import TargetConfig
+        from rehearsal.jobs import default_job_spec
+
+        spec = default_job_spec(
+            "Notes", target=TargetConfig(
+                id="notes", transport="streamable-http", connection={"url": "https://example.test/mcp"},
+            ),
+            generation={"personas": 3, "scenarios_per_persona": 2},
+        )
+        spec.sandbox["providers"] = ["openai"]
+        summary = dict(_create_summary(spec))
+        self.assertEqual(summary["subject"], "mcp · notes")
+        self.assertEqual(summary["providers"], "openai")
+        self.assertEqual(summary["generation"], "3 personas × 2 scenarios")
 
 
 if __name__ == "__main__":

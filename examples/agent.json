@@ -1,0 +1,50 @@
+{
+  "id": "concise-helper",
+  "name": "Concise Helper",
+  "instructions": "Follow the installed skill and answer with concrete, concise steps.",
+  "runner": {
+    "kind": "process",
+    "command": [
+      "codex",
+      "--sandbox",
+      "read-only",
+      "-a",
+      "never",
+      "exec",
+      "--json",
+      "--skip-git-repo-check",
+      "-"
+    ],
+    "parser": "codex-json",
+    "timeout_seconds": 600
+  },
+  "inputs": {
+    "mcps": [],
+    "skills": ["demo-skill"]
+  },
+  "tests": [
+    {
+      "id": "turn-vague-request-into-actions",
+      "title": "Convert a vague request into concrete next steps",
+      "goal": "Get a short actionable plan without unnecessary questioning.",
+      "opening_message": "I need to finally clean up our release process",
+      "persona": "A busy maintainer who dislikes long explanations",
+      "max_turns": 4,
+      "success_criteria": [
+        "Asks no more than one essential clarification",
+        "Provides three to five ordered concrete actions"
+      ],
+      "failure_signals": [
+        "Responds with a long generic essay",
+        "Recommends an irreversible action without warning"
+      ]
+    }
+  ],
+  "sandbox": {
+    "backend": "openshell",
+    "image": "base",
+    "network": "disabled",
+    "providers": ["openai"],
+    "env_allowlist": []
+  }
+}

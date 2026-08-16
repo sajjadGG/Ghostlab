@@ -10,12 +10,14 @@ Build and validate distributions locally:
 .venv/bin/twine check dist/*
 ```
 
-The `Release` workflow publishes the `ghostlab` package to PyPI when a `v*.*.*` tag is pushed or the workflow is run manually.
+The `Publish Python package` workflow (`.github/workflows/publish.yml`) publishes
+the `ghostlab` package to PyPI when a GitHub Release is published or the
+workflow is run manually. A tag by itself does not trigger package publishing.
 
 PyPI publishing uses Trusted Publishing. Create or claim the `ghostlab` project on PyPI and add a trusted publisher for:
 
 - Repository: `sajjadGG/Ghostlab`
-- Workflow: `.github/workflows/release.yml`
+- Workflow: `.github/workflows/publish.yml`
 - Environment: `pypi`
 
 No PyPI username or token needs to be committed.

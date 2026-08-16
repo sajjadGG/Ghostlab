@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ghostlab"
 dynamic = ["version"]
-description = "Local end-to-end testing lab for any MCP server: coding agents role-play real users, drive your tools over multiple turns, score runs, and render/interact with MCP Apps ui:// widgets."
+description = "OpenShell-first end-to-end evaluation lab for configured AI agents, MCP servers, skills, and MCP Apps."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -42,7 +42,10 @@ classifiers = [
   "Topic :: Software Development :: Quality Assurance",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = []
+dependencies = [
+  "questionary>=2.1,<3",
+  "rich>=14,<16",
+]
 
 [project.optional-dependencies]
 dev = [

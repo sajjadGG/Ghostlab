@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 from .codex_backend import CodexError, resolve_codex_bin
-from .config import RunnerConfig, TargetConfig
+from .config import RunnerConfig, TargetConfig, expand_env
 
 
 def _codex_bin(override: str = "") -> str:
@@ -96,6 +96,127 @@ def codex_user_runner(timeout_seconds: int = 600, codex_bin: str = "", model: st
     )
 
 
+def _opencode_bin(override: str = "") -> str:
+    """Resolve the opencode executable, falling back to bare 'opencode' on PATH."""
+    from .opencode_backend import OpencodeError, resolve_opencode_bin
+
+    if override:
+        return override
+    try:
+        return resolve_opencode_bin()
+    except OpencodeError:
+        return "opencode"
+
+
+def opencode_project_config(target: TargetConfig | None) -> dict[str, object]:
+    """Build the `opencode.json` a runner session uses.
+
+    The AUT gets exactly one MCP — the target — and nothing else. Built-in
+    side-effecting tools are denied so a browsing/filesystem agent cannot reach
+    around the MCP under evaluation and satisfy the user some other way, which
+    would silently invalidate the result.
+    """
+    config: dict[str, object] = {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {"bash": "deny", "edit": "deny", "webfetch": "deny"},
+    }
+    if target is None:
+        return config
+
+    conn = expand_env(target.connection)
+    if target.transport == "stdio":
+        command = conn.get("command", "")
+        entry: dict[str, object] = {
+            "type": "local",
+            "command": ([command] if isinstance(command, str) else list(command))
+            + [str(part) for part in conn.get("args", [])],
+            "enabled": True,
+        }
+        if conn.get("env"):
+            entry["environment"] = {
+                str(k): str(v) for k, v in dict(conn["env"]).items()
+            }
+    elif target.transport in ("sse", "streamable-http", "http"):
+        entry = {"type": "remote", "url": conn.get("url", ""), "enabled": True}
+        if conn.get("headers"):
+            entry["headers"] = {
+                str(k): str(v) for k, v in dict(conn["headers"]).items()
+            }
+    else:
+        raise ValueError(f"Unsupported transport for opencode runner: {target.transport}")
+
+    config["mcp"] = {target.id: entry}
+    return config
+
+
+def write_opencode_project(
+    directory: Path, target: TargetConfig | None
+) -> Path:
+    """Materialize an opencode project dir whose config wires up the target MCP."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "opencode.json"
+    path.write_text(
+        json.dumps(opencode_project_config(target), indent=2) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def _opencode_command(
+    bin_path: str, model: str, project_dir: Path
+) -> list[str]:
+    from .opencode_backend import DEFAULT_OPENCODE_MODEL
+
+    # Always pin a model. Falling through to opencode's own default silently
+    # picks whatever that install is configured for, which may not be available
+    # on the user's provider — and the failure only shows up mid-conversation.
+    command = [
+        _opencode_bin(bin_path), "run", "--format", "json", "--log-level", "ERROR",
+        "--model", model or DEFAULT_OPENCODE_MODEL,
+    ]
+    return command + ["--dir", str(project_dir)]
+
+
+def opencode_aut_runner(
+    target: TargetConfig,
+    project_dir: Path,
+    *,
+    timeout_seconds: int = 600,
+    opencode_bin: str = "",
+    model: str = "",
+) -> RunnerConfig:
+    """AUT runner: opencode with the target MCP wired in, JSON output for capture."""
+    write_opencode_project(project_dir, target)
+    return RunnerConfig(
+        kind="process",
+        command=_opencode_command(opencode_bin, model, project_dir),
+        timeout_seconds=timeout_seconds,
+        prompt_mode="stdin",
+        parser="opencode-json",
+    )
+
+
+def opencode_user_runner(
+    project_dir: Path,
+    *,
+    timeout_seconds: int = 600,
+    opencode_bin: str = "",
+    model: str = "",
+) -> RunnerConfig:
+    """User-emulator runner: opencode with no MCP at all, plain-text output.
+
+    The emulated human must never share the agent-under-test's MCP config — that
+    would collapse the dual-agent premise into one agent talking to itself.
+    """
+    write_opencode_project(project_dir, None)
+    return RunnerConfig(
+        kind="process",
+        command=_opencode_command(opencode_bin, model, project_dir),
+        timeout_seconds=timeout_seconds,
+        prompt_mode="stdin",
+        parser="opencode-text",
+    )
+
+
 def mock_runner() -> RunnerConfig:
     return RunnerConfig(kind="mock")
 
@@ -108,6 +229,7 @@ def write_runner_config(config: RunnerConfig, path: Path) -> Path:
         "timeout_seconds": config.timeout_seconds,
         "prompt_mode": config.prompt_mode,
         "parser": config.parser,
+        "sandbox": config.sandbox,
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path

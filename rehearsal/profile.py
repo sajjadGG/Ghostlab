@@ -85,16 +85,17 @@ def state_surfaces(tools: list[dict[str, Any]]) -> dict[str, list[str]]:
 def _digest(inspect: dict[str, Any]) -> str:
     """Compact, token-cheap description of the MCP for the codex prompt."""
     server = inspect.get("server_info", {})
-    is_skill = inspect.get("transport") == "skill"
+    target_type = inspect.get("transport", "mcp")
+    is_capability = target_type in ("skill", "agent")
     lines = [
-        (f"Skill: {server.get('name', '?')}" if is_skill else
+        (f"{target_type.title()}: {server.get('name', '?')}" if is_capability else
          f"MCP server: {server.get('name', '?')}@{server.get('version', '?')}")
     ]
     instructions = (inspect.get("instructions") or "").strip()
     if instructions:
         lines.append(
-            f"{'Skill' if is_skill else 'Server'} instructions: "
-            f"{_one_line(instructions, 6000 if is_skill else 400)}"
+            f"{target_type.title() if is_capability else 'Server'} instructions: "
+            f"{_one_line(instructions, 6000 if is_capability else 400)}"
         )
     lines.append("")
     lines.append("Tools (name | read-only? | one-line description):")
@@ -164,8 +165,8 @@ def build_capability_profile(inspect: dict[str, Any], backend: CodexBackend) -> 
 
     return {
         "mcp": f"{server.get('name', '?')}@{server.get('version', '?')}",
-        "target_type": "skill" if inspect.get("transport") == "skill" else "mcp",
-        "instructions": inspect.get("instructions", "") if inspect.get("transport") == "skill" else "",
+        "target_type": inspect.get("transport") if inspect.get("transport") in ("skill", "agent") else "mcp",
+        "instructions": inspect.get("instructions", "") if inspect.get("transport") in ("skill", "agent") else "",
         "domain_summary": generated.get("domain_summary", ""),
         "taxonomy": tax,
         "categories": generated.get("categories", []),

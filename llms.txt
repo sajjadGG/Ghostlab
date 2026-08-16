@@ -1,15 +1,16 @@
 # Ghostlab
 
-> A local, end-to-end testing lab for any Model Context Protocol (MCP) server.
-> Coding agents (Codex / Claude) role-play real users and drive a target MCP's
-> tools over multiple turns; the harness understands the server, generates
-> persona × scenario datasets, runs a dual-agent loop, scores outcomes, compares
-> runs for regressions, and can render and interact with MCP Apps `ui://` widgets
-> in a headless browser.
+> An OpenShell-first, end-to-end testing lab for configured AI agents.
+> An evaluated agent can combine a runner, instructions, MCP servers, skills,
+> workspace files, and assets. Coding agents role-play real users over multiple
+> turns; Ghostlab captures traces, scores outcomes, compares regressions, and can
+> render and interact with MCP Apps `ui://` widgets.
 
 The Python package is `rehearsal`; the installed CLI is `ghostlab` (alias
-`rehearsal`). It uses the stdlib for MCP transport (stdio / streamable-HTTP+SSE)
-and shells out to coding-agent CLIs as the agent backends. Pipeline:
+`rehearsal`). It uses the stdlib for MCP transport (stdio / streamable-HTTP+SSE),
+shells out to coding-agent CLIs, and runs agent sessions and local stdio MCPs in
+NVIDIA OpenShell by default. `--sandbox local` is the explicit unsandboxed
+compatibility opt-out; there is no automatic fallback. Pipeline:
 **understand → generate → run → evaluate**, with optional SQLite persistence, a
 Streamlit UI, and an MCP Apps render layer.
 
@@ -22,6 +23,8 @@ Streamlit UI, and an MCP Apps render layer.
 ## Architecture (key modules under `rehearsal/`)
 
 - [cli.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/cli.py): argparse entry point; one `cmd_*` per pipeline command.
+- [agents.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/agents.py): load and normalize composed agent definitions, including MCPs, skills, workspace, assets, and inline tests.
+- [sandbox.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/sandbox.py): NVIDIA OpenShell lifecycle, upload/env policy, execution, logs, artifact download, and cleanup.
 - [mcp_client.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/mcp_client.py): minimal stdlib MCP client (stdio + streamable-HTTP/SSE), `tools/list`, `resources/read`, `tools/call`.
 - [inspect.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/inspect.py) + [profile.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/profile.py): understand a target MCP and build a capability profile.
 - [generate.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/generate.py), [personas.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/personas.py), [dataset.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/dataset.py): scenario / persona / dataset generation (codex-backed).
@@ -33,18 +36,26 @@ Streamlit UI, and an MCP Apps render layer.
 
 ## Commands (the `ghostlab` CLI)
 
+- `create`: build an agent-, MCP-, or skill-evaluation job; OpenShell is the default sandbox.
+- `config`: print the exact resolved runner command, four model roles, composed inputs, and OpenShell settings (`--json` for automation).
+- `discover` / `plan` / `test` / `review`: run the job pipeline and release gate.
 - `inspect`: connect to a target MCP and capture tools/resources/prompts (+ lint).
 - `profile`: turn an `inspect.json` into a capability profile.
 - `generate-scenarios` / `generate-personas` / `generate-dataset`: build persona × scenario test data.
 - `review-dataset`: coverage, flags, and per-case approve/reject.
-- `run` / `run-dataset`: run the dual-agent E2E loop, one scenario or a whole dataset.
+- `run` / `run-dataset`: run the dual-agent E2E loop, one scenario or a whole dataset; both default real runners to OpenShell.
 - `evaluate` / `compare`: score a run and diff two runs for regressions.
 - `apps-probe` / `apps-render`: probe and render MCP Apps `ui://` widgets.
 - `db` / `ui`: SQLite history and the Streamlit pipeline UI.
 
+The complete `create` pipeline requires at least one real semantic/security
+conversation. Placeholder-only plans and all-skipped semantic runs return
+non-zero. Standalone callers can enforce the same contract with
+`plan --require-semantic` and `test --require-semantic`.
+
 ## Examples (config you can copy)
 
-- [examples/](https://github.com/sajjadGG/Ghostlab/tree/main/examples): ready-to-run sample target, scenario, and mcpServers configs.
+- [examples/](https://github.com/sajjadGG/Ghostlab/tree/main/examples): ready-to-run agent, skill, target, scenario, and `mcpServers` configs.
 - [runners/](https://github.com/sajjadGG/Ghostlab/tree/main/runners): agent-runner presets (Codex process / session).
 - [specs/](https://github.com/sajjadGG/Ghostlab/tree/main/specs): end-to-end design specs (vanilla MCP + MCP Apps).
 

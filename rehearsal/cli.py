@@ -18,6 +18,44 @@ from .types import utc_now
 _HANDLERS: "dict[str, object]" = {}
 
 
+# Agent CLIs echo the prompt back on failure, so a raw backend error can be
+# thousands of lines of our own text with the real cause buried at the end.
+_BACKEND_ERROR_SIGNALS = (
+    "error", "failed", "not found", "unauthorized", "forbidden", "quota",
+    "rate limit", "usage limit", "timed out", "unsupported", "invalid",
+    "requires a newer version", "not supported",
+)
+
+
+def _backend_error_summary(exc: Exception, max_lines: int = 3) -> str:
+    """Condense an LLM-backend failure to the lines that actually explain it."""
+    text = str(exc)
+    headline = text.split("\n", 1)[0].strip()
+    interesting = [
+        " ".join(line.split())
+        for line in text.splitlines()
+        if any(signal in line.lower() for signal in _BACKEND_ERROR_SIGNALS)
+    ]
+    # Keep the tail: agent CLIs print the real diagnosis last.
+    picked = [line for line in interesting[-max_lines:] if line and line != headline]
+    summary = "; ".join([headline, *picked]) if headline else "; ".join(picked)
+    return (summary or text.strip() or "unknown backend error")[:600]
+
+
+def _add_llm_backend_arg(parser: argparse.ArgumentParser) -> None:
+    """Choose which agent CLI performs generation/judging for this command."""
+    parser.add_argument(
+        "--llm-backend",
+        choices=["codex", "opencode"],
+        default="",
+        help="LLM CLI used for generation/judging. 'opencode' sources models "
+             "from GitHub Copilot and other providers you have authenticated "
+             "(pick one with --model, e.g. github-copilot/claude-sonnet-4.5). "
+             "Default: the job's generation.backend, else $GHOSTLAB_LLM_BACKEND, "
+             "else codex.",
+    )
+
+
 def _add_db_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--db",
@@ -102,7 +140,7 @@ def _open_store(args: argparse.Namespace, workspace=None):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ghostlab", description="Ghostlab — MCP testing lab.")
+    parser = argparse.ArgumentParser(prog="ghostlab", description="Ghostlab — agent evaluation lab.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
 
@@ -143,6 +181,10 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument(
         "--skill", type=Path, default=None,
         help="Evaluate a local skill instead of an MCP target; accepts SKILL.md or its directory.",
+    )
+    create_parser.add_argument(
+        "--agent", type=Path, default=None,
+        help="Agent JSON/YAML composing a runner with MCPs, skills, workspace, and assets.",
     )
     _add_server_arg(create_parser)
     create_parser.add_argument(
@@ -187,6 +229,44 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume", action="store_true",
         help="Continue an existing job: reuse discovery/generation artifacts and resume tests.",
     )
+    create_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default=None,
+        help="Agent execution backend (default: openshell; local is explicitly unsandboxed).",
+    )
+    create_parser.add_argument(
+        "--provider", action="append", default=None,
+        help="OpenShell provider to attach to agent sessions (repeatable).",
+    )
+    create_parser.add_argument(
+        "--image", default=None,
+        help="OpenShell sandbox image/community sandbox (default: base).",
+    )
+    create_parser.add_argument("--model", default="", help="Codex model for the agent under test.")
+    create_parser.add_argument("--user-model", default="", help="Codex model for the user emulator.")
+    create_parser.add_argument("--judge-model", default="", help="Codex model for judging test outcomes.")
+    create_parser.add_argument("--generation-model", default="", help="Codex model for persona/scenario generation.")
+    create_parser.add_argument(
+        "--runner-kind", choices=["process", "codex-session"], default=None,
+        help="Agent-under-test runner lifecycle (default: process).",
+    )
+    create_parser.add_argument("--runner-timeout", type=int, default=None, help="AUT turn timeout in seconds (default: 600).")
+    create_parser.add_argument(
+        "--approval-mode", choices=["never", "on-request", "untrusted"], default=None,
+        help="Codex approval mode passed with -a (default: never).",
+    )
+    create_parser.add_argument(
+        "--codex-sandbox",
+        choices=["read-only", "workspace-write", "danger-full-access"], default=None,
+        help="Codex's nested sandbox mode inside OpenShell (default: read-only).",
+    )
+    create_parser.add_argument("--codex-bin", default="", help="Codex executable for the AUT and generation.")
+    _add_llm_backend_arg(create_parser)
+
+    config_parser = sub.add_parser(
+        "config", help="Show the fully resolved agent, model, runner, and sandbox configuration."
+    )
+    _add_job_args(config_parser)
+    config_parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
     discover_parser = sub.add_parser(
         "discover",
@@ -221,6 +301,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict", action="store_true",
         help="Exit non-zero when the spec's review gates fail (e.g. schema errors).",
     )
+    discover_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default=None,
+        help="Override local stdio target execution backend (default: openshell).",
+    )
     _add_db_arg(discover_parser)
 
     plan_parser = sub.add_parser(
@@ -252,6 +336,10 @@ def build_parser() -> argparse.ArgumentParser:
              "(each persona and scenario is a codex call).",
     )
     plan_parser.add_argument(
+        "--require-semantic", action="store_true",
+        help="Fail when no runnable semantic/security scenario is available.",
+    )
+    plan_parser.add_argument(
         "--personas", type=int, default=None, help="Number of personas to generate (default: 2)."
     )
     plan_parser.add_argument(
@@ -261,6 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
+    _add_llm_backend_arg(plan_parser)
     plan_parser.add_argument("--model", default="", help="Model override for codex.")
 
     test_parser = sub.add_parser(
@@ -274,6 +363,10 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--suite", action="append", default=None,
         help="Only run these suite(s) (repeatable, e.g. --suite smoke --suite edge).",
+    )
+    test_parser.add_argument(
+        "--require-semantic", action="store_true",
+        help="Fail unless at least one semantic/security conversation actually runs.",
     )
     test_parser.add_argument(
         "--hosts", default=None,
@@ -313,6 +406,10 @@ def build_parser() -> argparse.ArgumentParser:
              "retrying unfinished or harness-failed cases (requires --repeat 1).",
     )
     test_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default=None,
+        help="Override the job sandbox backend (default from job.yaml: openshell).",
+    )
+    test_parser.add_argument(
         "--profile", choices=["smoke", "nightly", "release"], default=None,
         help="CI preset: smoke = smoke+edge suites; nightly = all suites; "
              "release = all suites, repeat 3, strict gates. Explicit flags override.",
@@ -330,6 +427,7 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary for judging (default: auto-detect)."
     )
+    _add_llm_backend_arg(test_parser)
     test_parser.add_argument("--model", default="", help="Model override for the codex judge.")
 
     review_spec_parser = sub.add_parser(
@@ -356,6 +454,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--aut-runner", type=Path, help="Path to AUT runner JSON config.")
     run_parser.add_argument("--user-runner", type=Path, help="Path to user emulator runner JSON config.")
     run_parser.add_argument("--persona", type=Path, help="Optional persona JSON to drive the user emulator.")
+    run_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default="openshell",
+        help="Runner sandbox backend (default: openshell).",
+    )
     run_parser.add_argument(
         "--job", default=None,
         help="Route output + db into this job's folder (jobs/<name>/runs/) and use its prompt overrides.",
@@ -392,6 +494,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
+    _add_llm_backend_arg(profile_parser)
     profile_parser.add_argument("--model", default="", help="Model override for codex.")
     _add_db_arg(profile_parser)
 
@@ -411,6 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     gen_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
+    _add_llm_backend_arg(gen_parser)
     gen_parser.add_argument("--model", default="", help="Model override for codex.")
 
     persona_parser = sub.add_parser(
@@ -429,6 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
     persona_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
+    _add_llm_backend_arg(persona_parser)
     persona_parser.add_argument("--model", default="", help="Model override for codex.")
 
     dataset_parser = sub.add_parser(
@@ -450,6 +555,7 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
+    _add_llm_backend_arg(dataset_parser)
     dataset_parser.add_argument("--model", default="", help="Model override for codex.")
     _add_db_arg(dataset_parser)
 
@@ -464,6 +570,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_server_arg(rundataset_parser)
     rundataset_parser.add_argument("--aut-runner", type=Path, help="Path to AUT runner JSON config.")
     rundataset_parser.add_argument("--user-runner", type=Path, help="Path to user emulator runner JSON config.")
+    rundataset_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default="openshell",
+        help="Runner sandbox backend (default: openshell).",
+    )
+    rundataset_parser.add_argument(
+        "--provider", action="append", default=None,
+        help="OpenShell provider for runner sessions and optional judge (repeatable).",
+    )
     rundataset_parser.add_argument(
         "--job", default=None,
         help="Route output + db into this job's folder (jobs/<name>/runs/) and use its prompt overrides.",
@@ -486,6 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
     rundataset_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary for evaluation (default: auto-detect)."
     )
+    _add_llm_backend_arg(rundataset_parser)
     rundataset_parser.add_argument("--model", default="", help="Model override for the codex judge.")
     _add_db_arg(rundataset_parser)
 
@@ -506,13 +621,25 @@ def build_parser() -> argparse.ArgumentParser:
     _add_db_arg(review_parser)
 
     doctor_parser = sub.add_parser(
-        "doctor", help="Check codex availability and validate runner presets."
+        "doctor",
+        help="Check the sandbox, LLM backends, and runner presets.",
+    )
+    doctor_parser.add_argument(
+        "--probe", action="store_true",
+        help="Send one tiny live request to each LLM backend to prove it can "
+             "actually answer (catches expired quota and CLI/model mismatches "
+             "that a --version check cannot).",
     )
     doctor_parser.add_argument(
         "--runners", nargs="*", type=Path, default=None, help="Runner JSON configs to validate."
     )
     doctor_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
+    )
+    _add_llm_backend_arg(doctor_parser)
+    doctor_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default="openshell",
+        help="Sandbox runtime to validate (default: openshell).",
     )
 
     eval_parser = sub.add_parser(
@@ -528,6 +655,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
+    _add_llm_backend_arg(eval_parser)
     eval_parser.add_argument("--model", default="", help="Model override for codex.")
     _add_db_arg(eval_parser)
 
@@ -541,6 +669,7 @@ def build_parser() -> argparse.ArgumentParser:
     critique_parser.add_argument(
         "--codex-bin", default="", help="Path to codex binary (default: auto-detect)."
     )
+    _add_llm_backend_arg(critique_parser)
     critique_parser.add_argument("--model", default="", help="Model override for codex.")
 
     compare_parser = sub.add_parser(
@@ -669,6 +798,27 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config(args: argparse.Namespace) -> int:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+
+    from .resolved_config import resolved_job_config
+
+    spec = _job_spec(args)
+    resolved = resolved_job_config(spec, args.spec)
+    payload = json.dumps(resolved, indent=2, ensure_ascii=False)
+    if args.json:
+        print(payload)
+    else:
+        Console().print(Panel(
+            Syntax(payload, "json", word_wrap=True, background_color="default"),
+            title=f"[bold]Resolved configuration · {spec.id}[/bold]",
+            border_style="#7c5cff",
+        ))
+    return 0
+
+
 def _parse_header_lines(lines: list[str]) -> dict[str, str]:
     """Parse `Name: Value` header strings into a dict (malformed ones warned)."""
     headers: dict[str, str] = {}
@@ -691,6 +841,56 @@ def _discover_new_job(slug: str) -> int:
     return cmd_discover(disc_args)
 
 
+def _create_stage(index: int, title: str, detail: str = "") -> None:
+    """Render one stable, grep-friendly stage marker for the create pipeline."""
+    from .cli_ui import render_stage
+
+    render_stage(index, title, detail)
+
+
+def _create_summary(spec, source: str = "") -> list[tuple[str, str]]:
+    """Build the same concise configuration summary used by CLI/UI tests."""
+    from .resolved_config import resolved_job_config
+
+    target = spec.target_config()
+    agent = spec.agent or {}
+    inputs = agent.get("inputs", {}) or {}
+    location = (
+        source or target.connection.get("path") or target.connection.get("url")
+        or target.connection.get("command") or "configured inline"
+    )
+    sandbox = spec.sandbox or {}
+    providers = ", ".join(sandbox.get("providers", []) or []) or "none"
+    runner = agent.get("runner", {}) or {}
+    runner_kind = runner.get("kind") or next(
+        (host.get("kind") for host in spec.hosts if host.get("kind") in ("process", "codex-session")),
+        "auto-configure",
+    )
+    resolved = resolved_job_config(spec, Path("job.yaml"))
+    effective_runner = resolved["agent"]["runner"]
+    models = resolved["models"]
+    return [
+        ("subject", f"{spec.target_type} · {target.id}"),
+        ("source", str(location)),
+        ("composition", f"{len(inputs.get('mcps', []) or [])} MCP · {len(inputs.get('skills', []) or [])} skill"),
+        ("runner", f"{effective_runner['kind'] or runner_kind} · {effective_runner['timeout_seconds']}s · {effective_runner['parser']}"),
+        ("AUT model", str(models["agent_under_test"])),
+        ("user model", str(models["user_emulator"])),
+        ("judge model", str(models["judge"])),
+        ("Codex policy", f"{effective_runner['approval_mode']} · {effective_runner['codex_sandbox']}"),
+        ("sandbox", f"{sandbox.get('backend', 'openshell')} · image {sandbox.get('image', 'base')}"),
+        ("providers", providers),
+        ("generation", f"{(spec.generation or {}).get('personas', 2)} personas × {(spec.generation or {}).get('scenarios_per_persona', 2)} scenarios"),
+        ("pass gate", f"{float((spec.review or {}).get('gates', {}).get('min_pass_rate', 0.9)):.0%}"),
+    ]
+
+
+def _print_create_summary(name: str, spec, source: str = "") -> None:
+    from .cli_ui import render_config_panel
+
+    render_config_panel(name, _create_summary(spec, source))
+
+
 def cmd_create(args: argparse.Namespace) -> int:
     from .config import load_target
     from .jobs import (
@@ -698,22 +898,33 @@ def cmd_create(args: argparse.Namespace) -> int:
     )
 
     interactive = not args.yes
+    from .cli_ui import Prompter
+
+    prompter = Prompter()
 
     def ask(prompt: str, default: str = "") -> str:
         if not interactive:
             return default
-        try:
-            raw = input(prompt).strip()
-        except EOFError:
-            return default
-        return raw or default
+        return prompter.text(prompt.rstrip(": "), default)
 
     def ask_yn(prompt: str, default: bool) -> bool:
-        raw = ask(f"{prompt} [{'Y/n' if default else 'y/N'}] ", "y" if default else "n")
-        return raw.strip().lower() not in ("n", "no")
+        return default if not interactive else prompter.confirm(prompt, default)
 
-    # Only the two things GhostLab can't infer are ever prompted for; everything
-    # else comes from flags or documented defaults (all editable in job.yaml).
+    def ask_choice(prompt: str, choices: dict[str, str], default: str) -> str:
+        if prompter.modern:
+            return prompter.select(prompt.rstrip(": "), list(dict.fromkeys(choices.values())), default)
+        while True:
+            raw = ask(prompt, default).strip().lower()
+            selected = choices.get(raw)
+            if selected:
+                return selected
+            print(f"  choose one of: {', '.join(sorted(set(choices.values())))}")
+
+    if interactive:
+        print(tc.heading("Ghostlab · create an evaluation"))
+        print(tc.muted("Configure once, preview the resolved job, then run the full pipeline."))
+        print()
+
     name = args.name or ask("Job name: ")
     if not name:
         print("A job name is required (pass --name or answer the prompt).")
@@ -721,13 +932,99 @@ def cmd_create(args: argparse.Namespace) -> int:
     if getattr(args, "resume", False):
         return _resume_job_pipeline(args, name, ask_yn)
 
-    if args.skill is not None and args.target:
-        print("Pass either --skill or --target, not both.")
+    selected_targets = sum(bool(value) for value in (args.target, args.skill, args.agent))
+    if selected_targets > 1:
+        print("Pass exactly one of --agent, --skill, or --target.")
+        return 1
+    if selected_targets == 0 and interactive:
+        subject = ask_choice(
+            "Evaluate [agent/mcp/skill] (agent): ",
+            {"agent": "agent", "a": "agent", "mcp": "mcp", "m": "mcp", "skill": "skill", "s": "skill"},
+            "agent",
+        )
+        if subject == "agent":
+            value = ask("Agent config path (JSON/YAML): ")
+            args.agent = Path(value) if value else None
+        elif subject == "skill":
+            value = ask("Skill path (SKILL.md or directory): ")
+            args.skill = Path(value) if value else None
+        else:
+            args.target = ask("MCP URL or config path: ") or None
+
+    if not any((args.target, args.skill, args.agent)):
+        print("An agent, MCP target, or skill is required.")
+        return 1
+
+    if interactive and args.sandbox is None:
+        args.sandbox = ask_choice(
+            "Execution [openshell/local] (openshell): ",
+            {"openshell": "openshell", "o": "openshell", "local": "local", "l": "local"},
+            "openshell",
+        )
+    if interactive and args.sandbox == "openshell":
+        if args.image is None:
+            args.image = ask("OpenShell image", "base")
+        if args.provider is None:
+            providers = ask("OpenShell providers (comma-separated; blank for none)", "")
+            args.provider = [part.strip() for part in providers.split(",") if part.strip()]
+    if interactive:
+        if not args.model:
+            args.model = ask("AUT Codex model (blank uses Codex CLI default)", "")
+        if args.runner_kind is None:
+            args.runner_kind = ask_choice(
+                "Runner lifecycle [process/codex-session] (process): ",
+                {"process": "process", "p": "process", "codex-session": "codex-session", "session": "codex-session", "s": "codex-session"},
+                "process",
+            )
+        if args.runner_timeout is None:
+            try:
+                args.runner_timeout = int(ask("AUT turn timeout seconds", "600"))
+            except ValueError:
+                print("Runner timeout must be an integer.")
+                return 1
+        if args.approval_mode is None:
+            args.approval_mode = ask_choice(
+                "Codex approval mode [never/on-request/untrusted] (never): ",
+                {"never": "never", "n": "never", "on-request": "on-request", "o": "on-request", "untrusted": "untrusted", "u": "untrusted"},
+                "never",
+            )
+        if args.codex_sandbox is None:
+            args.codex_sandbox = ask_choice(
+                "Nested Codex sandbox [read-only/workspace-write/danger-full-access] (read-only): ",
+                {"read-only": "read-only", "r": "read-only", "workspace-write": "workspace-write", "w": "workspace-write", "danger-full-access": "danger-full-access", "d": "danger-full-access"},
+                "read-only",
+            )
+        if not args.user_model:
+            args.user_model = ask("User-emulator model (blank uses AUT/default)", "")
+        if not args.generation_model:
+            args.generation_model = ask("Persona/scenario generation model (blank uses AUT/default)", "")
+        if not args.judge_model:
+            args.judge_model = ask("Judge model (blank uses generation/AUT/default)", "")
+    if interactive and args.personas is None:
+        try:
+            args.personas = max(1, int(ask("Personas (2): ", "2")))
+        except ValueError:
+            print("Personas must be an integer.")
+            return 1
+    if interactive and args.scenarios_per_persona is None:
+        try:
+            args.scenarios_per_persona = max(1, int(ask("Scenarios per persona (2): ", "2")))
+        except ValueError:
+            print("Scenarios per persona must be an integer.")
+            return 1
+    if interactive and args.min_pass_rate is None:
+        try:
+            args.min_pass_rate = float(ask("Minimum pass rate (0.90): ", "0.90"))
+        except ValueError:
+            print("Minimum pass rate must be a number between 0 and 1.")
+            return 1
+    if args.min_pass_rate is not None and not 0 <= args.min_pass_rate <= 1:
+        print("Minimum pass rate must be between 0 and 1.")
         return 1
 
     target = None
     source_target = ""
-    if args.skill is None:
+    if args.skill is None and args.agent is None:
         target_value = args.target or ask("Target MCP URL or config path: ")
         if not target_value:
             print("A target is required (pass --target/--skill or answer the prompt).")
@@ -752,9 +1049,28 @@ def cmd_create(args: argparse.Namespace) -> int:
         generation["personas"] = args.personas
     if args.scenarios_per_persona is not None:
         generation["scenarios_per_persona"] = args.scenarios_per_persona
+    generation_model = args.generation_model or args.model
+    if generation_model:
+        generation["model"] = generation_model
+    if args.codex_bin:
+        generation["codex_bin"] = args.codex_bin
     review_gates = {"min_pass_rate": args.min_pass_rate} if args.min_pass_rate is not None else None
 
-    if args.skill is not None:
+    if args.agent is not None:
+        from .agents import load_agent_definition
+        from .jobs import default_agent_job_spec
+
+        try:
+            agent, agent_sandbox = load_agent_definition(args.agent)
+            spec = default_agent_job_spec(
+                name, agent=agent, sandbox=agent_sandbox, generation=generation,
+                review_gates=review_gates,
+            )
+            spec.source_target = str(args.agent)
+        except (ConfigError, OSError, ValueError) as exc:
+            print(str(exc))
+            return 1
+    elif args.skill is not None:
         try:
             spec = default_skill_job_spec(
                 name, skill_path=args.skill, generation=generation,
@@ -771,6 +1087,65 @@ def cmd_create(args: argparse.Namespace) -> int:
             review_gates=review_gates,
             aut_runner=str(args.aut_runner) if args.aut_runner else None,
         )
+    if getattr(args, "sandbox", None):
+        spec.sandbox["backend"] = args.sandbox
+    if getattr(args, "image", None):
+        spec.sandbox["image"] = args.image
+    if getattr(args, "provider", None):
+        spec.sandbox["providers"] = list(dict.fromkeys([
+            *list(spec.sandbox.get("providers", []) or []), *args.provider,
+        ]))
+    runtime = {
+        "backend": "codex",
+        "model": args.model or "",
+        "kind": args.runner_kind or "process",
+        "timeout_seconds": args.runner_timeout or 600,
+        "approval_mode": args.approval_mode or "never",
+        "codex_sandbox": args.codex_sandbox or "read-only",
+        "codex_bin": args.codex_bin or "codex",
+    }
+    existing_runner = dict((spec.agent or {}).get("runner") or {})
+    if existing_runner:
+        runtime["kind"] = args.runner_kind or existing_runner.get("kind", "process")
+        runtime["timeout_seconds"] = args.runner_timeout or existing_runner.get("timeout_seconds", 600)
+        command = existing_runner.get("command") or []
+        if command and Path(str(command[0])).name != "codex":
+            runtime["backend"] = "custom"
+    spec.agent = {**(spec.agent or {}), "runtime": runtime}
+    if existing_runner:
+        from .jobs import configure_codex_runner
+
+        spec.agent["runner"] = configure_codex_runner(
+            existing_runner,
+            model=args.model,
+            kind=args.runner_kind or "",
+            timeout_seconds=args.runner_timeout,
+            approval_mode=args.approval_mode or "",
+            codex_sandbox=args.codex_sandbox or "",
+            codex_bin=args.codex_bin,
+        )
+    spec.test = {
+        **(spec.test or {}),
+        "user_model": args.user_model or args.model or "",
+        "judge_model": args.judge_model or generation_model or args.model or "",
+    }
+
+    source_preview = str(args.agent or args.skill or source_target or args.target or "")
+    _print_create_summary(name, spec, source_preview)
+    run_pipeline = bool(args.discover)
+    if interactive and run_pipeline:
+        run_pipeline = ask_yn("Run discover → plan → test → review now?", True)
+    if interactive and run_pipeline and spec.sandbox.get("backend") == "openshell":
+        ready, detail = _openshell_status()
+        print(tc.verdict(f"  {'✓' if ready else '!'} OpenShell · {detail}", "pass" if ready else "fail"))
+        if not ready and not ask_yn("OpenShell is not ready. Create the job anyway?", True):
+            print(tc.muted("Cancelled; start OpenShell and try again."))
+            return 0
+    if interactive and not ask_yn("Create this job?", True):
+        print(tc.muted("Cancelled; no files were written."))
+        return 0
+
+    _create_stage(1, "Create job", "Write the resolved configuration and workspace.")
     try:
         spec_path = create_job(name, spec, force=args.force)
     except ConfigError as exc:
@@ -787,13 +1162,13 @@ def cmd_create(args: argparse.Namespace) -> int:
     )
     print(f"  target: {created_target.transport} {target_location}")
 
-    if not args.discover:
+    if not run_pipeline:
         print(tc.muted(f"  next: ghostlab discover --job {slug}"))
         return 0
 
     # Inspect the target right away so the job is validated + capabilities are
     # populated — especially the point when a config file was handed in.
-    print()
+    _create_stage(2, "Discover", "Inspect capabilities, contract quality, and MCP Apps metadata.")
     try:
         rc = _discover_new_job(slug)
     except Exception as exc:  # noqa: BLE001 — never lose the created job over a bad target
@@ -801,20 +1176,21 @@ def cmd_create(args: argparse.Namespace) -> int:
         rc = 1
     if rc != 0:
         print(tc.muted(f"  job created; fix the target/auth then: ghostlab discover --job {slug}"))
-        return 0
+        return 1
 
-    _configure_aut_host(spec_path, ask_yn)
+    _create_stage(3, "Configure agent", "Resolve the AUT runner and semantic test host.")
+    _configure_aut_host(spec_path, ask_yn, getattr(args, "llm_backend", ""))
 
-    print()
+    _create_stage(4, "Build test plan", "Generate coverage, personas, and scenarios.")
     plan_args = argparse.Namespace(
         job=slug, spec=None, db=None, out=None, approve=None, reject=None,
         generate=True, regenerate=False,
         personas=args.personas, scenarios_per_persona=args.scenarios_per_persona,
-        codex_bin="", model="",
+        codex_bin="", model="", require_semantic=True,
     )
     if cmd_plan(plan_args) != 0:
         print(tc.muted(f"  job created; fix the plan then: ghostlab plan --job {slug}"))
-        return 0
+        return 1
 
     from .plan import load_test_plan
 
@@ -822,32 +1198,60 @@ def cmd_create(args: argparse.Namespace) -> int:
     suite_names = [name for name, entry in plan["suites"].items() if entry["cases"]]
     chosen_suites = None
     if suite_names:
-        raw = ask(f"\nRun which suites? [all: {', '.join(suite_names)}] ", "all")
-        if raw.strip().lower() not in ("", "all"):
-            picked = [s.strip() for s in raw.split(",") if s.strip()]
-            unknown = [s for s in picked if s not in suite_names]
-            if unknown:
-                print(f"  (ignoring unknown suite(s): {', '.join(unknown)})")
-            chosen_suites = [s for s in picked if s in suite_names] or None
+        if interactive:
+            picked = prompter.checkbox("Select suites to run", suite_names, suite_names)
+            chosen_suites = picked or []
+            if not {"semantic", "security"}.intersection(chosen_suites):
+                print(tc.verdict(
+                    "  Select semantic or security for the complete create workflow. "
+                    "Use standalone `ghostlab test --suite ...` for protocol-only runs.",
+                    "fail",
+                ))
+                return 1
 
-    print()
+    _create_stage(5, "Run and review", "Execute selected suites and apply readiness gates.")
     test_args = argparse.Namespace(
         job=slug, spec=None, db=None, plan=None, suite=chosen_suites, hosts=None,
         approved_only=False, user_runner=None, apps_mode=False, skip_setup=False,
         timeout=30.0, repeat=1, profile=None, strict=False, judge=None,
-        codex_bin="", model="",
+        codex_bin="", model="", require_semantic=True,
     )
-    cmd_test(test_args)
+    test_rc = cmd_test(test_args)
+    if test_rc != 0:
+        print(tc.verdict("  TEST STAGE FAILED; inspect the results above.", "fail"))
+        return 1
 
-    print()
+    semantic_requested = chosen_suites is None or bool(
+        {"semantic", "security"}.intersection(chosen_suites)
+    )
+    if semantic_requested:
+        result_files = list(spec.workspace_dir(spec_path).glob(f"test/*-{spec.id}/results.json"))
+        latest_results = max(result_files, key=lambda path: path.stat().st_mtime) if result_files else None
+        executed_semantic = []
+        if latest_results is not None:
+            result_data = json.loads(latest_results.read_text(encoding="utf-8"))
+            executed_semantic = [
+                entry for entry in result_data.get("results", [])
+                if entry.get("suite") in ("semantic", "security")
+                and entry.get("status") not in ("skip", "error", "harness_error")
+                and (entry.get("artifacts") or {}).get("run_dir")
+            ]
+        if not executed_semantic:
+            print(tc.verdict(
+                "  SEMANTIC EXECUTION FAILED: no semantic/security conversation ran. "
+                "The command is returning failure instead of reporting the evaluation ready.",
+                "fail",
+            ))
+            return 1
+
     review_args = argparse.Namespace(job=slug, spec=None, db=None, results=None, strict=False)
     cmd_review_spec(review_args)
 
     print()
-    print(tc.muted(
-        f"  rerun anytime: ghostlab test --job {slug}   |   "
-        f"gate report: ghostlab review --job {slug}"
-    ))
+    print(tc.heading(f"Evaluation ready · jobs/{slug}"))
+    print(f"  rerun       ghostlab test --job {slug}")
+    print(f"  review      ghostlab review --job {slug}")
+    print(f"  dashboard   ghostlab ui")
     return 0
 
 
@@ -867,67 +1271,97 @@ def _resume_job_pipeline(args: argparse.Namespace, name: str, ask_yn) -> int:
 
     generated_from = (spec.capabilities or {}).get("generated_from", "")
     discovered = bool(generated_from and (spec_path.parent / generated_from).exists())
+    _create_stage(2, "Discover", "Reuse completed evidence or refresh missing discovery.")
     if discovered:
         print(tc.muted("  discover: reused completed artifacts"))
     else:
         if _discover_new_job(slug) != 0:
             print(tc.muted(f"  resume stopped; fix target/auth then rerun with --resume"))
-            return 0
+            return 1
 
-    _configure_aut_host(spec_path, ask_yn)
+    _create_stage(3, "Configure agent", "Reuse or resolve the AUT runner.")
+    _configure_aut_host(spec_path, ask_yn, getattr(args, "llm_backend", ""))
+    _create_stage(4, "Build test plan", "Reuse cached generation where possible.")
     plan_args = argparse.Namespace(
         job=slug, spec=None, db=None, out=None, approve=None, reject=None,
         generate=True, regenerate=False, personas=args.personas,
         scenarios_per_persona=args.scenarios_per_persona, codex_bin="", model="",
+        require_semantic=True,
     )
     if cmd_plan(plan_args) != 0:
-        return 0
+        return 1
 
     spec = load_spec(spec_path)
     test_root = spec.workspace_dir(spec_path) / "test"
     has_results = any(test_root.glob(f"*-{spec.id}/results*.json"))
+    _create_stage(5, "Run and review", "Skip completed cases and retry unfinished work.")
     test_args = argparse.Namespace(
         job=slug, spec=None, db=None, plan=None, suite=None, hosts=None,
         approved_only=False, user_runner=None, apps_mode=False, skip_setup=False,
         timeout=30.0, repeat=1, profile=None, strict=False, judge=None,
-        codex_bin="", model="", resume=has_results,
+        codex_bin="", model="", resume=has_results, require_semantic=True,
     )
-    cmd_test(test_args)
+    if cmd_test(test_args) != 0:
+        return 1
     review_args = argparse.Namespace(job=slug, spec=None, db=None, results=None, strict=False)
     cmd_review_spec(review_args)
     return 0
 
 
-def _configure_aut_host(spec_path: Path, ask_yn) -> None:
+def _configure_aut_host(spec_path: Path, ask_yn, backend: str = "") -> None:
     """Offer to wire an agent-under-test host so semantic/security suites run.
 
     A fresh job has no host capable of executing conversational cases, so they
-    silently skip in `ghostlab test` until one is configured. Codex is the only
-    auto-detected/auto-wired backend today; anything else stays a manual
-    `--aut-runner` / `hosts:` edit.
+    silently skip in `ghostlab test` until one is configured. Both supported
+    agent CLIs can be auto-wired: codex via `-c mcp_servers.*` overrides,
+    opencode via a generated project `opencode.json`. Anything else stays a
+    manual `--aut-runner` / `hosts:` edit.
     """
-    from .codex_backend import CodexError, resolve_codex_bin
-    from .jobs import add_aut_host, build_codex_aut_runner
+    from .codex_backend import resolve_codex_bin
+    from .jobs import add_aut_host, build_codex_aut_runner, build_opencode_aut_runner
+    from .llm_backend import LlmBackendError, resolve_backend_kind
+    from .opencode_backend import resolve_opencode_bin
     from .spec import load_spec
 
     spec = load_spec(spec_path)  # reload: discover just updated `capabilities`
+    if (spec.agent or {}).get("runner"):
+        return  # An explicit agent config already defines the AUT.
     if any(h.get("kind") in ("process", "codex-session") for h in spec.hosts):
         return  # --aut-runner (or a hand-edited job.yaml) already set one up
 
-    try:
-        resolve_codex_bin()
-    except CodexError:
-        print(tc.muted(
-            "  codex not found — semantic/security suites will skip until an "
-            "agent-under-test host is configured (see README)."
-        ))
-        return
+    kind = resolve_backend_kind(backend, str((spec.generation or {}).get("backend", "")))
+    resolver = resolve_opencode_bin if kind == "opencode" else resolve_codex_bin
+    if kind == "opencode" or spec.sandbox.get("backend") != "openshell":
+        try:
+            resolver()
+        except LlmBackendError:
+            print(tc.muted(
+                f"  {kind} not found — semantic/security suites will skip until an "
+                "agent-under-test host is configured (see README)."
+            ))
+            return
 
-    if not ask_yn("\nSet up semantic/E2E testing with codex?", True):
+    if not ask_yn(f"\nSet up semantic/E2E testing with {kind}?", True):
         print(tc.muted("  skipping — semantic/security suites will skip for now."))
         return
 
-    runner_config = build_codex_aut_runner(spec)
+    runtime = dict((spec.agent or {}).get("runtime") or {})
+    if kind == "opencode":
+        runner_config = build_opencode_aut_runner(
+            spec, spec_path,
+            model=str(runtime.get("model") or ""),
+            timeout_seconds=int(runtime.get("timeout_seconds") or 600),
+        )
+    else:
+        runner_config = build_codex_aut_runner(
+            spec,
+            model=str(runtime.get("model") or ""),
+            kind=str(runtime.get("kind") or "process"),
+            timeout_seconds=int(runtime.get("timeout_seconds") or 600),
+            approval_mode=str(runtime.get("approval_mode") or "never"),
+            codex_sandbox=str(runtime.get("codex_sandbox") or "read-only"),
+            codex_bin=str(runtime.get("codex_bin") or "codex"),
+        )
     runner_path = add_aut_host(spec, spec_path, runner_config)
     print(f"  wrote {runner_path}")
     print(f"  updated {spec_path} (hosts: aut)")
@@ -939,12 +1373,33 @@ def cmd_discover(args: argparse.Namespace) -> int:
     from .setup_runtime import SetupError, SetupRuntime
 
     spec = _job_spec(args)
+    # A per-run --sandbox is an override for this invocation only. `discover`
+    # rewrites job.yaml (capabilities), so mutating spec.sandbox here would
+    # silently make a one-off `--sandbox local` the job's permanent setting.
+    runtime_sandbox = dict(spec.sandbox)
+    if getattr(args, "sandbox", None):
+        runtime_sandbox["backend"] = args.sandbox
     target = spec.target_config()
     timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
     out_dir = spec.workspace_dir(args.spec) / "discover" / f"{timestamp}-{spec.id}"
 
     if spec.target_type == "skill":
         return _discover_skill(args, spec, target, out_dir)
+    if spec.target_type == "agent":
+        return _discover_agent(args, spec, target, out_dir)
+
+    sandbox_session = None
+    if target.transport == "stdio":
+        from .sandbox import SandboxError, normalize_sandbox, sandbox_stdio_target
+
+        try:
+            sandbox_config = normalize_sandbox(runtime_sandbox, args.spec.resolve().parent)
+            target, sandbox_session = sandbox_stdio_target(
+                target, sandbox_config, role="discover", artifact_dir=out_dir,
+            )
+        except SandboxError as exc:
+            print(tc.verdict(f"  sandbox setup failed [{exc.kind}]: {exc.detail}", "fail"))
+            return 1
 
     print(tc.heading(f"Discovering '{spec.id}' ({target.transport})..."))
     runtime = SetupRuntime({} if args.skip_setup else spec.setup, out_dir)
@@ -971,6 +1426,8 @@ def cmd_discover(args: argparse.Namespace) -> int:
         runtime.teardown()
         if runtime.declared:
             runtime.write_status()  # capture teardown results in setup.json
+        if sandbox_session is not None:
+            sandbox_session.close()
 
 
 def _discover_skill(args, spec, target, out_dir: Path) -> int:
@@ -1008,6 +1465,45 @@ def _discover_skill(args, spec, target, out_dir: Path) -> int:
     save_spec(spec, args.spec)
     print(tc.heading(f"Discovered skill '{result.server_info.get('name', spec.id)}'"))
     print(f"  source: {target.connection.get('path')}")
+    print(f"  wrote {inspect_json}")
+    print(f"  wrote {inspect_md}")
+    print(f"  wrote {contract_json}")
+    return 0
+
+
+def _discover_agent(args, spec, target, out_dir: Path) -> int:
+    """Capture an agent-only definition as discovery input for generation."""
+    from dataclasses import asdict
+
+    from .contract import build_contract, render_contract_md
+    from .inspect import InspectResult, write_inspect_artifacts
+    from .spec import save_spec
+
+    instructions = str((spec.agent or {}).get("instructions", ""))
+    result = InspectResult(
+        target_id=spec.id, transport="agent",
+        server_info={"name": (spec.agent or {}).get("name", spec.id), "version": "configured"},
+        capabilities={"target_type": "agent"}, instructions=instructions,
+    )
+    inspect_json, inspect_md = write_inspect_artifacts(result, out_dir)
+    contract = build_contract(asdict(result))
+    contract.update({"target_type": "agent", "mcp": (spec.agent or {}).get("name", spec.id)})
+    contract_json = out_dir / "contract.json"
+    contract_json.write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+    (out_dir / "contract.md").write_text(
+        render_contract_md(contract).replace("# MCP Contract:", "# Agent Contract:"),
+        encoding="utf-8",
+    )
+    try:
+        generated_from = str(contract_json.resolve().relative_to(args.spec.resolve().parent))
+    except ValueError:
+        generated_from = str(contract_json)
+    spec.capabilities = {
+        "generated_from": generated_from, "discovered_at": contract["generated_at"],
+        "target_type": "agent", "tools": [], "ui_resources": [],
+    }
+    save_spec(spec, args.spec)
+    print(tc.heading(f"Discovered agent '{(spec.agent or {}).get('name', spec.id)}'"))
     print(f"  wrote {inspect_json}")
     print(f"  wrote {inspect_md}")
     print(f"  wrote {contract_json}")
@@ -1209,7 +1705,7 @@ def _get_generated_cases(args: argparse.Namespace, spec, inspect_data: dict) -> 
     --regenerate forces a fresh one. Falls back to None (deterministic-only
     plan) on any codex failure rather than aborting `plan` entirely.
     """
-    from .codex_backend import CodexBackend, CodexError
+    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .plan_generate import (
         DEFAULT_N_PERSONAS,
         DEFAULT_SCENARIOS_PER_PERSONA,
@@ -1230,15 +1726,21 @@ def _get_generated_cases(args: argparse.Namespace, spec, inspect_data: dict) -> 
 
     n_personas = args.personas or DEFAULT_N_PERSONAS
     scenarios_per_persona = args.scenarios_per_persona or DEFAULT_SCENARIOS_PER_PERSONA
-    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    from .sandbox import normalize_sandbox
+
+    backend = create_backend(
+        getattr(args, "llm_backend", ""), bin_path=args.codex_bin, model=args.model,
+        sandbox=normalize_sandbox(spec.sandbox, args.spec.resolve().parent),
+        spec_value=str((spec.generation or {}).get("backend", "")),
+    )
     try:
-        codex_bin = backend._bin()
-    except CodexError as exc:
-        print(f"  generation skipped (codex error): {exc}")
+        backend._bin()
+    except LlmBackendError as exc:
+        print(f"  generation skipped ({_backend_error_summary(exc)})")
         return None
     print(
         f"  generating {n_personas} persona(s) x {scenarios_per_persona} scenario(s) "
-        f"with codex ({codex_bin})..."
+        f"with {backend_label(backend)}..."
     )
 
     def progress(event: dict) -> None:
@@ -1250,8 +1752,8 @@ def _get_generated_cases(args: argparse.Namespace, spec, inspect_data: dict) -> 
             n_personas=n_personas, scenarios_per_persona=scenarios_per_persona,
             progress=progress,
         )
-    except CodexError as exc:
-        print(f"  generation skipped (codex error): {exc}")
+    except LlmBackendError as exc:
+        print(f"  generation skipped ({_backend_error_summary(exc)})")
         return None
 
     out_dir = spec.workspace_dir(args.spec) / "generated" / f"{generation_dir_name()}-{spec.id}"
@@ -1326,6 +1828,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
     generated_cases = None
     if args.generate:
         generated_cases = _get_generated_cases(args, spec, inspect_data)
+    from .agents import configured_agent_cases
+
+    configured_cases = configured_agent_cases(spec.agent or {})
+    if configured_cases:
+        generated_cases = [*(generated_cases or []), *configured_cases]
 
     plan = build_test_plan(
         spec.id,
@@ -1352,6 +1859,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
     }
     save_spec(spec, args.spec)
 
+    runnable_semantic = [
+        case for case in plan.get("cases", [])
+        if case.get("suite") in ("semantic", "security")
+        and case.get("kind") == "conversational"
+        and (case.get("execution") or {}).get("scenario")
+        and not (case.get("execution") or {}).get("needs_generation")
+        and case.get("status") != "rejected"
+    ]
+
     print(tc.heading(f"Planned {len(plan['cases'])} case(s) for '{spec.id}'"))
     e2e_suites = ("semantic", "security", "error-recovery", "apps", "host-compat", "regression")
     for suite in e2e_suites:
@@ -1374,11 +1890,74 @@ def cmd_plan(args: argparse.Namespace) -> int:
     print(f"  wrote {plan_path}")
     print(f"  wrote {md_path}")
     print(f"  updated {args.spec} (test_plan)")
+    if getattr(args, "require_semantic", False) and not runnable_semantic:
+        print(tc.verdict(
+            "  SEMANTIC PLAN FAILED: no runnable semantic/security scenario was generated. "
+            "Check `ghostlab config`, OpenShell providers, model access, and the generation error above.",
+            "fail",
+        ))
+        return 1
+    if runnable_semantic:
+        print(tc.verdict(f"  runnable semantic/security cases: {len(runnable_semantic)}", "pass"))
     print(tc.muted("  next: review statuses, then `ghostlab plan --approve` to approve all"))
     return 0
 
 
+class _SandboxedOpencodeProject:
+    """Temporarily points an opencode AUT project at a sandboxed MCP process.
+
+    The agent under test launches its own copy of a stdio MCP (opencode spawns
+    it from `opencode.json`), which would otherwise run unsandboxed on the host
+    even while the direct-mcp host runs the same server inside OpenShell. This
+    swaps the project's command for the sandbox's SSH-wrapped one for the length
+    of the run, then puts the original back.
+    """
+
+    def __init__(self, path: Path, original: str, sandbox: "object") -> None:
+        self.path = path
+        self.original = original
+        self.sandbox = sandbox
+
+    def restore(self) -> None:
+        try:
+            self.path.write_text(self.original, encoding="utf-8")
+        finally:
+            self.sandbox.close()
+
+
+def _sandbox_opencode_aut(spec, spec_path: Path, out_dir: Path):
+    """Wrap the opencode agent-under-test's stdio MCP in the job's sandbox."""
+    from .sandbox import normalize_sandbox, sandbox_stdio_target
+
+    if str((spec.sandbox or {}).get("backend")) != "openshell":
+        return None
+    target = spec.target_config()
+    if target.transport != "stdio":
+        return None
+
+    project = spec_path.resolve().parent / "runners" / "opencode-aut" / "opencode.json"
+    if not project.exists():
+        return None  # codex AUT, or no agent host configured
+    original = project.read_text(encoding="utf-8")
+    config = json.loads(original)
+    entry = (config.get("mcp") or {}).get(target.id)
+    if not isinstance(entry, dict) or entry.get("type") != "local":
+        return None
+
+    sandbox_config = normalize_sandbox(spec.sandbox, spec_path.resolve().parent)
+    wrapped, session = sandbox_stdio_target(
+        target, sandbox_config, role="aut", artifact_dir=out_dir,
+    )
+    if session is None:
+        return None
+    entry["command"] = list(wrapped.connection["command"])
+    project.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    print(tc.muted(f"  agent MCP sandboxed in OpenShell ({session.name})"))
+    return _SandboxedOpencodeProject(project, original, session)
+
+
 def cmd_test(args: argparse.Namespace) -> int:
+    from dataclasses import replace
     from .hosts import build_hosts
     from .plan import load_test_plan
     from .setup_runtime import SetupError, SetupRuntime
@@ -1394,6 +1973,8 @@ def cmd_test(args: argparse.Namespace) -> int:
         args.strict = True
 
     spec = _job_spec(args)
+    if getattr(args, "sandbox", None):
+        spec.sandbox["backend"] = args.sandbox
     # Editable defaults: explicit flag (or profile) -> spec.test/generation -> code default.
     t = spec.test or {}
     if args.suite is None and t.get("suites"):
@@ -1412,7 +1993,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         args.timeout = float(t["timeout"])
     gen = spec.generation or {}
     if not args.model:
-        args.model = gen.get("model", "") or ""
+        args.model = t.get("judge_model", "") or gen.get("model", "") or ""
     if not args.codex_bin:
         args.codex_bin = gen.get("codex_bin", "") or ""
     plan_path = args.plan or args.spec.resolve().parent / "test-plan.yaml"
@@ -1422,29 +2003,56 @@ def cmd_test(args: argparse.Namespace) -> int:
 
     backend = None
     if args.judge:
-        from .codex_backend import CodexBackend, CodexError
+        from .llm_backend import LlmBackendError, backend_label, create_backend
 
         try:
-            candidate = CodexBackend(bin_path=args.codex_bin, model=args.model)
+            from .sandbox import normalize_sandbox
+
+            candidate = create_backend(
+                getattr(args, "llm_backend", ""),
+                bin_path=args.codex_bin, model=args.model,
+                sandbox=normalize_sandbox(spec.sandbox, args.spec.resolve().parent),
+            )
             candidate._bin()  # resolve now so a missing codex degrades gracefully
             backend = candidate
-        except CodexError as exc:
+        except LlmBackendError as exc:
             print(f"  (judge disabled: {exc})")
 
     if args.user_runner is not None:
         user_runner_config = load_runner(args.user_runner)
     else:
-        # Zero-config default: a plain codex session with no MCP wired in, so
-        # it plays a human, never another tool-using agent. Mirrors
+        # Zero-config default: a plain agent session with no MCP wired in, so it
+        # plays a human, never another tool-using agent. Mirrors
         # runners/codex-user-emulator.json.
-        user_runner_config = RunnerConfig(
-            kind="process",
-            command=["codex", "--sandbox", "read-only", "-a", "never",
-                    "exec", "--skip-git-repo-check", "-"],
-            timeout_seconds=600,
-            prompt_mode="stdin",
-            parser="text",
+        from .llm_backend import resolve_backend_kind
+
+        user_model = str(t.get("user_model") or "")
+        emulator_backend = resolve_backend_kind(
+            getattr(args, "llm_backend", ""),
+            str((spec.generation or {}).get("backend", "")),
         )
+        if emulator_backend == "opencode":
+            from .runner_presets import opencode_user_runner
+
+            user_runner_config = opencode_user_runner(
+                spec.workspace_dir(args.spec) / "user-emulator",
+                timeout_seconds=600, model=user_model,
+            )
+        else:
+            user_command = ["codex", "--sandbox", "read-only", "-a", "never"]
+            if user_model:
+                user_command += ["-m", user_model]
+            user_command += ["exec", "--skip-git-repo-check", "-"]
+            user_runner_config = RunnerConfig(
+                kind="process",
+                command=user_command,
+                timeout_seconds=600,
+                prompt_mode="stdin",
+                parser="text",
+            )
+    if user_runner_config.parser not in ("opencode-json", "opencode-text"):
+        # opencode manages its own process; only codex runners are OpenShell-wrapped.
+        user_runner_config = replace(user_runner_config, sandbox=dict(spec.sandbox))
     hosts = build_hosts(
         spec, args.spec, timeout=args.timeout, backend=backend,
         user_runner_config=user_runner_config,
@@ -1493,7 +2101,15 @@ def cmd_test(args: argparse.Namespace) -> int:
         else:
             print(line)
 
+    from .sandbox import SandboxError
+
     runtime = SetupRuntime({} if args.skip_setup else spec.setup, out_dir)
+    aut_sandbox = None
+    try:
+        aut_sandbox = _sandbox_opencode_aut(spec, args.spec, out_dir)
+    except SandboxError as exc:
+        print(tc.verdict(f"  sandbox setup failed [{exc.kind}]: {exc.detail}", "fail"))
+        return 1
     try:
         if runtime.declared:
             try:
@@ -1519,6 +2135,8 @@ def cmd_test(args: argparse.Namespace) -> int:
         runtime.teardown()
         if runtime.declared:
             runtime.write_status()
+        if aut_sandbox is not None:
+            aut_sandbox.restore()
 
     results_json = out_dir / "results.json"
     results_md = out_dir / "results.md"
@@ -1568,6 +2186,21 @@ def cmd_test(args: argparse.Namespace) -> int:
         print(f"  wrote {dashboard_path}")
     except Exception as exc:  # noqa: BLE001 — dashboard is a convenience, never fail the run
         print(f"  (dashboard skipped: {exc})")
+
+    if getattr(args, "require_semantic", False):
+        executed_semantic = [
+            entry for entry in results.get("results", [])
+            if entry.get("suite") in ("semantic", "security")
+            and entry.get("status") not in ("skip", "error", "harness_error")
+            and (entry.get("artifacts") or {}).get("run_dir")
+        ]
+        if not executed_semantic:
+            print(tc.verdict(
+                "  SEMANTIC EXECUTION FAILED: no semantic/security conversation actually ran. "
+                "Check the resolved runner/models with `ghostlab config --job ...`.",
+                "fail",
+            ))
+            return 1
 
     gate_failures = evaluate_gates(results, (spec.review or {}).get("gates", {}))
     for failure in gate_failures:
@@ -1665,10 +2298,15 @@ def cmd_review_spec(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    from dataclasses import replace
+
     target = load_target(args.target, args.server)
     scenario = load_scenario(args.scenario)
     aut_runner = load_runner(args.aut_runner)
     user_runner = load_runner(args.user_runner)
+    sandbox = {"backend": getattr(args, "sandbox", "openshell")}
+    aut_runner = replace(aut_runner, sandbox={**dict(aut_runner.sandbox or {}), **sandbox})
+    user_runner = replace(user_runner, sandbox={**dict(user_runner.sandbox or {}), **sandbox})
     persona = load_persona(args.persona) if args.persona else None
     output_dir = _job_output_dir(args)
     store = _open_store(args)
@@ -1722,7 +2360,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 
 def cmd_profile(args: argparse.Namespace) -> int:
-    from .codex_backend import CodexBackend, CodexError
+    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .profile import build_capability_profile, profile_prompt, write_profile_artifacts
 
     inspect_path = args.inspect
@@ -1730,11 +2368,13 @@ def cmd_profile(args: argparse.Namespace) -> int:
         raise ConfigError(f"inspect.json not found: {inspect_path}")
     inspect_data = json.loads(inspect_path.read_text(encoding="utf-8"))
 
-    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
-    print(f"Generating capability profile with codex ({backend._bin()})...")
+    backend = create_backend(
+        getattr(args, "llm_backend", ""), bin_path=args.codex_bin, model=args.model
+    )
+    print(f"Generating capability profile with {backend_label(backend)}...")
     try:
         profile = build_capability_profile(inspect_data, backend)
-    except CodexError as exc:
+    except LlmBackendError as exc:
         print(f"codex backend error: {exc}")
         return 1
 
@@ -1770,18 +2410,20 @@ def cmd_profile(args: argparse.Namespace) -> int:
 
 
 def cmd_generate_scenarios(args: argparse.Namespace) -> int:
-    from .codex_backend import CodexBackend, CodexError
+    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .generate import generate_scenarios, write_scenarios
 
     if not args.profile.exists():
         raise ConfigError(f"capabilities.json not found: {args.profile}")
     profile = json.loads(args.profile.read_text(encoding="utf-8"))
 
-    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
-    print(f"Generating {args.n} scenario(s) with codex ({backend._bin()})...")
+    backend = create_backend(
+        getattr(args, "llm_backend", ""), bin_path=args.codex_bin, model=args.model
+    )
+    print(f"Generating {args.n} scenario(s) with {backend_label(backend)}...")
     try:
         scenarios = generate_scenarios(profile, backend, args.n)
-    except CodexError as exc:
+    except LlmBackendError as exc:
         print(f"codex backend error: {exc}")
         return 1
 
@@ -1796,18 +2438,20 @@ def cmd_generate_scenarios(args: argparse.Namespace) -> int:
 
 
 def cmd_generate_personas(args: argparse.Namespace) -> int:
-    from .codex_backend import CodexBackend, CodexError
+    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .personas import generate_personas, write_personas
 
     if not args.profile.exists():
         raise ConfigError(f"capabilities.json not found: {args.profile}")
     profile = json.loads(args.profile.read_text(encoding="utf-8"))
 
-    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
-    print(f"Generating {args.n} persona(s) with codex ({backend._bin()})...")
+    backend = create_backend(
+        getattr(args, "llm_backend", ""), bin_path=args.codex_bin, model=args.model
+    )
+    print(f"Generating {args.n} persona(s) with {backend_label(backend)}...")
     try:
         personas = generate_personas(profile, backend, args.n)
-    except CodexError as exc:
+    except LlmBackendError as exc:
         print(f"codex backend error: {exc}")
         return 1
 
@@ -1821,7 +2465,7 @@ def cmd_generate_personas(args: argparse.Namespace) -> int:
 
 
 def cmd_generate_dataset(args: argparse.Namespace) -> int:
-    from .codex_backend import CodexBackend, CodexError
+    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .dataset import build_dataset, write_dataset
 
     if not args.profile.exists():
@@ -1830,10 +2474,12 @@ def cmd_generate_dataset(args: argparse.Namespace) -> int:
 
     mcp_name = str(profile.get("mcp", "mcp")).split("@")[0]
     name = args.name or mcp_name
-    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+    backend = create_backend(
+        getattr(args, "llm_backend", ""), bin_path=args.codex_bin, model=args.model
+    )
     print(
         f"Generating dataset '{name}': {args.personas} personas x "
-        f"{args.scenarios_per_persona} scenarios with codex ({backend._bin()})..."
+        f"{args.scenarios_per_persona} scenarios with {backend_label(backend)}..."
     )
     try:
         dataset = build_dataset(
@@ -1844,7 +2490,7 @@ def cmd_generate_dataset(args: argparse.Namespace) -> int:
             seed=args.seed,
             name=name,
         )
-    except CodexError as exc:
+    except LlmBackendError as exc:
         print(f"codex backend error: {exc}")
         return 1
 
@@ -1879,16 +2525,27 @@ def cmd_generate_dataset(args: argparse.Namespace) -> int:
 
 def cmd_run_dataset(args: argparse.Namespace) -> int:
     from .dataset import run_dataset
+    from .sandbox import normalize_sandbox
 
     if not (args.dataset / "dataset.json").exists():
         raise ConfigError(f"No dataset.json in {args.dataset}")
 
+    # Override only the backend on runner files so their image, providers,
+    # uploads, and environment policy remain intact.
+    sandbox = {"backend": args.sandbox}
+    if args.provider:
+        sandbox["providers"] = list(args.provider)
+    judge_sandbox = normalize_sandbox(sandbox)
     backend = None
     capabilities = None
     if args.evaluate:
-        from .codex_backend import CodexBackend
+        from .llm_backend import create_backend
 
-        backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
+        backend = create_backend(
+            getattr(args, "llm_backend", ""), bin_path=args.codex_bin,
+            model=args.model, sandbox=judge_sandbox,
+            spec_value=str((spec.generation or {}).get("backend", "")),
+        )
         if args.capabilities:
             if not args.capabilities.exists():
                 raise ConfigError(f"capabilities.json not found: {args.capabilities}")
@@ -1908,6 +2565,7 @@ def cmd_run_dataset(args: argparse.Namespace) -> int:
             evaluate=args.evaluate,
             capabilities=capabilities,
             backend=backend,
+            sandbox=sandbox,
             store=store,
             server=args.server,
         )
@@ -2008,24 +2666,116 @@ def _validate_runner(path: Path) -> tuple[bool, str]:
     return True, f"kind={runner.kind} parser={runner.parser}"
 
 
-def cmd_doctor(args: argparse.Namespace) -> int:
+def _openshell_status() -> tuple[bool, str]:
     import shutil
+    import subprocess
+
+    openshell = shutil.which("openshell")
+    if not openshell:
+        return False, "CLI not found (install NVIDIA OpenShell)"
+    try:
+        status = subprocess.run([openshell, "status"], capture_output=True, text=True, timeout=20)
+        detail = (status.stdout or status.stderr).strip().replace("\n", " ")[:300]
+        return status.returncode == 0, detail or openshell
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+
+
+def _probe_backend(kind: str, bin_path: str) -> tuple[bool, str]:
+    """Ask a backend for one trivial JSON object to prove it can actually answer.
+
+    A version string only proves a binary exists. It does not prove the account
+    behind it has quota, or that the CLI is new enough for the model it is
+    configured to use — the failures that otherwise surface much later as
+    "generation skipped".
+    """
+    from .llm_backend import LlmBackendError, create_backend
+
+    backend = create_backend(kind, bin_path=bin_path, timeout_seconds=180)
+    schema = {
+        "type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}},
+    }
+    try:
+        result = backend.generate_json("Reply with {\"ok\": true}", schema)
+    except LlmBackendError as exc:
+        return False, _backend_error_summary(exc)
+    if isinstance(result, dict) and result.get("ok") is not None:
+        return True, "answered a live generation probe"
+    return False, f"unexpected probe reply: {str(result)[:200]}"
+
+
+def _check_llm_backends(args: argparse.Namespace) -> bool:
+    """Report which generation backends are installed, and optionally usable."""
+    import subprocess
+
+    from .codex_backend import resolve_codex_bin
+    from .llm_backend import LlmBackendError, resolve_backend_kind
+    from .opencode_backend import resolve_opencode_bin
+
+    selected = resolve_backend_kind(getattr(args, "llm_backend", "") or "")
+    probe = getattr(args, "probe", False)
+    results: dict[str, bool] = {}
+
+    for kind, resolver, override in (
+        ("codex", resolve_codex_bin, getattr(args, "codex_bin", "")),
+        ("opencode", resolve_opencode_bin, ""),
+    ):
+        marker = " (selected)" if kind == selected else ""
+        try:
+            binary = override or resolver()
+            version = subprocess.run(
+                [binary, "--version"], capture_output=True, text=True, timeout=30
+            )
+            tag = (version.stdout or version.stderr).strip().splitlines()[-1][:60]
+        except (LlmBackendError, OSError, subprocess.SubprocessError, IndexError) as exc:
+            results[kind] = False
+            print(f"  [--] {kind}{marker}: not available ({exc})")
+            continue
+
+        if not probe:
+            results[kind] = True
+            print(
+                f"  [ok] {kind}{marker}: {binary} ({tag}) "
+                "— installed, not verified (use --probe for a live check)"
+            )
+            continue
+        works, detail = _probe_backend(kind, binary)
+        results[kind] = works
+        print(f"  [{'ok' if works else '!!'}] {kind}{marker}: {binary} ({tag}) — {detail}")
+
+    if not any(results.values()):
+        print(
+            "  no usable generation backend: install codex, or install opencode "
+            "and authenticate a provider (`opencode auth login`), then select it "
+            "with --llm-backend opencode."
+        )
+        return False
+    if not results.get(selected, False):
+        alternative = next((k for k, v in results.items() if v and k != selected), "")
+        if alternative:
+            print(
+                f"  note: the selected backend '{selected}' is unusable; rerun with "
+                f"--llm-backend {alternative} (or set generation.backend in job.yaml)."
+            )
+        return False
+    return True
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
     import subprocess
 
     from .codex_backend import CodexError, resolve_codex_bin
 
     ok = True
     print("Ghostlab doctor")
-    try:
-        codex_bin = args.codex_bin or resolve_codex_bin()
-        version = subprocess.run(
-            [codex_bin, "--version"], capture_output=True, text=True, timeout=20
-        )
-        tag = version.stdout.strip() or version.stderr.strip()
-        print(f"  [ok] codex: {codex_bin} ({tag})")
-    except (CodexError, OSError, subprocess.SubprocessError) as exc:
-        ok = False
-        print(f"  [!!] codex: {exc}")
+    if args.sandbox == "openshell":
+        reachable, detail = _openshell_status()
+        ok = ok and reachable
+        print(f"  [{'ok' if reachable else '!!'}] openshell: {detail}")
+    else:
+        print("  [!!] sandbox: local (explicitly unsandboxed compatibility mode)")
+    backend_ok = _check_llm_backends(args)
+    ok = ok and backend_ok
 
     runner_paths = args.runners
     if runner_paths is None:
@@ -2041,7 +2791,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
-    from .codex_backend import CodexBackend, CodexError
+    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .evaluate import evaluate_run, write_verdict_artifacts
 
     if not (args.run / "events.jsonl").exists():
@@ -2052,12 +2802,14 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             raise ConfigError(f"capabilities.json not found: {args.capabilities}")
         capabilities = json.loads(args.capabilities.read_text(encoding="utf-8"))
 
-    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
-    print(f"Evaluating {args.run} with codex judge ({backend._bin()})...")
+    backend = create_backend(
+        getattr(args, "llm_backend", ""), bin_path=args.codex_bin, model=args.model
+    )
+    print(f"Evaluating {args.run} with the {backend_label(backend)} judge...")
     store = _open_store(args)
     try:
         verdict = evaluate_run(args.run, backend, capabilities, store=store)
-    except CodexError as exc:
+    except LlmBackendError as exc:
         print(f"codex backend error: {exc}")
         return 1
     finally:
@@ -2111,7 +2863,7 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
 
 
 def cmd_critique(args: argparse.Namespace) -> int:
-    from .codex_backend import CodexBackend, CodexError
+    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .critique import critique_run, write_critique_artifacts
 
     if not (args.run / "events.jsonl").exists():
@@ -2122,11 +2874,13 @@ def cmd_critique(args: argparse.Namespace) -> int:
             raise ConfigError(f"inspect.json not found: {args.inspect}")
         inspect = json.loads(args.inspect.read_text(encoding="utf-8"))
 
-    backend = CodexBackend(bin_path=args.codex_bin, model=args.model)
-    print(f"Critiquing tool usability in {args.run} with codex ({backend._bin()})...")
+    backend = create_backend(
+        getattr(args, "llm_backend", ""), bin_path=args.codex_bin, model=args.model
+    )
+    print(f"Critiquing tool usability in {args.run} with {backend_label(backend)}...")
     try:
         critique = critique_run(args.run, backend, inspect)
-    except CodexError as exc:
+    except LlmBackendError as exc:
         print(f"codex backend error: {exc}")
         return 1
 
@@ -2314,7 +3068,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
         "--browser.gatherUsageStats",
         "false",
     ]
-    print(f"Launching MCP Ghostlab UI at http://{args.server_address}:{args.port}")
+    print(f"Launching Ghostlab UI at http://{args.server_address}:{args.port}")
     return subprocess.call(command)
 
 
@@ -2338,6 +3092,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 _HANDLERS.update(
     {
         "init": cmd_init,
+        "config": cmd_config,
         "create": cmd_create,
         "dashboard": cmd_dashboard,
         "discover": cmd_discover,
@@ -2367,6 +3122,9 @@ KNOWN_COMMANDS = frozenset(_HANDLERS)
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .mcp_client import McpClientError
+    from .sandbox import SandboxError
+
     parser = build_parser()
     # Backward compatibility: bare `--target ... --scenario ...` defaults to `run`.
     import sys
@@ -2387,6 +3145,20 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         parser.error(str(exc))
         return 2
+    except McpClientError as exc:
+        # A target that won't talk is an expected outcome of testing an MCP, not
+        # a Ghostlab crash — report it as a failure, without a traceback.
+        print(tc.verdict(f"MCP connection failed: {exc}", "fail"))
+        if "did not answer" in str(exc):
+            print(
+                "  the server started but never replied. Check that its command "
+                "and dependencies are reachable where it runs; if it needs "
+                "host-only resources, run with --sandbox local."
+            )
+        return 1
+    except SandboxError as exc:
+        print(tc.verdict(f"Sandbox error [{exc.kind}]: {exc.detail}", "fail"))
+        return 1
 
 
 if __name__ == "__main__":

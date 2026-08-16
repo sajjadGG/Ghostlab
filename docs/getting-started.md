@@ -14,18 +14,149 @@ ghostlab --help
 ghostlab --version
 ```
 
+## Install A Coding-Agent CLI
+
+Ghostlab needs one agent CLI to generate scenarios, play the agent under test,
+and judge runs. Either works:
+
+```bash
+codex --version                 # uses your ChatGPT/Codex plan
+opencode --version              # uses GitHub Copilot, Azure, etc.
+```
+
+For opencode, authenticate a provider once (`opencode auth login`) and select it
+per command with `--llm-backend opencode --model github-copilot/claude-sonnet-4.5`,
+or per job via `generation.backend` in `job.yaml`. See the README's
+"Coding-agent backends" section for precedence and model selection.
+
+## Install And Verify OpenShell
+
+Install [NVIDIA OpenShell](https://docs.nvidia.com/openshell/latest/about/installation)
+and a supported compute driver. Docker Desktop is the simplest local driver on
+macOS; start it before the OpenShell gateway. Then verify both Ghostlab and the
+gateway:
+
+```bash
+openshell status
+ghostlab doctor
+```
+
+`ghostlab doctor` reports the sandbox, both LLM backends, and your runner
+presets. Add `--probe` to send one tiny live request per backend, which is the
+only way to catch an exhausted quota or a CLI too old for your account's model:
+
+```bash
+ghostlab doctor --probe
+```
+
+`openshell status` must report `Connected`. A CLI binary alone is not enough:
+the gateway also needs a running compute driver. For a Homebrew installation,
+use this recovery sequence when the gateway refuses connections:
+
+```bash
+open -a Docker                       # macOS only; wait until Docker is ready
+docker info                          # must include a Server section
+brew services restart openshell
+openshell status
+```
+
+Ghostlab-generated jobs and direct `ghostlab run` calls default to OpenShell.
+It creates separate sandboxes for the AUT and user emulator, uploads only
+declared inputs, forwards only allowlisted environment variables, captures
+`openshell-*.log`, and removes the sandboxes after the run. Local stdio MCPs
+launched by Ghostlab use the same boundary.
+
+There is no `--local` shorthand. Use `--sandbox local` to opt into direct,
+unsandboxed host execution for trusted code:
+
+```bash
+ghostlab create --name trusted --agent ./agent.yaml --sandbox local --yes
+ghostlab discover --job trusted --sandbox local
+ghostlab test --job trusted --sandbox local
+ghostlab run --target target.json --scenario scenario.json \
+  --aut-runner aut.json --user-runner user.json --sandbox local
+```
+
+Ghostlab never switches to local mode automatically. A missing CLI, stopped
+gateway, unavailable image, bad policy, or denied upload is reported as a
+sandbox/harness error so it cannot be mistaken for an agent failure.
+
+### Local stdio MCPs and the sandbox boundary
+
+A stdio MCP is launched by host path (`node /path/to/server/index.js`). Under
+OpenShell that path must exist *inside* the container, so Ghostlab uploads the
+server's own program directory to `/sandbox/mcp/<dirname>` and rewrites the
+command to match. Uploads skip `.gitignore` filtering by default, because the
+files a server needs at runtime (`node_modules`, `.venv`) are usually ignored;
+set `sandbox.respect_git_ignore: true` in `job.yaml` to opt back in.
+
+Before starting the server, Ghostlab checks that its program actually resolves
+inside the sandbox. If it does not, you get a `sandbox_command_missing` error
+naming the missing file, rather than a timeout that looks like the MCP refused
+to answer.
+
+The session itself is carried over OpenShell's SSH channel, not
+`openshell sandbox exec`. `exec` buffers stdin until EOF, so it can run a
+one-shot command but cannot sustain the request/response loop a stdio MCP
+needs — it would deadlock on the first `initialize`. This is why `ssh` must be
+available on the host.
+
+Some MCPs cannot be sandboxed at all: they exist to reach host-only resources.
+A server that drives a macOS app (Safari, Mail, Finder) via AppleScript, or one
+that needs your logged-in browser profile, will never work inside a Linux
+container. Run those with `--sandbox local` and treat the code as trusted:
+
+```bash
+ghostlab discover --job safari --sandbox local
+ghostlab test --job safari --sandbox local
+```
+
+Check the server's own prerequisites too — they are enforced by the host, not
+by Ghostlab. `safari-mcp`, for example, needs Safari's *Develop → Allow
+JavaScript from Apple Events* enabled; without it most of its tools return
+`isError: true` and the smoke suite fails for reasons that have nothing to do
+with the server's contract.
+
+OpenShell currently labels itself alpha software; pin and validate the runtime
+version in CI, and treat gateway/policy upgrades as infrastructure changes.
+
 ## Create A Job (Recommended Starting Point)
 
-A **job** is one MCP evaluation, and everything about it lives in one folder. `ghostlab create` asks only for what it can't infer — a name and a target — then **inspects the target immediately** so the job is validated and its capabilities are populated in one step:
+A **job** is one configured-agent evaluation, and everything about it lives in
+one folder. `ghostlab create` accepts a complete agent definition, an MCP target,
+or a skill; MCP-only and skill-only inputs are normalized into the same agent
+model. In interactive MCP mode it asks only for what it cannot infer—a name and
+target—then inspects the target immediately:
 
 ```bash
 ghostlab create
-# ? Job name: cortex-eval
-# ? Target MCP URL or config path: http://localhost:8000/mcp
-# → Created job 'cortex-eval' … then runs discover and prints the tool inventory
+# Job name: release-agent
+# Evaluate [agent/mcp/skill] (agent): agent
+# Agent config path (JSON/YAML): examples/agent.json
+# Execution [openshell/local] (openshell): openshell
+# → configuration preview → OpenShell preflight → [1/5] … [5/5]
 ```
 
-Everything else (persona/scenario counts, gates, prompts) uses documented defaults you edit in `job.yaml` — pass `--personas`, `--scenarios-per-persona`, `--min-pass-rate`, or `--aut-runner` to set them up front. Add `--no-discover` to just scaffold without inspecting.
+The guided creator configures persona/scenario counts, the release gate,
+OpenShell image/providers, AUT/user/generation/judge models, runner lifecycle,
+timeout, Codex policy, and whether to run immediately. It previews the resolved
+job before writing. For automation, pass `--yes` plus flags such as `--model`,
+`--user-model`, `--generation-model`, `--judge-model`, `--runner-kind`,
+`--runner-timeout`, `--approval-mode`, `--codex-sandbox`, `--personas`,
+`--image`, or `--provider`. Add `--no-discover` to scaffold only.
+
+Inspect the final effective values at any time:
+
+```bash
+ghostlab config --job release-agent
+ghostlab config --job release-agent --json
+```
+
+The complete creator succeeds only after a semantic/security conversation
+actually runs. If no OpenShell provider/model is usable, scenario generation
+fails, or the plan contains only placeholders, it exits non-zero and leaves a
+diagnostic plan instead of reporting a successful evaluation. After fixing the
+configuration, run `ghostlab create --name release-agent --resume --yes`.
 
 ### Evaluate an agent skill
 
@@ -39,6 +170,53 @@ Ghostlab reads the skill instructions, generates semantic and adversarial user
 scenarios, runs them through the dual-agent harness, and judges whether the AUT
 followed the skill. Protocol, tool-schema, and MCP Apps suites do not apply to
 skill targets.
+
+### Evaluate a composed agent
+
+An agent config can combine any runner with MCP, skill, workspace, and asset inputs:
+
+```bash
+ghostlab create --name my-agent --agent examples/agent.json --yes
+```
+
+```yaml
+id: my-agent
+instructions: Use the available capabilities and cite evidence.
+runner:
+  kind: process
+  command: [codex, --sandbox, read-only, -a, never, exec, --json, --skip-git-repo-check, -]
+  parser: codex-json
+workspace: ./agent-workspace
+inputs:
+  mcps:
+    - config_ref: ./mcp.json
+      server: notes
+  skills:
+    - ./skills/research
+tests:
+  - id: summarize-evidence
+    goal: Produce a concise evidence-backed summary.
+    opening_message: Summarize what changed and cite the source.
+    success_criteria: [Names the change, cites supporting evidence]
+    failure_signals: [Invents a source]
+sandbox:
+  backend: openshell
+  image: base
+  network: disabled
+  providers: [openai]
+  env_allowlist: []
+```
+
+Relative references resolve from the agent config. Absolute paths under the
+declared workspace are rewritten to its staged OpenShell workdir.
+Inline `tests` are materialized as ordinary scenario files and seeded into
+`test-plan.yaml`; generated cases can be added alongside them later.
+The example assumes an OpenShell provider named `openai` already exists. Check
+providers with `openshell provider list`. Provider attachment is the preferred
+way to make model credentials and matching egress policy available without
+copying secrets into the agent config. Remove `providers: [openai]` for a
+credential-free runner, or deliberately allowlist a required environment
+variable under `env_allowlist`.
 
 It scaffolds a self-contained directory:
 

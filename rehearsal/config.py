@@ -38,6 +38,9 @@ class RunnerConfig:
     # How to interpret this runner's output: "text" (plain) or "codex-json"
     # (codex `exec --json` JSONL, enabling rich tool-call capture).
     parser: str = "text"
+    # Execution boundary. Generated jobs default this to NVIDIA OpenShell;
+    # ``{"backend": "local"}`` preserves direct host execution explicitly.
+    sandbox: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -193,11 +196,20 @@ def load_runner(path: Path | None, fallback_kind: str = "mock") -> RunnerConfig:
         return RunnerConfig(kind=fallback_kind)
 
     data = load_json(path)
+    return runner_from_dict(data, fallback_kind=fallback_kind, source=str(path))
+
+
+def runner_from_dict(
+    data: dict[str, Any], *, fallback_kind: str = "mock", source: str = "runner"
+) -> RunnerConfig:
+    """Normalize an inline or file-backed agent runner definition."""
     kind = str(data.get("kind", fallback_kind))
     command = data.get("command", [])
     if not isinstance(command, list):
-        raise ConfigError(f"Runner command must be a list in {path}")
-
+        raise ConfigError(f"Runner command must be a list in {source}")
+    sandbox = data.get("sandbox", {}) or {}
+    if not isinstance(sandbox, dict):
+        raise ConfigError(f"Runner sandbox must be an object in {source}")
     return RunnerConfig(
         kind=kind,
         command=[str(part) for part in command],
@@ -205,4 +217,5 @@ def load_runner(path: Path | None, fallback_kind: str = "mock") -> RunnerConfig:
         timeout_seconds=int(data.get("timeout_seconds", 180)),
         prompt_mode=str(data.get("prompt_mode", "stdin")),
         parser=str(data.get("parser", "text")),
+        sandbox=dict(sandbox),
     )

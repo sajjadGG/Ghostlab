@@ -163,6 +163,106 @@ def parse_codex_output(jsonl_text: str) -> dict[str, Any]:
     return {"message": "\n".join(messages).strip(), "tool_calls": calls}
 
 
+def parse_opencode_output(
+    jsonl_text: str, servers: "list[str] | None" = None
+) -> dict[str, Any]:
+    """Parse opencode `run --format json` output into a message + tool calls.
+
+    OpenCode namespaces an MCP tool as ``<server>_<tool>`` and mixes those in with
+    its own built-in tools (read/write/bash/...). Only names matching a known
+    server prefix are reported as MCP `tool_calls`; the rest are kept separately
+    as `builtin_calls` so the judge's hallucination check never sees a host tool
+    and mistakes it for an invented MCP tool.
+
+    Unlike codex, opencode timestamps each call, so `duration_ms` is always
+    populated here.
+    """
+    known = sorted([s for s in (servers or []) if s], key=len, reverse=True)
+    messages: list[str] = []
+    calls: list[dict[str, Any]] = []
+    builtins: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for line in jsonl_text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = event.get("type")
+        part = event.get("part") or {}
+
+        if kind == "error":
+            # opencode reports API/model failures as an event and still exits 0;
+            # collecting them here is what lets the runner fail loudly instead of
+            # handing a raw protocol frame to the other agent as conversation.
+            detail = event.get("error") or {}
+            data = detail.get("data") if isinstance(detail, dict) else {}
+            message = ""
+            if isinstance(data, dict):
+                message = str(data.get("message") or "")
+            if not message and isinstance(detail, dict):
+                message = str(detail.get("name") or "")
+            errors.append(message or json.dumps(detail)[:300])
+            continue
+
+        if kind == "text":
+            text = part.get("text")
+            if text:
+                messages.append(str(text))
+            continue
+        if kind not in ("tool_use", "tool"):
+            continue
+
+        name = str(part.get("tool") or "?")
+        state = part.get("state") or {}
+        raw_status = str(state.get("status") or "")
+        status = {
+            "completed": "completed", "error": "failed", "failed": "failed",
+        }.get(raw_status, "unknown" if not raw_status else "failed")
+
+        server = ""
+        tool = name
+        for candidate in known:
+            if name.startswith(f"{candidate}_"):
+                server, tool = candidate, name[len(candidate) + 1 :]
+                break
+
+        error = state.get("error")
+        if status == "failed" and not error:
+            error = state.get("output")
+        record: dict[str, Any] = {
+            "index": 0,  # assigned below, per stream
+            "server": server or "opencode",
+            "tool": tool,
+            "status": status,
+            "arguments": state.get("input"),
+            "result": state.get("output"),
+            "error": error,
+        }
+        times = state.get("time") or {}
+        start, end = times.get("start"), times.get("end")
+        if isinstance(start, (int, float)) and isinstance(end, (int, float)):
+            record["duration_ms"] = round(float(end) - float(start), 1)
+        if status == "failed":
+            record["failure_cause"] = classify_tool_failure(error)
+            if error:
+                record["failure_detail"] = " ".join(str(error).split())[:500]
+
+        target = calls if server else builtins
+        target.append(record)
+        record["index"] = len(target)
+
+    return {
+        "message": "\n".join(messages).strip(),
+        "tool_calls": calls,
+        "builtin_calls": builtins,
+        "errors": errors,
+    }
+
+
 def summarize_tool_calls(calls: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate counts by tool and by status for quick reporting."""
     by_tool: dict[str, int] = {}

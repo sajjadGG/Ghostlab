@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from ..config import TargetConfig
 from ..mcp_client import McpClient, McpClientError, create_client
+from ..sandbox import SandboxError, normalize_sandbox, sandbox_stdio_target
 from .base import CaseResult, HostAdapter, HostCapabilities
 
 
@@ -32,25 +33,36 @@ class DirectMcpHost(HostAdapter):
         exposes_tool_trace=True,
     )
 
-    def __init__(self, host_id: str, target: TargetConfig, timeout: float = 30.0) -> None:
+    def __init__(
+        self, host_id: str, target: TargetConfig, timeout: float = 30.0,
+        sandbox: dict[str, Any] | None = None, base_dir: Path | None = None,
+    ) -> None:
         self.id = host_id
         self.kind = "direct-mcp"
         self.target = target
         self.timeout = timeout
         self._client: Optional[McpClient] = None
+        self._sandbox_config = normalize_sandbox(sandbox or {"backend": "local"}, base_dir)
+        self._sandbox_session = None
 
     # ------------------------------------------------------------------ #
     # Session
     # ------------------------------------------------------------------ #
     def open(self) -> None:
         if self._client is None:
-            self._client = create_client(self.target, timeout=self.timeout)
+            runtime_target, self._sandbox_session = sandbox_stdio_target(
+                self.target, self._sandbox_config, role="direct-mcp",
+            )
+            self._client = create_client(runtime_target, timeout=self.timeout)
             self._client.initialize()
 
     def close(self) -> None:
         if self._client is not None:
             self._client.close()
             self._client = None
+        if self._sandbox_session is not None:
+            self._sandbox_session.close()
+            self._sandbox_session = None
 
     @property
     def client(self) -> McpClient:
@@ -73,6 +85,7 @@ class DirectMcpHost(HostAdapter):
     # ------------------------------------------------------------------ #
     def execute(self, case: dict[str, Any], out_dir: Path) -> CaseResult:
         execution = case.get("execution", {}) or {}
+        self._sandbox_config["artifact_dir"] = str(out_dir)
         exec_type = str(execution.get("type", ""))
         started = time.monotonic()
 
@@ -97,6 +110,8 @@ class DirectMcpHost(HostAdapter):
                 return self._run_tool_call(execution, done)
             if exec_type == "app_render":
                 return self._run_app_render(case, execution, out_dir, done)
+        except SandboxError as exc:
+            return done("error", f"{exc.kind}: {exc.detail}")
         except McpClientError as exc:
             return done("error", f"transport failure: {exc}")
         return done("skip", f"direct-mcp cannot execute case type {exec_type!r}")

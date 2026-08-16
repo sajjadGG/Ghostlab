@@ -20,10 +20,12 @@ since a session can complete without the user's goal actually being met.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..config import load_runner
+from ..config import load_runner, runner_from_dict
+from ..sandbox import normalize_sandbox
 from ..termcolor import assistant, muted, tool, user, verdict, widget
 from .base import CaseResult, HostAdapter, HostCapabilities
 
@@ -116,7 +118,7 @@ class RunnerHost(HostAdapter):
         self.user_runner_config = user_runner_config
         self._runner_config = None
 
-    def _load_runner_config(self):
+    def _load_runner_config(self, spec=None):
         if self._runner_config is None:
             config_ref = self.host_config.get("config_ref")
             path: Optional[Path] = None
@@ -124,7 +126,22 @@ class RunnerHost(HostAdapter):
                 path = Path(config_ref)
                 if not path.is_absolute():
                     path = self.spec_path.resolve().parent / path
-            self._runner_config = load_runner(path, fallback_kind=self.kind)
+            inline = (spec.agent or {}).get("runner") if spec is not None else None
+            if inline and (self.host_config.get("agent") or not config_ref):
+                config = runner_from_dict(
+                    dict(inline), fallback_kind="process",
+                    source=f"{self.spec_path}:agent.runner",
+                )
+            else:
+                config = load_runner(path, fallback_kind=self.kind)
+            sandbox = normalize_sandbox(
+                {
+                    **dict(config.sandbox or {}),
+                    **dict((spec.sandbox if spec is not None else {}) or {}),
+                },
+                self.spec_path.resolve().parent,
+            )
+            self._runner_config = replace(config, sandbox=sandbox)
         return self._runner_config
 
     def version_info(self) -> dict[str, Any]:
@@ -174,12 +191,12 @@ class RunnerHost(HostAdapter):
 
         try:
             spec = load_spec(self.spec_path)
-            target = spec.target_config()
+            target = spec.evaluation_target(self.spec_path)
             scenario = load_scenario(self._resolve(str(execution["scenario"])))
             persona = None
             if execution.get("persona"):
                 persona = load_persona(self._resolve(str(execution["persona"])))
-            aut_runner_config = self._load_runner_config()
+            aut_runner_config = self._load_runner_config(spec)
         except ConfigError as exc:
             return done("error", str(exc))
 
@@ -290,7 +307,7 @@ class RunnerHost(HostAdapter):
 
         # Tool-ergonomics critique is MCP-specific. Skill compliance is already
         # scored against scenario criteria by the judge above.
-        if not (inspect_data and inspect_data.get("transport") == "skill"):
+        if not (inspect_data and inspect_data.get("transport") in ("skill", "agent")):
             try:
                 critique = critique_run(result.run_dir, self.backend, inspect=inspect_data)
                 write_critique_artifacts(critique, result.run_dir)

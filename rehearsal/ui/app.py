@@ -1,4 +1,4 @@
-"""Streamlit app driving the whole MCP Ghostlab pipeline.
+"""Streamlit app driving the complete Ghostlab agent-evaluation pipeline.
 
 Launch via `ghostlab ui`. Mirrors `ghostlab create`'s job-based flow: pick or
 create a job, discover its target, configure the agent-under-test host,
@@ -16,23 +16,29 @@ from pathlib import Path
 
 import streamlit as st
 
-from rehearsal.cli import cmd_discover, cmd_plan, cmd_review_spec, cmd_test
+from rehearsal.agents import load_agent_definition
+from rehearsal.cli import _openshell_status, cmd_discover, cmd_plan, cmd_review_spec, cmd_test
 from rehearsal.codex_backend import CodexError, resolve_codex_bin
 from rehearsal.config import ConfigError, load_persona, load_scenario, load_target
+from rehearsal.dashboard import build_dashboard
 from rehearsal.jobs import (
     add_aut_host,
     build_codex_aut_runner,
     create_job,
+    default_agent_job_spec,
     default_job_spec,
+    default_skill_job_spec,
     jobs_dir,
     resolve_job,
     slugify,
     target_from_url,
+    update_agent_runtime,
 )
 from rehearsal.plan import load_test_plan, set_case_statuses, write_test_plan
-from rehearsal.spec import load_spec
+from rehearsal.resolved_config import resolved_job_config
+from rehearsal.spec import load_spec, save_spec
 
-st.set_page_config(page_title="MCP Ghostlab", page_icon="👻", layout="wide")
+st.set_page_config(page_title="Ghostlab", page_icon="👻", layout="wide")
 
 st.markdown(
     """
@@ -53,6 +59,7 @@ st.markdown(
         background: var(--ghost-accent-soft); font-size: 1.15rem;
     }
     .ghost-brand-name { font-size: 1.12rem; font-weight: 700; letter-spacing: -0.02em; }
+    .ghost-brand-sub { color: #7b7f8b; font-size: 0.76rem; }
     .ghost-hero { max-width: 52rem; padding: 1.2rem 0 1.4rem; }
     .ghost-hero h1 { margin: 0.35rem 0 0.6rem; font-size: clamp(2rem, 4vw, 3.25rem); letter-spacing: -0.055em; line-height: 1.05; }
     .ghost-hero p { max-width: 42rem; margin: 0; color: #7b7f8b; font-size: 1.02rem; }
@@ -60,6 +67,13 @@ st.markdown(
     div[data-testid="stVerticalBlockBorderWrapper"] { border-color: var(--ghost-border); border-radius: 1rem; }
     div.stButton > button[kind="primary"] { border-color: #6c4df2; background: #6c4df2; }
     div.stButton > button[kind="primary"]:hover { border-color: #8065f4; background: #8065f4; }
+    .pipeline { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.55rem; margin:.4rem 0 1.4rem; }
+    .pipeline-step { border:1px solid var(--ghost-border); border-radius:.8rem; padding:.72rem .8rem; color:#7b7f8b; font-size:.78rem; }
+    .pipeline-step strong { display:block; color:inherit; font-size:.82rem; }
+    .pipeline-step.done { border-color:rgba(38,166,91,.35); background:rgba(38,166,91,.08); color:#27915a; }
+    .pipeline-step.next { border-color:rgba(124,92,255,.38); background:var(--ghost-accent-soft); color:#7c5cff; }
+    .config-card { border:1px solid var(--ghost-border); border-radius:1rem; padding:1rem 1.1rem; background:rgba(127,127,127,.035); }
+    @media (max-width: 760px) { .pipeline { grid-template-columns:1fr 1fr; } }
     </style>
     """,
     unsafe_allow_html=True,
@@ -80,12 +94,27 @@ def _spec():
     return load_spec(_spec_path())
 
 
-def run_cli(fn, **fields) -> tuple[int, str]:
+@st.cache_data(ttl=30)
+def openshell_status() -> tuple[bool, str]:
+    return _openshell_status()
+
+
+def run_cli(fn, *, live: bool = False, **fields) -> tuple[int, str]:
     """Call a `rehearsal.cli` command handler for the active job, capturing its
     stdout so the UI can show exactly what the CLI would have printed.
     """
     ns = argparse.Namespace(job=st.session_state["job"], spec=None, db=None, **fields)
-    buf = io.StringIO()
+    placeholder = st.empty() if live else None
+
+    class LiveBuffer(io.StringIO):
+        def write(self, value: str) -> int:
+            written = super().write(value)
+            if placeholder is not None:
+                visible = self.getvalue()[-8000:]
+                placeholder.code(visible or "Starting…", language=None)
+            return written
+
+    buf = LiveBuffer()
     try:
         with contextlib.redirect_stdout(buf):
             rc = fn(ns)
@@ -170,6 +199,28 @@ def render_verdict(run_dir: Path) -> None:
     )
 
 
+def _pipeline_state(spec_path: Path) -> list[tuple[str, bool]]:
+    spec = load_spec(spec_path)
+    job_dir = spec_path.parent
+    discovered = bool((spec.capabilities or {}).get("generated_from"))
+    planned = (job_dir / "test-plan.yaml").exists()
+    tested = any(spec.workspace_dir(spec_path).glob("test/*/results.json"))
+    return [("Discover", discovered), ("Plan", planned), ("Run", tested), ("Review", tested)]
+
+
+def render_pipeline(spec_path: Path) -> None:
+    stages = _pipeline_state(spec_path)
+    first_pending = next((index for index, (_, done) in enumerate(stages) if not done), None)
+    cards = []
+    for index, (label, done) in enumerate(stages):
+        state = "done" if done else "next" if index == first_pending else ""
+        marker = "Complete" if done else "Next" if state == "next" else "Pending"
+        cards.append(
+            f'<div class="pipeline-step {state}"><strong>{index + 1}. {label}</strong>{marker}</div>'
+        )
+    st.markdown(f'<div class="pipeline">{"".join(cards)}</div>', unsafe_allow_html=True)
+
+
 # --------------------------------------------------------------------------- #
 # Sidebar: job picker (everything else needs an active job)
 # --------------------------------------------------------------------------- #
@@ -178,12 +229,12 @@ with st.sidebar:
         """
         <div class="ghost-brand">
             <div class="ghost-mark">👻</div>
-            <div class="ghost-brand-name">MCP Ghostlab</div>
+            <div><div class="ghost-brand-name">Ghostlab</div><div class="ghost-brand-sub">Agent evaluation lab</div></div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    st.caption("Create → discover → configure → plan → run → review — one job at a time.")
+    st.caption("Configure → discover → plan → run → review")
     st.divider()
 
     existing_jobs = sorted(p.parent.name for p in jobs_dir().glob("*/job.yaml")) if jobs_dir().exists() else []
@@ -191,54 +242,168 @@ with st.sidebar:
     default_index = options.index(st.session_state["job"]) if st.session_state.get("job") in existing_jobs else 0
     choice = st.selectbox("Job", options, index=default_index)
 
-    if choice == "+ New job":
-        with st.form("new_job_form"):
-            new_name = st.text_input("Job name", placeholder="cortex-eval")
-            new_target = st.text_input(
-                "Target MCP URL or config path", placeholder="http://localhost:8000/mcp"
-            )
-            create_clicked = st.form_submit_button("Create job", type="primary")
-        if create_clicked:
-            if not new_name or not new_target:
-                st.error("A job name and target are both required.")
-            else:
-                target_path = Path(new_target)
-                try:
-                    if target_path.suffix.lower() == ".json" and target_path.exists():
-                        target = load_target(target_path)
-                        source_target = str(target_path)
-                    else:
-                        target = target_from_url(new_target)
-                        source_target = ""
-                    spec = default_job_spec(new_name, target=target, source_target=source_target)
-                    create_job(new_name, spec)
-                    st.session_state["job"] = slugify(new_name)
-                    st.rerun()
-                except ConfigError as exc:
-                    st.error(str(exc))
-        st.stop()
+    if choice != "+ New job":
+        st.session_state["job"] = choice
+        spec = _spec()
+        target = spec.target_config()
+        st.caption(f"Subject: `{target.id}` · {spec.target_type}")
+        st.caption(f"Sandbox: `{(spec.sandbox or {}).get('backend', 'openshell')}`")
+        if (spec.sandbox or {}).get("backend", "openshell") == "openshell":
+            ready, _detail = openshell_status()
+            st.caption("OpenShell: " + ("✅ connected" if ready else "❌ unavailable · run ghostlab doctor"))
+        host_kinds = [h.get("kind") for h in spec.hosts]
+        st.caption(
+            "Semantic host: " + ("✅ configured" if any(k in ("process", "codex-session") for k in host_kinds)
+                                  else "⚠️ not configured")
+        )
+        with st.expander("Advanced"):
+            st.session_state["codex_bin"] = st.text_input("Codex binary override", value=st.session_state.get("codex_bin", ""))
+            st.session_state["model"] = st.text_input("Model override", value=st.session_state.get("model", ""))
 
-    st.session_state["job"] = choice
-    spec = _spec()
-    st.caption(f"Target: `{spec.target_config().id}` · {spec.target_config().transport}")
-    host_kinds = [h.get("kind") for h in spec.hosts]
-    st.caption(
-        "Semantic host: " + ("✅ configured" if any(k in ("process", "codex-session") for k in host_kinds)
-                              else "⚠️ not configured")
+if choice == "+ New job":
+    st.markdown(
+        """
+        <div class="ghost-hero">
+            <div class="ghost-eyebrow">New evaluation</div>
+            <h1>Configure the agent you want to test</h1>
+            <p>Start with a complete agent, one MCP, or one skill. Ghostlab resolves all three into the same editable job.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    with st.expander("Advanced"):
-        st.session_state["codex_bin"] = st.text_input("Codex binary override", value=st.session_state.get("codex_bin", ""))
-        st.session_state["model"] = st.text_input("Model override", value=st.session_state.get("model", ""))
+    q1, q2 = st.columns(2)
+    subject = q1.radio("Evaluation subject", ["Agent config", "MCP", "Skill"], horizontal=True)
+    sandbox = q2.selectbox("Execution", ["openshell", "local"], help="OpenShell is isolated and recommended. Local executes trusted code directly on this host.")
+    with st.form("new_job_form"):
+        c1, c2 = st.columns([1.1, 1])
+        with c1:
+            new_name = st.text_input("Job name", placeholder="release-agent-eval")
+            source_labels = {
+                "Agent config": ("Agent JSON/YAML path", "examples/agent.json"),
+                "MCP": ("MCP URL or config path", "http://localhost:8000/mcp"),
+                "Skill": ("SKILL.md or skill directory", "./skills/release-notes"),
+            }
+            label, placeholder = source_labels[subject]
+            source = st.text_input(label, placeholder=placeholder)
+        with c2:
+            image = st.text_input("OpenShell image", value="base", disabled=sandbox == "local")
+            providers = st.text_input("OpenShell providers", placeholder="openai, github", disabled=sandbox == "local")
+            g1, g2 = st.columns(2)
+            personas = g1.number_input("Personas", 1, 20, 2)
+            scenarios = g2.number_input("Scenarios each", 1, 10, 2)
+            min_rate = st.slider("Minimum pass rate", 0.0, 1.0, 0.9, 0.05)
+        with st.expander("Codex runtime and models", expanded=True):
+            m1, m2, m3, m4 = st.columns(4)
+            create_aut_model = m1.text_input("AUT model", placeholder="Codex CLI default")
+            create_user_model = m2.text_input("User model", placeholder="AUT / default")
+            create_generation_model = m3.text_input("Generation model", placeholder="AUT / default")
+            create_judge_model = m4.text_input("Judge model", placeholder="Generation / default")
+            r1, r2, r3, r4 = st.columns(4)
+            create_runner_kind = r1.selectbox("Runner lifecycle", ["process", "codex-session"])
+            create_runner_timeout = r2.number_input("Turn timeout", 10, 3600, 600)
+            create_approval = r3.selectbox("Approval mode", ["never", "on-request", "untrusted"])
+            create_codex_sandbox = r4.selectbox("Codex sandbox", ["read-only", "workspace-write", "danger-full-access"])
+            create_codex_bin = st.text_input("Codex executable", value="codex")
+        st.caption("Nothing runs yet. This creates an editable job; use the guided stages to discover, plan, run, and review.")
+        create_clicked = st.form_submit_button("Create evaluation", type="primary", use_container_width=True)
+
+    if create_clicked:
+        if not new_name or not source:
+            st.error("Job name and subject source are required.")
+        else:
+            try:
+                generation = {"personas": int(personas), "scenarios_per_persona": int(scenarios)}
+                gates = {"min_pass_rate": float(min_rate)}
+                source_path = Path(source).expanduser()
+                if subject == "Agent config":
+                    agent, agent_sandbox = load_agent_definition(source_path)
+                    spec = default_agent_job_spec(new_name, agent=agent, sandbox=agent_sandbox, generation=generation, review_gates=gates)
+                    spec.source_target = str(source_path)
+                elif subject == "Skill":
+                    spec = default_skill_job_spec(new_name, skill_path=source_path, generation=generation, review_gates=gates)
+                else:
+                    if source_path.suffix.lower() == ".json" and source_path.exists():
+                        target = load_target(source_path)
+                        source_target = str(source_path)
+                    else:
+                        target = target_from_url(source)
+                        source_target = ""
+                    spec = default_job_spec(new_name, target=target, source_target=source_target, generation=generation, review_gates=gates)
+                spec.sandbox["backend"] = sandbox
+                if sandbox == "openshell":
+                    spec.sandbox["image"] = image or "base"
+                    spec.sandbox["providers"] = [item.strip() for item in providers.split(",") if item.strip()]
+                created_path = create_job(new_name, spec)
+                update_agent_runtime(
+                    spec, created_path, model=create_aut_model, kind=create_runner_kind,
+                    timeout_seconds=int(create_runner_timeout), approval_mode=create_approval,
+                    codex_sandbox=create_codex_sandbox, codex_bin=create_codex_bin,
+                    user_model=create_user_model or create_aut_model,
+                    generation_model=create_generation_model or create_aut_model,
+                    judge_model=create_judge_model or create_generation_model or create_aut_model,
+                )
+                st.session_state["job"] = slugify(new_name)
+                st.success("Evaluation created. Opening the guided pipeline…")
+                st.rerun()
+            except (ConfigError, OSError, ValueError) as exc:
+                st.error(str(exc))
+    st.stop()
 
 codex_bin = st.session_state.get("codex_bin", "") or ""
 model = st.session_state.get("model", "") or ""
 
-tabs = st.tabs(["1 · Discover", "2 · Configure & Plan", "3 · Run", "4 · Results"])
+spec = _spec()
+target = spec.target_config()
+st.markdown(f"## {spec.name or spec.id}")
+st.caption(f"`{spec.target_type}` · `{target.id}` · `{(spec.sandbox or {}).get('backend', 'openshell')}` sandbox")
+render_pipeline(_spec_path())
+
+tabs = st.tabs(["Overview", "1 · Discover", "2 · Configure & Plan", "3 · Run", "4 · Results"])
+
+with tabs[0]:
+    st.markdown("### Evaluation configuration")
+    resolved = resolved_job_config(spec, _spec_path())
+    agent = spec.agent or {}
+    inputs = agent.get("inputs", {}) or {}
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("MCPs", len(inputs.get("mcps", []) or []))
+    c2.metric("Skills", len(inputs.get("skills", []) or []))
+    c3.metric("Personas", int((spec.generation or {}).get("personas", 2)))
+    c4.metric("Pass gate", f"{float((spec.review or {}).get('gates', {}).get('min_pass_rate', 0.9)):.0%}")
+    left, right = st.columns([1.25, 1])
+    with left:
+        with st.container(border=True):
+            st.markdown("**Subject**")
+            st.write(f"{spec.target_type.title()} · `{target.id}`")
+            st.caption(str(spec.source_target or target.connection.get("url") or target.connection.get("path") or target.connection.get("command") or "configured inline"))
+            if agent.get("instructions"):
+                st.markdown("**Instructions**")
+                st.write(agent["instructions"])
+    with right:
+        with st.container(border=True):
+            st.markdown("**Execution boundary**")
+            st.write(f"`{(spec.sandbox or {}).get('backend', 'openshell')}` · image `{(spec.sandbox or {}).get('image', 'base')}`")
+            provider_text = ", ".join((spec.sandbox or {}).get("providers", []) or []) or "No providers attached"
+            st.caption(provider_text)
+            st.caption("Edit job.yaml for advanced uploads, policy, resources, and environment allowlists.")
+    st.markdown("### Effective models and runner")
+    model_cols = st.columns(4)
+    for column, (label, value) in zip(model_cols, resolved["models"].items()):
+        column.metric(label.replace("_", " ").title(), value)
+    runner_view = resolved["agent"]["runner"]
+    st.code(" ".join(runner_view["command"]) or "Runner not materialized yet", language="bash")
+    st.caption(
+        f"{runner_view['kind']} · timeout {runner_view['timeout_seconds']}s · "
+        f"approval {runner_view['approval_mode']} · Codex sandbox {runner_view['codex_sandbox']} · "
+        f"parser {runner_view['parser']}"
+    )
+    with st.expander("Full resolved configuration"):
+        st.json(resolved)
 
 # --------------------------------------------------------------------------- #
 # 1. Discover
 # --------------------------------------------------------------------------- #
-with tabs[0]:
+with tabs[1]:
     st.markdown(
         """
         <div class="ghost-hero">
@@ -254,7 +419,7 @@ with tabs[0]:
     st.caption(f"`{target.transport}` → {target.connection.get('url') or target.connection.get('command') or ''}")
     if st.button("Run discover", type="primary"):
         with st.spinner("Connecting and inspecting..."):
-            rc, log = run_cli(cmd_discover, timeout=30.0, skip_apps=False, sample="off",
+            rc, log = run_cli(cmd_discover, live=True, timeout=30.0, skip_apps=False, sample="off",
                                approve_mutations=False, approve_destructive=False,
                                skip_setup=False, strict=False)
         (st.success if rc == 0 else st.error)("Discover finished" if rc == 0 else "Discover failed")
@@ -273,7 +438,7 @@ with tabs[0]:
 # --------------------------------------------------------------------------- #
 # 2. Configure the agent-under-test host + generate/curate the plan
 # --------------------------------------------------------------------------- #
-with tabs[1]:
+with tabs[2]:
     st.markdown(
         """
         <div class="ghost-hero">
@@ -285,10 +450,72 @@ with tabs[1]:
         unsafe_allow_html=True,
     )
     spec = _spec()
-    has_aut = any(h.get("kind") in ("process", "codex-session") for h in spec.hosts)
+    agent_runner = dict((spec.agent or {}).get("runner") or {})
+    has_aut = bool(agent_runner) or any(h.get("kind") in ("process", "codex-session") for h in spec.hosts)
+    resolved = resolved_job_config(spec, _spec_path())
+    runner_view = resolved["agent"]["runner"]
+    with st.container(border=True):
+        st.subheader("OpenShell configuration")
+        with st.form("sandbox-config"):
+            s1, s2 = st.columns(2)
+            sandbox_backend = s1.selectbox("Execution backend", ["openshell", "local"], index=0 if resolved["sandbox"]["backend"] == "openshell" else 1)
+            sandbox_image = s2.text_input("Image", value=str(resolved["sandbox"]["image"]), disabled=sandbox_backend == "local")
+            provider_value = st.text_input("Providers", value=", ".join(resolved["sandbox"]["providers"]), placeholder="openai, github", disabled=sandbox_backend == "local")
+            env_value = st.text_input("Environment allowlist", value=", ".join(resolved["sandbox"]["env_allowlist"]), placeholder="API_KEY, PROJECT_ID")
+            st.caption("Providers supply managed credentials and matching egress. Environment variables are never inherited unless allowlisted.")
+            save_sandbox = st.form_submit_button("Save sandbox configuration")
+        if save_sandbox:
+            spec.sandbox = {
+                **(spec.sandbox or {}), "backend": sandbox_backend,
+                "image": sandbox_image or "base",
+                "providers": [part.strip() for part in provider_value.split(",") if part.strip()],
+                "env_allowlist": [part.strip() for part in env_value.split(",") if part.strip()],
+            }
+            if (spec.agent or {}).get("runner"):
+                spec.agent["runner"]["sandbox"] = dict(spec.sandbox)
+            save_spec(spec, _spec_path())
+            st.success("Saved sandbox providers, image, and environment policy.")
+            st.rerun()
+    with st.container(border=True):
+        st.subheader("Agent and model configuration")
+        st.caption("These are effective runtime values, not hidden defaults. Saving updates job.yaml and the materialized AUT runner together.")
+        if runner_view["backend"] in ("codex", "not configured"):
+            with st.form("runtime-config"):
+                m1, m2, m3, m4 = st.columns(4)
+                aut_model = m1.text_input("AUT model", value="" if runner_view["model"] == "Codex CLI default" else runner_view["model"], placeholder="Codex CLI default")
+                user_model = m2.text_input("User model", value="" if resolved["models"]["user_emulator"] == "Codex CLI default" else resolved["models"]["user_emulator"], placeholder="AUT / Codex default")
+                generation_model = m3.text_input("Generation model", value="" if resolved["models"]["generation"] == "Codex CLI default" else resolved["models"]["generation"], placeholder="AUT / Codex default")
+                judge_model = m4.text_input("Judge model", value="" if resolved["models"]["judge"] == "Codex CLI default" else resolved["models"]["judge"], placeholder="Generation / AUT default")
+                r1, r2, r3, r4 = st.columns(4)
+                kinds = ["process", "codex-session"]
+                runner_kind = r1.selectbox("Runner lifecycle", kinds, index=kinds.index(runner_view["kind"]) if runner_view["kind"] in kinds else 0)
+                runner_timeout = r2.number_input("Turn timeout", 10, 3600, int(runner_view["timeout_seconds"] or 600))
+                approval_values = ["never", "on-request", "untrusted"]
+                approval = r3.selectbox("Approval mode", approval_values, index=approval_values.index(runner_view["approval_mode"]) if runner_view["approval_mode"] in approval_values else 0)
+                sandbox_values = ["read-only", "workspace-write", "danger-full-access"]
+                nested_sandbox = r4.selectbox("Codex sandbox", sandbox_values, index=sandbox_values.index(runner_view["codex_sandbox"]) if runner_view["codex_sandbox"] in sandbox_values else 0)
+                command = runner_view["command"] or ["codex"]
+                codex_executable = st.text_input("Codex executable", value=str(command[0]))
+                st.code(" ".join(command), language="bash")
+                save_runtime = st.form_submit_button("Save runtime configuration", type="primary")
+            if save_runtime:
+                update_agent_runtime(
+                    spec, _spec_path(), model=aut_model, kind=runner_kind,
+                    timeout_seconds=int(runner_timeout), approval_mode=approval,
+                    codex_sandbox=nested_sandbox, codex_bin=codex_executable,
+                    user_model=user_model or aut_model,
+                    generation_model=generation_model or aut_model,
+                    judge_model=judge_model or generation_model or aut_model,
+                )
+                st.success("Saved the AUT, user, generation, and judge runtime configuration.")
+                st.rerun()
+        else:
+            st.info("This job uses a custom runner. Edit its command in agent.runner/job.yaml; Ghostlab displays the exact resolved command on the Overview tab.")
     with st.container(border=True):
         st.subheader("Agent-under-test host")
         if has_aut:
+            if agent_runner:
+                st.success(f"`agent.runner` ({agent_runner.get('kind', 'process')}) — configured inline")
             for host in spec.hosts:
                 if host.get("kind") in ("process", "codex-session"):
                     st.success(f"`{host['id']}` ({host['kind']}) — {host.get('config_ref', '')}")
@@ -311,7 +538,7 @@ with tabs[1]:
                     "until a host is configured (see README's Runner Configs section)."
                 )
 
-    if not (spec.capabilities or {}).get("tools"):
+    if not (spec.capabilities or {}).get("generated_from"):
         st.info("Run discover (tab 1) before generating a plan.")
     else:
         with st.container(border=True):
@@ -324,9 +551,9 @@ with tabs[1]:
             if st.button("Generate plan", type="primary"):
                 with st.spinner("Generating persona/scenario cases and building the coverage plan..."):
                     rc, log = run_cli(
-                        cmd_plan, out=None, approve=None, reject=None, generate=True,
+                        cmd_plan, live=True, out=None, approve=None, reject=None, generate=True,
                         regenerate=regenerate, personas=int(personas), scenarios_per_persona=int(spp),
-                        codex_bin=codex_bin, model=model,
+                        codex_bin=codex_bin, model=model, require_semantic=True,
                     )
                 (st.success if rc == 0 else st.error)("Plan generated" if rc == 0 else "Plan generation failed")
                 st.code(log or "(no output)")
@@ -385,7 +612,7 @@ with tabs[1]:
 # --------------------------------------------------------------------------- #
 # 3. Run
 # --------------------------------------------------------------------------- #
-with tabs[2]:
+with tabs[3]:
     st.markdown(
         """
         <div class="ghost-hero">
@@ -413,10 +640,10 @@ with tabs[2]:
             suite_arg = None if set(selected_suites) == set(suite_names) else selected_suites
             with st.spinner(f"Running {', '.join(selected_suites)}... semantic/security cases run a live judged conversation."):
                 rc, log = run_cli(
-                    cmd_test, plan=None, suite=suite_arg, hosts=None, approved_only=approved_only,
+                    cmd_test, live=True, plan=None, suite=suite_arg, hosts=None, approved_only=approved_only,
                     user_runner=None, apps_mode=apps_mode, skip_setup=False, timeout=30.0,
                     repeat=int(repeat), profile=None, strict=False, judge=judge,
-                    codex_bin=codex_bin, model=model,
+                    codex_bin=codex_bin, model=model, require_semantic=True,
                 )
             (st.success if rc == 0 else st.error)("Run finished" if rc == 0 else "Run finished with failures")
             st.code(log or "(no output)")
@@ -425,7 +652,7 @@ with tabs[2]:
 # --------------------------------------------------------------------------- #
 # 4. Results
 # --------------------------------------------------------------------------- #
-with tabs[3]:
+with tabs[4]:
     st.markdown(
         """
         <div class="ghost-hero">
@@ -446,16 +673,35 @@ with tabs[3]:
         results = json.loads(results_path.read_text(encoding="utf-8"))
 
         totals = results["totals"]
-        m1, m2, m3, m4, m5 = st.columns(5)
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
         m1.metric("Executed", results["executed"])
         m2.metric("Pass", totals["pass"])
         m3.metric("Fail", totals["fail"])
         m4.metric("Error", totals["error"])
-        m5.metric("Pass rate", "n/a" if results["pass_rate"] is None else f"{results['pass_rate']:.0%}")
+        m5.metric("Skip", totals.get("skip", 0))
+        m6.metric("Pass rate", "n/a" if results["pass_rate"] is None else f"{results['pass_rate']:.0%}")
+
+        dashboard_path = build_dashboard(results_path.parent)
+        st.download_button(
+            "Download standalone dashboard",
+            dashboard_path.read_bytes(),
+            file_name=f"{results.get('id', 'ghostlab')}-dashboard.html",
+            mime="text/html",
+        )
 
         st.markdown("### Cases")
+        f1, f2 = st.columns(2)
+        statuses = sorted({entry["status"] for entry in results["results"]})
+        suites = sorted({entry["suite"] for entry in results["results"]})
+        selected_statuses = f1.multiselect("Status", statuses, default=statuses)
+        selected_result_suites = f2.multiselect("Suite", suites, default=suites)
         status_color = {"pass": "green", "fail": "red", "error": "red", "skip": "gray"}
-        for entry in results["results"]:
+        visible_results = [
+            entry for entry in results["results"]
+            if entry["status"] in selected_statuses and entry["suite"] in selected_result_suites
+        ]
+        st.caption(f"Showing {len(visible_results)} of {len(results['results'])} case results")
+        for entry in visible_results:
             color = status_color.get(entry["status"], "gray")
             with st.expander(
                 f":{color}[{entry['status'].upper()}] {entry['case']} [{entry['suite']}/{entry['kind']}] on {entry['host']}"

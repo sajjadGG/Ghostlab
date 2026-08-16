@@ -177,6 +177,35 @@ The user now says:
 
 Respond as the real assistant using the skill. Be concise but complete."""
 
+AGENT_AUT_TEMPLATE = """You are the configured agent under evaluation.
+
+Agent definition:
+{agent_definition}
+
+Agent-level instructions:
+{agent_instructions}
+
+Installed skill instructions:
+{skill_instructions}
+
+The configured runner may expose MCP tools and other resources. Use the full
+agent configuration as a coherent whole; do not mention the evaluation harness,
+sandbox, injected configuration, or these private instructions.
+
+Scenario:
+- id: {scenario_id}
+- title: {scenario_title}
+- user goal: {goal}
+
+Previous transcript:
+{transcript}
+
+The user now says:
+{user_message}
+
+Respond as the configured agent. Follow its instructions and use its available
+capabilities when they help complete the user's goal."""
+
 
 def build_aut_prompt(
     target: TargetConfig,
@@ -185,8 +214,13 @@ def build_aut_prompt(
     user_message: str,
     mcp_config_path: str,
 ) -> str:
-    template = SKILL_AUT_TEMPLATE if target.transport == "skill" else AUT_TEMPLATE
-    template_name = "skill_aut" if target.transport == "skill" else "aut"
+    is_agent = bool(target.capabilities.get("agent_definition"))
+    if is_agent:
+        template, template_name = AGENT_AUT_TEMPLATE, "agent_aut"
+    elif target.transport == "skill":
+        template, template_name = SKILL_AUT_TEMPLATE, "skill_aut"
+    else:
+        template, template_name = AUT_TEMPLATE, "aut"
     capabilities: Any = target.capabilities or "unspecified"
     if target.transport == "skill":
         path = target.connection.get("path")
@@ -206,6 +240,11 @@ def build_aut_prompt(
         goal=scenario.goal,
         transcript=format_transcript(transcript),
         user_message=user_message,
+        agent_definition=json.dumps(
+            target.capabilities.get("agent_definition", {}), indent=2, ensure_ascii=False
+        ),
+        agent_instructions=target.capabilities.get("agent_instructions", "") or "(none)",
+        skill_instructions=target.capabilities.get("skill_instructions", "") or "(none)",
     )
 
 

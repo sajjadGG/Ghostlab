@@ -23,12 +23,16 @@ from pathlib import Path
 
 from .config import ConfigError, TargetConfig
 from .spec import (
+    DEFAULT_GENERATION,
+    DEFAULT_PROMPTS,
+    DEFAULT_TEST,
     JOB_WORKSPACE,
     GhostlabSpec,
     save_spec,
     spec_from_target,
     spec_from_skill,
 )
+from .sandbox import DEFAULT_SANDBOX
 
 JOB_FILE = "job.yaml"
 DEFAULT_JOBS_DIR = "jobs"
@@ -43,6 +47,8 @@ _BEARER_ENV_RE = re.compile(r"Bearer\s+\$\{(\w+)\}")
 _PROMPT_PLACEHOLDERS = {
     "aut": "target_id, transport, capabilities, mcp_config_path, scenario_id, "
            "scenario_title, goal, transcript, user_message",
+    "agent_aut": "agent_definition, agent_instructions, skill_instructions, scenario_id, "
+                 "scenario_title, goal, transcript, user_message",
     "skill_aut": "target_id, transport, capabilities, mcp_config_path, scenario_id, "
                  "scenario_title, goal, transcript, user_message",
     "user_emulator": "persona, goal, widget_section, transcript, last_assistant_message",
@@ -102,7 +108,7 @@ def resolve_job(job: str | None) -> Path:
 def job_header(spec: GhostlabSpec) -> str:
     """Comment banner written at the top of a generated job.yaml."""
     lines = [
-        f"# ghostlab job '{spec.id}' — one self-contained MCP evaluation.",
+        f"# ghostlab job '{spec.id}' — one self-contained agent evaluation.",
         "# Everything about this job lives in this folder: job.yaml (this file),",
         "# test-plan.yaml, workspace/ (artifacts + db), and runs/.",
         "#",
@@ -148,6 +154,36 @@ def default_job_spec(
         target, source_target=source_target, name=name, workspace=JOB_WORKSPACE
     )
     spec.id = slug
+    spec.agent = {**(spec.agent or {}), "id": slug}
+    if target.transport == "stdio" and source_target:
+        source_dir = Path(source_target).expanduser().resolve().parent
+        spec.sandbox["uploads"] = [
+            {"source": str(source_dir), "target": "/sandbox"}
+        ]
+        remote_root = Path("/sandbox") / source_dir.name
+        spec.sandbox["workdir"] = str(remote_root)
+
+        def mapped(value):
+            text = str(value)
+            path = Path(text).expanduser()
+            if not path.is_absolute():
+                return text
+            try:
+                relative = path.resolve().relative_to(source_dir)
+            except ValueError:
+                return text
+            return str(remote_root / relative)
+
+        connection = dict(spec.target.get("connection", {}))
+        raw_command = connection.get("command")
+        if isinstance(raw_command, list):
+            connection["command"] = [mapped(part) for part in raw_command]
+        elif raw_command:
+            connection["command"] = mapped(raw_command)
+        connection["args"] = [mapped(part) for part in connection.get("args", [])]
+        mcps = ((spec.agent or {}).get("inputs", {}) or {}).get("mcps", []) or []
+        if mcps:
+            mcps[0]["connection"] = dict(connection)
     if generation:
         spec.generation = {**spec.generation, **{k: v for k, v in generation.items() if v is not None}}
     if test:
@@ -182,7 +218,102 @@ def default_skill_job_spec(
     return spec
 
 
-def build_codex_aut_runner(spec: GhostlabSpec) -> dict:
+def default_agent_job_spec(
+    name: str, *, agent: dict, sandbox: dict | None = None,
+    generation: dict | None = None, review_gates: dict | None = None,
+) -> GhostlabSpec:
+    """Build a job around an arbitrary composed agent definition."""
+    slug = slugify(name)
+    inputs = dict(agent.get("inputs", {}) or {})
+    mcps = inputs.get("mcps", []) or []
+    skills = inputs.get("skills", []) or []
+    if mcps:
+        first = dict(mcps[0])
+        target = {
+            "kind": "mcp", "transport": first.get("transport", "streamable-http"),
+            "connection": dict(first.get("connection", {})),
+            "capabilities": dict(first.get("capabilities", {})),
+            "startup": dict(first.get("startup", {})),
+        }
+    elif skills:
+        first = skills[0]
+        skill_path = first.get("path") if isinstance(first, dict) else first
+        target = {
+            "kind": "skill", "transport": "skill",
+            "connection": {"path": str(skill_path)}, "capabilities": {}, "startup": {},
+        }
+    else:
+        target = {
+            "kind": "agent", "transport": "agent", "connection": {},
+            "capabilities": {}, "startup": {},
+        }
+    spec = GhostlabSpec(
+        id=slug, name=name, workspace=JOB_WORKSPACE, target=target,
+        agent={**agent, "id": str(agent.get("id") or slug)},
+        sandbox={**DEFAULT_SANDBOX, **dict(sandbox or {})},
+        setup={"commands": [], "health": [], "reset": [], "teardown": [], "fixtures": []},
+        hosts=[], capabilities={}, generation=dict(DEFAULT_GENERATION),
+        test=dict(DEFAULT_TEST), prompts=dict(DEFAULT_PROMPTS), test_plan={},
+        review={"gates": {"min_pass_rate": 0.9}},
+    )
+    if generation:
+        spec.generation.update(generation)
+    if review_gates:
+        spec.review["gates"].update(review_gates)
+    return spec
+
+
+def _set_cli_option(command: list[str], flags: tuple[str, ...], value: str) -> list[str]:
+    """Replace a two-token CLI option, or insert it before `exec`."""
+    cleaned: list[str] = []
+    skip = False
+    for index, part in enumerate(command):
+        if skip:
+            skip = False
+            continue
+        if part in flags:
+            if index + 1 < len(command):
+                skip = True
+            continue
+        cleaned.append(part)
+    if not value:
+        return cleaned
+    position = cleaned.index("exec") if "exec" in cleaned else len(cleaned)
+    return [*cleaned[:position], flags[0], value, *cleaned[position:]]
+
+
+def configure_codex_runner(
+    runner: dict, *, model: str = "", kind: str = "", timeout_seconds: int | None = None,
+    approval_mode: str = "", codex_sandbox: str = "", codex_bin: str = "",
+) -> dict:
+    """Apply explicit Codex runtime settings while preserving MCP overrides."""
+    configured = dict(runner)
+    command = [str(part) for part in configured.get("command", [])]
+    if not command or (
+        Path(command[0]).name != "codex" and configured.get("parser") != "codex-json"
+    ):
+        return configured
+    if codex_bin:
+        command[0] = codex_bin
+    if model:
+        command = _set_cli_option(command, ("-m", "--model"), model)
+    if approval_mode:
+        command = _set_cli_option(command, ("-a", "--ask-for-approval"), approval_mode)
+    if codex_sandbox:
+        command = _set_cli_option(command, ("--sandbox",), codex_sandbox)
+    configured["command"] = command
+    if kind:
+        configured["kind"] = kind
+    if timeout_seconds is not None:
+        configured["timeout_seconds"] = int(timeout_seconds)
+    return configured
+
+
+def build_codex_aut_runner(
+    spec: GhostlabSpec, *, model: str = "", kind: str = "process",
+    timeout_seconds: int = 600, approval_mode: str = "never",
+    codex_sandbox: str = "read-only", codex_bin: str = "codex",
+) -> dict:
     """Synthesize a codex agent-under-test runner config for this job's target.
 
     Wires the job's target MCP straight into a codex process via `-c
@@ -193,38 +324,90 @@ def build_codex_aut_runner(spec: GhostlabSpec) -> dict:
     via codex's `bearer_token_env_var`; anything else is left unwired (the
     caller should tell the user auth wasn't configured, not fail the wizard).
     """
-    target = spec.target_config()
-    connection = target.connection or {}
-    command = [
-        "codex", "--sandbox", "read-only", "-a", "never",
-    ]
-    if target.transport == "skill":
-        pass  # Skill instructions are injected into the AUT prompt, not as MCP config.
-    elif target.transport == "stdio":
-        parts = connection.get("command") or []
-        if isinstance(parts, str):
-            parts = [parts]
-        parts = [*parts, *(connection.get("args") or [])]
-        command += ["-c", f"mcp_servers.{spec.id}.command={json.dumps([str(p) for p in parts])}"]
-    else:
+    command = [codex_bin, "--sandbox", codex_sandbox, "-a", approval_mode]
+    if model:
+        command += ["-m", model]
+    agent_mcps = ((spec.agent or {}).get("inputs", {}) or {}).get("mcps", []) or []
+    if not agent_mcps and spec.target_type == "mcp":
+        target = spec.target_config()
+        agent_mcps = [{
+            "id": target.id, "transport": target.transport,
+            "connection": target.connection,
+        }]
+    for entry in agent_mcps:
+        server_id = str(entry.get("id") or spec.id)
+        transport = str(entry.get("transport") or "streamable-http")
+        connection = dict(entry.get("connection") or {})
+        if transport == "stdio":
+            parts = connection.get("command") or []
+            if isinstance(parts, str):
+                parts = [parts]
+            parts = [*parts, *(connection.get("args") or [])]
+            command += [
+                "-c", f"mcp_servers.{server_id}.command={json.dumps([str(p) for p in parts])}",
+            ]
+            continue
         url = connection.get("url", "")
-        command += ["-c", f"mcp_servers.{spec.id}.url={json.dumps(str(url))}"]
+        command += ["-c", f"mcp_servers.{server_id}.url={json.dumps(str(url))}"]
         for value in (connection.get("headers") or {}).values():
             match = _BEARER_ENV_RE.search(str(value))
             if match:
                 command += [
                     "-c",
-                    f"mcp_servers.{spec.id}.bearer_token_env_var={json.dumps(match.group(1))}",
+                    f"mcp_servers.{server_id}.bearer_token_env_var={json.dumps(match.group(1))}",
                 ]
                 break
     command += ["exec", "--json", "--skip-git-repo-check", "-"]
     return {
-        "kind": "process",
+        "kind": kind,
         "command": command,
         "env": {},
-        "timeout_seconds": 600,
+        "timeout_seconds": timeout_seconds,
         "prompt_mode": "stdin",
         "parser": "codex-json",
+        "sandbox": dict(spec.sandbox),
+    }
+
+
+def build_opencode_aut_runner(
+    spec: GhostlabSpec, spec_path: Path, *, model: str = "", timeout_seconds: int = 600,
+    opencode_bin: str = "",
+) -> dict:
+    """Synthesize an opencode agent-under-test runner for this job's target.
+
+    The opencode counterpart of :func:`build_codex_aut_runner`. Where codex takes
+    the MCP as `-c` overrides, opencode reads a project `opencode.json`, so the
+    job gets one written under `runners/opencode-aut/` and the runner simply
+    points at that directory.
+    """
+    from .runner_presets import opencode_aut_runner
+
+    agent_mcps = ((spec.agent or {}).get("inputs", {}) or {}).get("mcps", []) or []
+    if agent_mcps:
+        entry = agent_mcps[0]
+        target = TargetConfig(
+            id=str(entry.get("id") or spec.id),
+            transport=str(entry.get("transport") or "streamable-http"),
+            connection=dict(entry.get("connection") or {}),
+        )
+    else:
+        target = spec.target_config()
+
+    project_dir = spec_path.resolve().parent / RUNNERS_DIR / "opencode-aut"
+    runner = opencode_aut_runner(
+        target, project_dir, timeout_seconds=timeout_seconds,
+        opencode_bin=opencode_bin, model=model,
+    )
+    return {
+        "kind": runner.kind,
+        "command": list(runner.command),
+        "env": {},
+        "timeout_seconds": runner.timeout_seconds,
+        "prompt_mode": runner.prompt_mode,
+        "parser": runner.parser,
+        # opencode drives the host's own MCP process; OpenShell wrapping of the
+        # agent CLI itself is not supported yet, so keep the boundary explicit.
+        "sandbox": {"backend": "local"},
     }
 
 
@@ -241,14 +424,60 @@ def add_aut_host(spec: GhostlabSpec, spec_path: Path, runner_config: dict) -> Pa
     runners_dir.mkdir(exist_ok=True)
     runner_path = runners_dir / AUT_RUNNER_FILE
     runner_path.write_text(json.dumps(runner_config, indent=2) + "\n", encoding="utf-8")
+    runner_kind = str(runner_config.get("kind", "process"))
     spec.hosts.append({
         "id": "aut",
-        "kind": "process",
+        "kind": runner_kind,
         "config_ref": f"{RUNNERS_DIR}/{AUT_RUNNER_FILE}",
         "roles": ["agent_under_test"],
     })
+    spec.agent = {
+        **(spec.agent or {"id": spec.id, "inputs": {"mcps": [], "skills": []}}),
+        "runner": dict(runner_config),
+    }
     save_spec(spec, spec_path)
     return runner_path
+
+
+def update_agent_runtime(
+    spec: GhostlabSpec, spec_path: Path, *, model: str, kind: str,
+    timeout_seconds: int, approval_mode: str, codex_sandbox: str, codex_bin: str,
+    user_model: str, generation_model: str, judge_model: str,
+) -> None:
+    """Persist runtime choices to the inline agent and any materialized host file."""
+    runner = dict((spec.agent or {}).get("runner") or {})
+    if not runner:
+        runner = build_codex_aut_runner(spec)
+    runner = configure_codex_runner(
+        runner, model=model, kind=kind, timeout_seconds=timeout_seconds,
+        approval_mode=approval_mode, codex_sandbox=codex_sandbox, codex_bin=codex_bin,
+    )
+    spec.agent = {
+        **(spec.agent or {}),
+        "runner": runner,
+        "runtime": {
+            "backend": "codex", "model": model, "kind": kind,
+            "timeout_seconds": timeout_seconds, "approval_mode": approval_mode,
+            "codex_sandbox": codex_sandbox, "codex_bin": codex_bin,
+        },
+    }
+    spec.generation = {
+        **(spec.generation or {}), "model": generation_model, "codex_bin": codex_bin,
+    }
+    spec.test = {
+        **(spec.test or {}), "user_model": user_model, "judge_model": judge_model,
+    }
+    for host in spec.hosts or []:
+        ref = host.get("config_ref")
+        if host.get("kind") not in ("process", "codex-session") or not ref:
+            continue
+        path = Path(str(ref))
+        if not path.is_absolute():
+            path = spec_path.resolve().parent / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(runner, indent=2) + "\n", encoding="utf-8")
+        host["kind"] = kind
+    save_spec(spec, spec_path)
 
 
 def create_job(
@@ -263,5 +492,23 @@ def create_job(
     job_dir.mkdir(parents=True, exist_ok=True)
     (job_dir / JOB_WORKSPACE).mkdir(exist_ok=True)
     (job_dir / "runs").mkdir(exist_ok=True)
+    if (spec.agent or {}).get("tests"):
+        from .agents import write_agent_scenarios
+        from .plan import build_test_plan, write_test_plan
+
+        configured = write_agent_scenarios(spec.agent, job_dir)
+        contract = {
+            "mcp": spec.agent.get("name", spec.id), "tools": [],
+            "counts": {"tools": 0, "resources": 0, "prompts": 0, "ui_tools": 0},
+            "findings": [],
+        }
+        plan = build_test_plan(
+            spec.id, contract, [], generated_cases=configured, target_type="agent",
+        )
+        write_test_plan(plan, job_dir / "test-plan.yaml")
+        spec.test_plan = {
+            "plan_file": "test-plan.yaml", "generated_at": plan["generated_at"],
+            "cases": len(plan["cases"]),
+        }
     save_spec(spec, spec_path, header=job_header(spec))
     return spec_path
