@@ -19,6 +19,7 @@ from .runners import create_runner, redact_host_noise
 from .tool_capture import (
     annotate_tool_failures,
     parse_codex_output,
+    parse_opencode_output,
     parse_tool_calls,
     summarize_tool_calls,
 )
@@ -240,6 +241,12 @@ def run_scenario(
             parsed = parse_codex_output(aut_result.output)
             aut_message = parsed["message"] or redact_host_noise(aut_result.output)
             tool_calls = parsed["tool_calls"]
+        elif aut_runner_config.parser == "opencode-json":
+            # opencode namespaces MCP tools as `<server>_<tool>`; pass the target
+            # id so its own built-in tools are not mistaken for MCP calls.
+            parsed = parse_opencode_output(aut_result.output, servers=[target.id])
+            aut_message = parsed["message"] or redact_host_noise(aut_result.output)
+            tool_calls = parsed["tool_calls"]
         else:
             aut_message = redact_host_noise(aut_result.output)
             tool_calls = parse_tool_calls(aut_result.output, aut_result.stderr)
@@ -305,7 +312,15 @@ def run_scenario(
         )
         emit(Event.create("user_emulator_prompt", turn=turn_index, prompt=user_prompt))
         user_result = user_runner.run_turn(user_prompt)
-        user_message_out = redact_host_noise(user_result.output)
+        if user_runner_config.parser in ("opencode-json", "opencode-text"):
+            # The emulator speaks over an opencode JSON event stream; recover the
+            # human-visible reply so the AUT never sees raw protocol frames.
+            user_message_out = (
+                parse_opencode_output(user_result.output)["message"]
+                or redact_host_noise(user_result.output)
+            )
+        else:
+            user_message_out = redact_host_noise(user_result.output)
         emit(
             Event.create(
                 "user_emulator_result",

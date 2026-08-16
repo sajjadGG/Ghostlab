@@ -15,13 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .llm_backend import LlmBackendError
+
 # Fallback locations checked when `codex` is not on PATH and the env var is unset.
 _DEFAULT_CODEX_PATHS = [
     "/Applications/Codex.app/Contents/Resources/codex",
 ]
 
 
-class CodexError(RuntimeError):
+class CodexError(LlmBackendError):
     """Raised when the codex backend cannot run or returns unusable output."""
 
 

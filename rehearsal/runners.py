@@ -249,9 +249,36 @@ class OpenShellCodexSessionRunner(OpenShellProcessRunner):
         return result
 
 
+class OpencodeProcessRunner(ProcessRunner):
+    """ProcessRunner that treats an opencode `error` event as a failed turn.
+
+    opencode exits 0 even when the provider rejects the request (bad model,
+    revoked auth, quota), leaving only an `{"type":"error"}` frame in the
+    stream. Without this the orchestrator would take that frame as the agent's
+    reply and feed raw JSON to the other agent as if a human had typed it.
+    """
+
+    def run_turn(self, prompt: str) -> RunnerResult:
+        result = super().run_turn(prompt)
+        from .tool_capture import parse_opencode_output
+
+        errors = parse_opencode_output(result.output).get("errors") or []
+        if errors and result.exit_code == 0:
+            detail = "; ".join(errors)[:500]
+            return RunnerResult(
+                output=result.output,
+                exit_code=1,
+                timed_out=result.timed_out,
+                stderr=(f"opencode error: {detail}\n{result.stderr}").strip(),
+            )
+        return result
+
+
 def create_runner(config: RunnerConfig, name: str) -> AgentRunner:
     if config.kind == "mock":
         return MockRunner(name)
+    if config.parser in ("opencode-json", "opencode-text"):
+        return OpencodeProcessRunner(config)
     backend = str((config.sandbox or {}).get("backend", "local"))
     if backend == "openshell" and config.kind == "process":
         return OpenShellProcessRunner(config, name)

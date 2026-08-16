@@ -42,7 +42,10 @@ classifiers = [
   "Topic :: Software Development :: Quality Assurance",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = []
+dependencies = [
+  "questionary>=2.1,<3",
+  "rich>=14,<16",
+]
 
 [project.optional-dependencies]
 dev = [

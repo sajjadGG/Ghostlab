@@ -12,7 +12,9 @@ ghostlab create --name api-eval --target https://example.com/mcp --yes
 ghostlab create --name notes-skill --skill ./skills/notes --yes
 ghostlab create --name full-agent --agent ./agent.yaml --yes
 ghostlab create --name full-agent --agent ./agent.yaml \
-  --image base --provider openai --yes
+  --image base --provider openai --model gpt-5.2-codex \
+  --user-model gpt-5.2-codex --generation-model gpt-5.2-codex \
+  --judge-model gpt-5.2-codex --yes
 ```
 
 `--agent`, `--skill`, and `--target` are mutually exclusive. `--agent` accepts
@@ -25,15 +27,40 @@ CLI opt-out; there is no `--local` shorthand and no automatic fallback.
 Use repeatable `--provider NAME` flags and `--image IMAGE` to configure
 OpenShell without editing the generated job.
 
-Without `--yes`, the guided creator asks for the subject type and source,
-sandbox settings, persona/scenario counts, and minimum pass rate. It then shows
-a resolved configuration preview, checks OpenShell, asks before writing, and
-prints stable `[1/5]` through `[5/5]` pipeline progress. `--yes` preserves the
-non-interactive behavior for automation.
+Without `--yes`, the Questionary/Rich creator asks for the subject, sandbox,
+OpenShell image/providers, AUT/user/generation/judge models, runner lifecycle
+and timeout, Codex approval/nested-sandbox policy, scenario size, and release
+gate. Arrow-key choices and a checkbox suite picker replace ambiguous text
+prompts. It previews the effective configuration and prints stable `[1/5]`
+through `[5/5]` progress. `--yes` keeps the non-interactive automation path.
+
+The full creator requires a real semantic result. It exits non-zero instead of
+claiming completion when generation only produced inert placeholders or every
+semantic/security case skipped. The job and diagnostic plan remain on disk so
+you can fix credentials/providers or runner settings and resume.
 
 `ghostlab create --name NAME --resume` continues an existing job without asking
 for the target again. It reuses completed discovery and cached generation
 artifacts, then resumes per-case testing where possible.
+
+## config
+
+Show every effective agent setting, including the exact runner command and its
+source, AUT/user/generation/judge models, runner lifecycle, timeout, parser,
+approval mode, nested Codex sandbox, composed MCPs/skills/assets, and OpenShell
+providers/uploads/policy:
+
+```bash
+ghostlab config --job my-agent
+ghostlab config --job my-agent --json
+```
+
+The readable form is syntax-colored; `--json` is stable machine-readable
+output. When `-m` is omitted, Ghostlab reads only the top-level `model` from
+Codex's `config.toml` and reports that inherited model plus its source instead
+of the ambiguous label “CLI default.” The dashboard Overview exposes the same resolved view, and its
+Configure tab edits the Codex and OpenShell fields in `job.yaml` plus a
+materialized AUT runner together.
 
 ## init
 
@@ -125,6 +152,7 @@ ghostlab plan --spec ghostlab.yaml                     # generate/regenerate (pe
 ghostlab plan --spec ghostlab.yaml --no-generate       # fast, free, deterministic-only plan
 ghostlab plan --spec ghostlab.yaml --personas 3 --scenarios-per-persona 3
 ghostlab plan --spec ghostlab.yaml --regenerate        # force fresh personas/scenarios
+ghostlab plan --spec ghostlab.yaml --require-semantic  # fail on placeholder-only plans
 ghostlab plan --spec ghostlab.yaml --approve           # curate: approve all cases
 ghostlab plan --spec ghostlab.yaml --reject security-resource-injection
 ```
@@ -168,6 +196,7 @@ ghostlab test --spec ghostlab.yaml --suite smoke --suite edge   # CI-able subset
 ghostlab test --spec ghostlab.yaml --hosts direct-mcp --approved-only --strict
 ghostlab test --spec ghostlab.yaml --no-judge                   # skip the codex judge/critique
 ghostlab test --spec ghostlab.yaml --resume                     # resume latest partial run
+ghostlab test --spec ghostlab.yaml --require-semantic            # require a real conversation
 ghostlab test --spec ghostlab.yaml --sandbox local               # explicit unsandboxed opt-out
 ```
 
@@ -195,6 +224,9 @@ finished-or-not. Seeds still marked `needs_generation` (no scenario attached
 yet) skip with instructions to run `ghostlab plan --generate`.
 
 Cases no host can execute surface as explicit skips, never silence.
+With `--require-semantic`, skips, harness errors, and placeholder cases do not
+count as execution and the command exits non-zero unless a conversation trace
+was produced.
 
 The AUT and user-emulator runner sessions use the job's sandbox configuration.
 OpenShell setup/runtime/policy failures are classified as retryable harness
@@ -423,12 +455,26 @@ Writes `scorecard.json` and `scorecard.md` into the summary directory.
 
 Validate the agent, runner, and OpenShell setup. The default check resolves the
 OpenShell CLI and connects to its gateway; `--sandbox local` deliberately skips
-that runtime check.
+that runtime check. Both LLM backends are reported, with the selected one
+marked.
 
 ```bash
 ghostlab doctor
+ghostlab doctor --probe
 ghostlab doctor --runners runners/codex-cortex-local-session.json
 ghostlab doctor --sandbox local
+```
+
+Without `--probe`, a backend is reported as *installed, not verified* — the
+honest limit of a `--version` check. `--probe` sends one tiny live generation
+request to each backend, which is what catches an exhausted quota or a CLI too
+old for the model your account is pinned to. When the selected backend fails
+but another works, doctor names the flag to switch:
+
+```
+[!!] codex (selected): ... The 'gpt-5.6-sol' model requires a newer version of Codex.
+[ok] opencode: /Users/me/.opencode/bin/opencode (1.4.3) — answered a live generation probe
+note: the selected backend 'codex' is unusable; rerun with --llm-backend opencode
 ```
 
 ## apps-probe

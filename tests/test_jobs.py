@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from rehearsal import jobs, prompts
@@ -122,6 +123,54 @@ class CreateAndResolveTest(unittest.TestCase):
         with self.assertRaises(ConfigError) as ctx:
             jobs.resolve_job("definitely-not-a-job")
         self.assertIn("ghostlab create", str(ctx.exception))
+
+    def test_runtime_configuration_updates_inline_and_materialized_runner(self) -> None:
+        spec_path = self._create()
+        spec = load_spec(spec_path)
+        runner_path = jobs.add_aut_host(spec, spec_path, jobs.build_codex_aut_runner(spec))
+        spec = load_spec(spec_path)
+        jobs.update_agent_runtime(
+            spec, spec_path, model="gpt-aut", kind="codex-session",
+            timeout_seconds=901, approval_mode="on-request",
+            codex_sandbox="workspace-write", codex_bin="/opt/codex",
+            user_model="gpt-user", generation_model="gpt-generation",
+            judge_model="gpt-judge",
+        )
+        loaded = load_spec(spec_path)
+        command = loaded.agent["runner"]["command"]
+        self.assertEqual(command[0], "/opt/codex")
+        self.assertEqual(command[command.index("-m") + 1], "gpt-aut")
+        self.assertEqual(command[command.index("-a") + 1], "on-request")
+        self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+        self.assertEqual(loaded.agent["runner"]["kind"], "codex-session")
+        aut_host = next(host for host in loaded.hosts if host["id"] == "aut")
+        self.assertEqual(aut_host["kind"], "codex-session")
+        self.assertEqual(loaded.test["user_model"], "gpt-user")
+        self.assertEqual(loaded.test["judge_model"], "gpt-judge")
+        self.assertEqual(loaded.generation["model"], "gpt-generation")
+        self.assertEqual(json.loads(runner_path.read_text()), loaded.agent["runner"])
+
+    def test_resolved_config_reports_exact_codex_settings(self) -> None:
+        from rehearsal.resolved_config import resolved_job_config
+
+        spec_path = self._create()
+        spec = load_spec(spec_path)
+        runner = jobs.build_codex_aut_runner(
+            spec, model="gpt-aut", approval_mode="never",
+            codex_sandbox="read-only", timeout_seconds=777,
+        )
+        jobs.add_aut_host(spec, spec_path, runner)
+        loaded = load_spec(spec_path)
+        loaded.test["user_model"] = "gpt-user"
+        loaded.test["judge_model"] = "gpt-judge"
+        loaded.generation["model"] = "gpt-generation"
+        resolved = resolved_job_config(loaded, spec_path)
+        self.assertEqual(resolved["agent"]["runner"]["command"], runner["command"])
+        self.assertEqual(resolved["agent"]["runner"]["model"], "gpt-aut")
+        self.assertEqual(resolved["agent"]["runner"]["timeout_seconds"], 777)
+        self.assertEqual(resolved["models"]["user_emulator"], "gpt-user")
+        self.assertEqual(resolved["models"]["generation"], "gpt-generation")
+        self.assertEqual(resolved["models"]["judge"], "gpt-judge")
 
 
 class ConnectionEnvExpansionTest(unittest.TestCase):

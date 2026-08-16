@@ -32,9 +32,11 @@ from rehearsal.jobs import (
     resolve_job,
     slugify,
     target_from_url,
+    update_agent_runtime,
 )
 from rehearsal.plan import load_test_plan, set_case_statuses, write_test_plan
-from rehearsal.spec import load_spec
+from rehearsal.resolved_config import resolved_job_config
+from rehearsal.spec import load_spec, save_spec
 
 st.set_page_config(page_title="Ghostlab", page_icon="👻", layout="wide")
 
@@ -290,6 +292,18 @@ if choice == "+ New job":
             personas = g1.number_input("Personas", 1, 20, 2)
             scenarios = g2.number_input("Scenarios each", 1, 10, 2)
             min_rate = st.slider("Minimum pass rate", 0.0, 1.0, 0.9, 0.05)
+        with st.expander("Codex runtime and models", expanded=True):
+            m1, m2, m3, m4 = st.columns(4)
+            create_aut_model = m1.text_input("AUT model", placeholder="Codex CLI default")
+            create_user_model = m2.text_input("User model", placeholder="AUT / default")
+            create_generation_model = m3.text_input("Generation model", placeholder="AUT / default")
+            create_judge_model = m4.text_input("Judge model", placeholder="Generation / default")
+            r1, r2, r3, r4 = st.columns(4)
+            create_runner_kind = r1.selectbox("Runner lifecycle", ["process", "codex-session"])
+            create_runner_timeout = r2.number_input("Turn timeout", 10, 3600, 600)
+            create_approval = r3.selectbox("Approval mode", ["never", "on-request", "untrusted"])
+            create_codex_sandbox = r4.selectbox("Codex sandbox", ["read-only", "workspace-write", "danger-full-access"])
+            create_codex_bin = st.text_input("Codex executable", value="codex")
         st.caption("Nothing runs yet. This creates an editable job; use the guided stages to discover, plan, run, and review.")
         create_clicked = st.form_submit_button("Create evaluation", type="primary", use_container_width=True)
 
@@ -319,7 +333,15 @@ if choice == "+ New job":
                 if sandbox == "openshell":
                     spec.sandbox["image"] = image or "base"
                     spec.sandbox["providers"] = [item.strip() for item in providers.split(",") if item.strip()]
-                create_job(new_name, spec)
+                created_path = create_job(new_name, spec)
+                update_agent_runtime(
+                    spec, created_path, model=create_aut_model, kind=create_runner_kind,
+                    timeout_seconds=int(create_runner_timeout), approval_mode=create_approval,
+                    codex_sandbox=create_codex_sandbox, codex_bin=create_codex_bin,
+                    user_model=create_user_model or create_aut_model,
+                    generation_model=create_generation_model or create_aut_model,
+                    judge_model=create_judge_model or create_generation_model or create_aut_model,
+                )
                 st.session_state["job"] = slugify(new_name)
                 st.success("Evaluation created. Opening the guided pipeline…")
                 st.rerun()
@@ -340,6 +362,7 @@ tabs = st.tabs(["Overview", "1 · Discover", "2 · Configure & Plan", "3 · Run"
 
 with tabs[0]:
     st.markdown("### Evaluation configuration")
+    resolved = resolved_job_config(spec, _spec_path())
     agent = spec.agent or {}
     inputs = agent.get("inputs", {}) or {}
     c1, c2, c3, c4 = st.columns(4)
@@ -363,6 +386,19 @@ with tabs[0]:
             provider_text = ", ".join((spec.sandbox or {}).get("providers", []) or []) or "No providers attached"
             st.caption(provider_text)
             st.caption("Edit job.yaml for advanced uploads, policy, resources, and environment allowlists.")
+    st.markdown("### Effective models and runner")
+    model_cols = st.columns(4)
+    for column, (label, value) in zip(model_cols, resolved["models"].items()):
+        column.metric(label.replace("_", " ").title(), value)
+    runner_view = resolved["agent"]["runner"]
+    st.code(" ".join(runner_view["command"]) or "Runner not materialized yet", language="bash")
+    st.caption(
+        f"{runner_view['kind']} · timeout {runner_view['timeout_seconds']}s · "
+        f"approval {runner_view['approval_mode']} · Codex sandbox {runner_view['codex_sandbox']} · "
+        f"parser {runner_view['parser']}"
+    )
+    with st.expander("Full resolved configuration"):
+        st.json(resolved)
 
 # --------------------------------------------------------------------------- #
 # 1. Discover
@@ -414,10 +450,72 @@ with tabs[2]:
         unsafe_allow_html=True,
     )
     spec = _spec()
-    has_aut = any(h.get("kind") in ("process", "codex-session") for h in spec.hosts)
+    agent_runner = dict((spec.agent or {}).get("runner") or {})
+    has_aut = bool(agent_runner) or any(h.get("kind") in ("process", "codex-session") for h in spec.hosts)
+    resolved = resolved_job_config(spec, _spec_path())
+    runner_view = resolved["agent"]["runner"]
+    with st.container(border=True):
+        st.subheader("OpenShell configuration")
+        with st.form("sandbox-config"):
+            s1, s2 = st.columns(2)
+            sandbox_backend = s1.selectbox("Execution backend", ["openshell", "local"], index=0 if resolved["sandbox"]["backend"] == "openshell" else 1)
+            sandbox_image = s2.text_input("Image", value=str(resolved["sandbox"]["image"]), disabled=sandbox_backend == "local")
+            provider_value = st.text_input("Providers", value=", ".join(resolved["sandbox"]["providers"]), placeholder="openai, github", disabled=sandbox_backend == "local")
+            env_value = st.text_input("Environment allowlist", value=", ".join(resolved["sandbox"]["env_allowlist"]), placeholder="API_KEY, PROJECT_ID")
+            st.caption("Providers supply managed credentials and matching egress. Environment variables are never inherited unless allowlisted.")
+            save_sandbox = st.form_submit_button("Save sandbox configuration")
+        if save_sandbox:
+            spec.sandbox = {
+                **(spec.sandbox or {}), "backend": sandbox_backend,
+                "image": sandbox_image or "base",
+                "providers": [part.strip() for part in provider_value.split(",") if part.strip()],
+                "env_allowlist": [part.strip() for part in env_value.split(",") if part.strip()],
+            }
+            if (spec.agent or {}).get("runner"):
+                spec.agent["runner"]["sandbox"] = dict(spec.sandbox)
+            save_spec(spec, _spec_path())
+            st.success("Saved sandbox providers, image, and environment policy.")
+            st.rerun()
+    with st.container(border=True):
+        st.subheader("Agent and model configuration")
+        st.caption("These are effective runtime values, not hidden defaults. Saving updates job.yaml and the materialized AUT runner together.")
+        if runner_view["backend"] in ("codex", "not configured"):
+            with st.form("runtime-config"):
+                m1, m2, m3, m4 = st.columns(4)
+                aut_model = m1.text_input("AUT model", value="" if runner_view["model"] == "Codex CLI default" else runner_view["model"], placeholder="Codex CLI default")
+                user_model = m2.text_input("User model", value="" if resolved["models"]["user_emulator"] == "Codex CLI default" else resolved["models"]["user_emulator"], placeholder="AUT / Codex default")
+                generation_model = m3.text_input("Generation model", value="" if resolved["models"]["generation"] == "Codex CLI default" else resolved["models"]["generation"], placeholder="AUT / Codex default")
+                judge_model = m4.text_input("Judge model", value="" if resolved["models"]["judge"] == "Codex CLI default" else resolved["models"]["judge"], placeholder="Generation / AUT default")
+                r1, r2, r3, r4 = st.columns(4)
+                kinds = ["process", "codex-session"]
+                runner_kind = r1.selectbox("Runner lifecycle", kinds, index=kinds.index(runner_view["kind"]) if runner_view["kind"] in kinds else 0)
+                runner_timeout = r2.number_input("Turn timeout", 10, 3600, int(runner_view["timeout_seconds"] or 600))
+                approval_values = ["never", "on-request", "untrusted"]
+                approval = r3.selectbox("Approval mode", approval_values, index=approval_values.index(runner_view["approval_mode"]) if runner_view["approval_mode"] in approval_values else 0)
+                sandbox_values = ["read-only", "workspace-write", "danger-full-access"]
+                nested_sandbox = r4.selectbox("Codex sandbox", sandbox_values, index=sandbox_values.index(runner_view["codex_sandbox"]) if runner_view["codex_sandbox"] in sandbox_values else 0)
+                command = runner_view["command"] or ["codex"]
+                codex_executable = st.text_input("Codex executable", value=str(command[0]))
+                st.code(" ".join(command), language="bash")
+                save_runtime = st.form_submit_button("Save runtime configuration", type="primary")
+            if save_runtime:
+                update_agent_runtime(
+                    spec, _spec_path(), model=aut_model, kind=runner_kind,
+                    timeout_seconds=int(runner_timeout), approval_mode=approval,
+                    codex_sandbox=nested_sandbox, codex_bin=codex_executable,
+                    user_model=user_model or aut_model,
+                    generation_model=generation_model or aut_model,
+                    judge_model=judge_model or generation_model or aut_model,
+                )
+                st.success("Saved the AUT, user, generation, and judge runtime configuration.")
+                st.rerun()
+        else:
+            st.info("This job uses a custom runner. Edit its command in agent.runner/job.yaml; Ghostlab displays the exact resolved command on the Overview tab.")
     with st.container(border=True):
         st.subheader("Agent-under-test host")
         if has_aut:
+            if agent_runner:
+                st.success(f"`agent.runner` ({agent_runner.get('kind', 'process')}) — configured inline")
             for host in spec.hosts:
                 if host.get("kind") in ("process", "codex-session"):
                     st.success(f"`{host['id']}` ({host['kind']}) — {host.get('config_ref', '')}")
@@ -440,7 +538,7 @@ with tabs[2]:
                     "until a host is configured (see README's Runner Configs section)."
                 )
 
-    if not (spec.capabilities or {}).get("tools"):
+    if not (spec.capabilities or {}).get("generated_from"):
         st.info("Run discover (tab 1) before generating a plan.")
     else:
         with st.container(border=True):
@@ -455,7 +553,7 @@ with tabs[2]:
                     rc, log = run_cli(
                         cmd_plan, live=True, out=None, approve=None, reject=None, generate=True,
                         regenerate=regenerate, personas=int(personas), scenarios_per_persona=int(spp),
-                        codex_bin=codex_bin, model=model,
+                        codex_bin=codex_bin, model=model, require_semantic=True,
                     )
                 (st.success if rc == 0 else st.error)("Plan generated" if rc == 0 else "Plan generation failed")
                 st.code(log or "(no output)")
@@ -545,7 +643,7 @@ with tabs[3]:
                     cmd_test, live=True, plan=None, suite=suite_arg, hosts=None, approved_only=approved_only,
                     user_runner=None, apps_mode=apps_mode, skip_setup=False, timeout=30.0,
                     repeat=int(repeat), profile=None, strict=False, judge=judge,
-                    codex_bin=codex_bin, model=model,
+                    codex_bin=codex_bin, model=model, require_semantic=True,
                 )
             (st.success if rc == 0 else st.error)("Run finished" if rc == 0 else "Run finished with failures")
             st.code(log or "(no output)")

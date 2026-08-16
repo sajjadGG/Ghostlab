@@ -263,7 +263,57 @@ def default_agent_job_spec(
     return spec
 
 
-def build_codex_aut_runner(spec: GhostlabSpec) -> dict:
+def _set_cli_option(command: list[str], flags: tuple[str, ...], value: str) -> list[str]:
+    """Replace a two-token CLI option, or insert it before `exec`."""
+    cleaned: list[str] = []
+    skip = False
+    for index, part in enumerate(command):
+        if skip:
+            skip = False
+            continue
+        if part in flags:
+            if index + 1 < len(command):
+                skip = True
+            continue
+        cleaned.append(part)
+    if not value:
+        return cleaned
+    position = cleaned.index("exec") if "exec" in cleaned else len(cleaned)
+    return [*cleaned[:position], flags[0], value, *cleaned[position:]]
+
+
+def configure_codex_runner(
+    runner: dict, *, model: str = "", kind: str = "", timeout_seconds: int | None = None,
+    approval_mode: str = "", codex_sandbox: str = "", codex_bin: str = "",
+) -> dict:
+    """Apply explicit Codex runtime settings while preserving MCP overrides."""
+    configured = dict(runner)
+    command = [str(part) for part in configured.get("command", [])]
+    if not command or (
+        Path(command[0]).name != "codex" and configured.get("parser") != "codex-json"
+    ):
+        return configured
+    if codex_bin:
+        command[0] = codex_bin
+    if model:
+        command = _set_cli_option(command, ("-m", "--model"), model)
+    if approval_mode:
+        command = _set_cli_option(command, ("-a", "--ask-for-approval"), approval_mode)
+    if codex_sandbox:
+        command = _set_cli_option(command, ("--sandbox",), codex_sandbox)
+    configured["command"] = command
+    if kind:
+        configured["kind"] = kind
+    if timeout_seconds is not None:
+        configured["timeout_seconds"] = int(timeout_seconds)
+    return configured
+
+
+def build_codex_aut_runner(
+    spec: GhostlabSpec, *, model: str = "", kind: str = "process",
+    timeout_seconds: int = 600, approval_mode: str = "never",
+    codex_sandbox: str = "read-only", codex_bin: str = "codex",
+) -> dict:
     """Synthesize a codex agent-under-test runner config for this job's target.
 
     Wires the job's target MCP straight into a codex process via `-c
@@ -274,9 +324,9 @@ def build_codex_aut_runner(spec: GhostlabSpec) -> dict:
     via codex's `bearer_token_env_var`; anything else is left unwired (the
     caller should tell the user auth wasn't configured, not fail the wizard).
     """
-    command = [
-        "codex", "--sandbox", "read-only", "-a", "never",
-    ]
+    command = [codex_bin, "--sandbox", codex_sandbox, "-a", approval_mode]
+    if model:
+        command += ["-m", model]
     agent_mcps = ((spec.agent or {}).get("inputs", {}) or {}).get("mcps", []) or []
     if not agent_mcps and spec.target_type == "mcp":
         target = spec.target_config()
@@ -309,13 +359,55 @@ def build_codex_aut_runner(spec: GhostlabSpec) -> dict:
                 break
     command += ["exec", "--json", "--skip-git-repo-check", "-"]
     return {
-        "kind": "process",
+        "kind": kind,
         "command": command,
         "env": {},
-        "timeout_seconds": 600,
+        "timeout_seconds": timeout_seconds,
         "prompt_mode": "stdin",
         "parser": "codex-json",
         "sandbox": dict(spec.sandbox),
+    }
+
+
+def build_opencode_aut_runner(
+    spec: GhostlabSpec, spec_path: Path, *, model: str = "", timeout_seconds: int = 600,
+    opencode_bin: str = "",
+) -> dict:
+    """Synthesize an opencode agent-under-test runner for this job's target.
+
+    The opencode counterpart of :func:`build_codex_aut_runner`. Where codex takes
+    the MCP as `-c` overrides, opencode reads a project `opencode.json`, so the
+    job gets one written under `runners/opencode-aut/` and the runner simply
+    points at that directory.
+    """
+    from .runner_presets import opencode_aut_runner
+
+    agent_mcps = ((spec.agent or {}).get("inputs", {}) or {}).get("mcps", []) or []
+    if agent_mcps:
+        entry = agent_mcps[0]
+        target = TargetConfig(
+            id=str(entry.get("id") or spec.id),
+            transport=str(entry.get("transport") or "streamable-http"),
+            connection=dict(entry.get("connection") or {}),
+        )
+    else:
+        target = spec.target_config()
+
+    project_dir = spec_path.resolve().parent / RUNNERS_DIR / "opencode-aut"
+    runner = opencode_aut_runner(
+        target, project_dir, timeout_seconds=timeout_seconds,
+        opencode_bin=opencode_bin, model=model,
+    )
+    return {
+        "kind": runner.kind,
+        "command": list(runner.command),
+        "env": {},
+        "timeout_seconds": runner.timeout_seconds,
+        "prompt_mode": runner.prompt_mode,
+        "parser": runner.parser,
+        # opencode drives the host's own MCP process; OpenShell wrapping of the
+        # agent CLI itself is not supported yet, so keep the boundary explicit.
+        "sandbox": {"backend": "local"},
     }
 
 
@@ -332,9 +424,10 @@ def add_aut_host(spec: GhostlabSpec, spec_path: Path, runner_config: dict) -> Pa
     runners_dir.mkdir(exist_ok=True)
     runner_path = runners_dir / AUT_RUNNER_FILE
     runner_path.write_text(json.dumps(runner_config, indent=2) + "\n", encoding="utf-8")
+    runner_kind = str(runner_config.get("kind", "process"))
     spec.hosts.append({
         "id": "aut",
-        "kind": "process",
+        "kind": runner_kind,
         "config_ref": f"{RUNNERS_DIR}/{AUT_RUNNER_FILE}",
         "roles": ["agent_under_test"],
     })
@@ -344,6 +437,47 @@ def add_aut_host(spec: GhostlabSpec, spec_path: Path, runner_config: dict) -> Pa
     }
     save_spec(spec, spec_path)
     return runner_path
+
+
+def update_agent_runtime(
+    spec: GhostlabSpec, spec_path: Path, *, model: str, kind: str,
+    timeout_seconds: int, approval_mode: str, codex_sandbox: str, codex_bin: str,
+    user_model: str, generation_model: str, judge_model: str,
+) -> None:
+    """Persist runtime choices to the inline agent and any materialized host file."""
+    runner = dict((spec.agent or {}).get("runner") or {})
+    if not runner:
+        runner = build_codex_aut_runner(spec)
+    runner = configure_codex_runner(
+        runner, model=model, kind=kind, timeout_seconds=timeout_seconds,
+        approval_mode=approval_mode, codex_sandbox=codex_sandbox, codex_bin=codex_bin,
+    )
+    spec.agent = {
+        **(spec.agent or {}),
+        "runner": runner,
+        "runtime": {
+            "backend": "codex", "model": model, "kind": kind,
+            "timeout_seconds": timeout_seconds, "approval_mode": approval_mode,
+            "codex_sandbox": codex_sandbox, "codex_bin": codex_bin,
+        },
+    }
+    spec.generation = {
+        **(spec.generation or {}), "model": generation_model, "codex_bin": codex_bin,
+    }
+    spec.test = {
+        **(spec.test or {}), "user_model": user_model, "judge_model": judge_model,
+    }
+    for host in spec.hosts or []:
+        ref = host.get("config_ref")
+        if host.get("kind") not in ("process", "codex-session") or not ref:
+            continue
+        path = Path(str(ref))
+        if not path.is_absolute():
+            path = spec_path.resolve().parent / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(runner, indent=2) + "\n", encoding="utf-8")
+        host["kind"] = kind
+    save_spec(spec, spec_path)
 
 
 def create_job(

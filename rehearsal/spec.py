@@ -56,6 +56,10 @@ _TOP_LEVEL_KEYS = (
 DEFAULT_GENERATION = {
     "personas": 2,
     "scenarios_per_persona": 2,
+    # Which LLM CLI drives generation/judging: "codex" or "opencode".
+    # opencode sources models from GitHub Copilot and other providers the user
+    # has authenticated, so it is the fallback when codex is unavailable.
+    "backend": "",
     "model": "",
     "codex_bin": "",
     "regenerate": False,
@@ -67,6 +71,8 @@ DEFAULT_TEST = {
     "repeat": 1,
     "timeout": 30.0,
     "user_runner": "",
+    "user_model": "",
+    "judge_model": "",
     "approved_only": False,
 }
 # Each prompt is overridable; "" means "use the built-in template". The

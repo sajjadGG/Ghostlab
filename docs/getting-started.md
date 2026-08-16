@@ -14,6 +14,21 @@ ghostlab --help
 ghostlab --version
 ```
 
+## Install A Coding-Agent CLI
+
+Ghostlab needs one agent CLI to generate scenarios, play the agent under test,
+and judge runs. Either works:
+
+```bash
+codex --version                 # uses your ChatGPT/Codex plan
+opencode --version              # uses GitHub Copilot, Azure, etc.
+```
+
+For opencode, authenticate a provider once (`opencode auth login`) and select it
+per command with `--llm-backend opencode --model github-copilot/claude-sonnet-4.5`,
+or per job via `generation.backend` in `job.yaml`. See the README's
+"Coding-agent backends" section for precedence and model selection.
+
 ## Install And Verify OpenShell
 
 Install [NVIDIA OpenShell](https://docs.nvidia.com/openshell/latest/about/installation)
@@ -24,6 +39,14 @@ gateway:
 ```bash
 openshell status
 ghostlab doctor
+```
+
+`ghostlab doctor` reports the sandbox, both LLM backends, and your runner
+presets. Add `--probe` to send one tiny live request per backend, which is the
+only way to catch an exhausted quota or a CLI too old for your account's model:
+
+```bash
+ghostlab doctor --probe
 ```
 
 `openshell status` must report `Connected`. A CLI binary alone is not enough:
@@ -58,6 +81,42 @@ Ghostlab never switches to local mode automatically. A missing CLI, stopped
 gateway, unavailable image, bad policy, or denied upload is reported as a
 sandbox/harness error so it cannot be mistaken for an agent failure.
 
+### Local stdio MCPs and the sandbox boundary
+
+A stdio MCP is launched by host path (`node /path/to/server/index.js`). Under
+OpenShell that path must exist *inside* the container, so Ghostlab uploads the
+server's own program directory to `/sandbox/mcp/<dirname>` and rewrites the
+command to match. Uploads skip `.gitignore` filtering by default, because the
+files a server needs at runtime (`node_modules`, `.venv`) are usually ignored;
+set `sandbox.respect_git_ignore: true` in `job.yaml` to opt back in.
+
+Before starting the server, Ghostlab checks that its program actually resolves
+inside the sandbox. If it does not, you get a `sandbox_command_missing` error
+naming the missing file, rather than a timeout that looks like the MCP refused
+to answer.
+
+The session itself is carried over OpenShell's SSH channel, not
+`openshell sandbox exec`. `exec` buffers stdin until EOF, so it can run a
+one-shot command but cannot sustain the request/response loop a stdio MCP
+needs — it would deadlock on the first `initialize`. This is why `ssh` must be
+available on the host.
+
+Some MCPs cannot be sandboxed at all: they exist to reach host-only resources.
+A server that drives a macOS app (Safari, Mail, Finder) via AppleScript, or one
+that needs your logged-in browser profile, will never work inside a Linux
+container. Run those with `--sandbox local` and treat the code as trusted:
+
+```bash
+ghostlab discover --job safari --sandbox local
+ghostlab test --job safari --sandbox local
+```
+
+Check the server's own prerequisites too — they are enforced by the host, not
+by Ghostlab. `safari-mcp`, for example, needs Safari's *Develop → Allow
+JavaScript from Apple Events* enabled; without it most of its tools return
+`isError: true` and the smoke suite fails for reasons that have nothing to do
+with the server's contract.
+
 OpenShell currently labels itself alpha software; pin and validate the runtime
 version in CI, and treat gateway/policy upgrades as infrastructure changes.
 
@@ -79,10 +138,25 @@ ghostlab create
 ```
 
 The guided creator configures persona/scenario counts, the release gate,
-OpenShell image/providers, and whether to run immediately. It previews the
-resolved job before writing. For automation, pass `--yes` plus flags such as
-`--personas`, `--scenarios-per-persona`, `--min-pass-rate`, `--image`,
-`--provider`, or `--aut-runner`. Add `--no-discover` to scaffold only.
+OpenShell image/providers, AUT/user/generation/judge models, runner lifecycle,
+timeout, Codex policy, and whether to run immediately. It previews the resolved
+job before writing. For automation, pass `--yes` plus flags such as `--model`,
+`--user-model`, `--generation-model`, `--judge-model`, `--runner-kind`,
+`--runner-timeout`, `--approval-mode`, `--codex-sandbox`, `--personas`,
+`--image`, or `--provider`. Add `--no-discover` to scaffold only.
+
+Inspect the final effective values at any time:
+
+```bash
+ghostlab config --job release-agent
+ghostlab config --job release-agent --json
+```
+
+The complete creator succeeds only after a semantic/security conversation
+actually runs. If no OpenShell provider/model is usable, scenario generation
+fails, or the plan contains only placeholders, it exits non-zero and leaves a
+diagnostic plan instead of reporting a successful evaluation. After fixing the
+configuration, run `ghostlab create --name release-agent --resume --yes`.
 
 ### Evaluate an agent skill
 

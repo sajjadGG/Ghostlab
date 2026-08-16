@@ -37,6 +37,7 @@ Streamlit UI, and an MCP Apps render layer.
 ## Commands (the `ghostlab` CLI)
 
 - `create`: build an agent-, MCP-, or skill-evaluation job; OpenShell is the default sandbox.
+- `config`: print the exact resolved runner command, four model roles, composed inputs, and OpenShell settings (`--json` for automation).
 - `discover` / `plan` / `test` / `review`: run the job pipeline and release gate.
 - `inspect`: connect to a target MCP and capture tools/resources/prompts (+ lint).
 - `profile`: turn an `inspect.json` into a capability profile.
@@ -46,6 +47,11 @@ Streamlit UI, and an MCP Apps render layer.
 - `evaluate` / `compare`: score a run and diff two runs for regressions.
 - `apps-probe` / `apps-render`: probe and render MCP Apps `ui://` widgets.
 - `db` / `ui`: SQLite history and the Streamlit pipeline UI.
+
+The complete `create` pipeline requires at least one real semantic/security
+conversation. Placeholder-only plans and all-skipped semantic runs return
+non-zero. Standalone callers can enforce the same contract with
+`plan --require-semantic` and `test --require-semantic`.
 
 ## Examples (config you can copy)
 
