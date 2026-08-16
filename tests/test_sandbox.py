@@ -120,7 +120,12 @@ class OpenShellSandboxTest(unittest.TestCase):
                 "backend": "openshell", "bin": "openshell", "workdir": "/sandbox/project",
                 "uploads": [{"source": str(root), "target": "/sandbox"}],
             }
-            with patch.object(OpenShellSandbox, "create", return_value=None):
+            # `sandbox_stdio_target` builds its own sandbox and shells out to
+            # openshell (pre-flight, then `ssh-config`), so the run function is
+            # stubbed too — otherwise this unit test would need the real CLI
+            # installed, which CI does not have.
+            with patch.object(OpenShellSandbox, "create", return_value=None), \
+                    patch("rehearsal.sandbox._default_run", FakeCommands()):
                 rewritten, _sandbox = sandbox_stdio_target(target, config, role="direct")
         rendered = " ".join(rewritten.connection["command"])
         self.assertIn("/sandbox/project/server.py", rendered)
