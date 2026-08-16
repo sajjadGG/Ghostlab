@@ -237,6 +237,7 @@ def run_scenario(
         # stripped; stderr is logged separately and never shown to the emulator.
         # With the codex-json parser we recover the message and rich tool calls
         # (arguments/result/error) from the JSONL stream instead.
+        builtin_calls: list = []
         if aut_runner_config.parser == "codex-json":
             parsed = parse_codex_output(aut_result.output)
             aut_message = parsed["message"] or redact_host_noise(aut_result.output)
@@ -244,9 +245,15 @@ def run_scenario(
         elif aut_runner_config.parser == "opencode-json":
             # opencode namespaces MCP tools as `<server>_<tool>`; pass the target
             # id so its own built-in tools are not mistaken for MCP calls.
-            parsed = parse_opencode_output(aut_result.output, servers=[target.id])
+            servers = [target.id] + [
+                str(mcp.get("id")) for mcp in
+                ((target.capabilities or {}).get("agent_definition", {})
+                 .get("inputs", {}) or {}).get("mcps", []) or []
+            ]
+            parsed = parse_opencode_output(aut_result.output, servers=servers)
             aut_message = parsed["message"] or redact_host_noise(aut_result.output)
             tool_calls = parsed["tool_calls"]
+            builtin_calls = parsed["builtin_calls"]
         else:
             aut_message = redact_host_noise(aut_result.output)
             tool_calls = parse_tool_calls(aut_result.output, aut_result.stderr)
@@ -261,6 +268,7 @@ def run_scenario(
                 output=aut_message,
                 stderr=aut_result.stderr,
                 tool_calls=tool_calls,
+                builtin_calls=builtin_calls,
                 session_id=getattr(aut_runner, "thread_id", None),
             )
         )

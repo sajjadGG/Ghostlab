@@ -79,6 +79,7 @@ def reconstruct_run(events: list[dict[str, Any]]) -> dict[str, Any]:
     transcript: list[dict[str, Any]] = []
     trace: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []
+    builtin_calls: list[dict[str, Any]] = []
     prompts: list[dict[str, Any]] = []
     models: dict[str, str] = {}
     started_at: str | None = None
@@ -122,6 +123,9 @@ def reconstruct_run(events: list[dict[str, Any]]) -> dict[str, Any]:
         elif event["type"] == "aut_result":
             turn_calls = data.get("tool_calls", [])
             tool_calls.extend(turn_calls)
+            # Host built-ins are tracked separately: they are real capabilities,
+            # but they are not the MCP contract under evaluation.
+            builtin_calls.extend(data.get("builtin_calls") or [])
             trace.append(
                 {
                     "type": "message",
@@ -153,6 +157,7 @@ def reconstruct_run(events: list[dict[str, Any]]) -> dict[str, Any]:
         "transcript": transcript,
         "trace": trace,
         "tool_calls": tool_calls,
+        "builtin_calls": builtin_calls,
         "prompts": prompts,
         "models": models,
         "started_at": started_at,
@@ -299,13 +304,27 @@ def _build_judge_prompt(run: dict[str, Any], tool_names: list[str] | None) -> st
     signals = scenario.get("failure_signals", [])
     criteria_block = "\n".join(f"{i}. {c}" for i, c in enumerate(criteria)) or "(none)"
     signals_block = "\n".join(f"{i}. {s}" for i, s in enumerate(signals)) or "(none)"
-    tools_line = (
-        f"\nThe ONLY real tools this server exposes are: {', '.join(tool_names)}.\n"
-        "If the assistant claims to use or have used any tool NOT in that list, list it in "
-        "hallucinated_tools.\n"
-        if tool_names
-        else ""
-    )
+    # A configured agent also has its host's built-in tools (file reads, skills,
+    # search). Those are legitimate capabilities, so naming only the MCP tools
+    # here makes the judge report ordinary built-in use as hallucination.
+    host_tools = sorted({
+        str(call.get("tool")) for call in run.get("builtin_calls") or []
+        if call.get("tool")
+    })
+    tools_line = ""
+    if tool_names:
+        tools_line = (
+            f"\nThe ONLY MCP tools this server exposes are: {', '.join(tool_names)}.\n"
+        )
+        if host_tools:
+            tools_line += (
+                f"The agent host also provides these built-in tools, which are real and "
+                f"legitimate to use: {', '.join(host_tools)}.\n"
+            )
+        tools_line += (
+            "If the assistant claims to use a tool that is in neither list, put it in "
+            "hallucinated_tools.\n"
+        )
     return prompts.render(
         "judge",
         JUDGE_TEMPLATE,

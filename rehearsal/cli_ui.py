@@ -103,8 +103,8 @@ def render_config_panel(name: str, rows: list[tuple[str, str]]) -> None:
     Console().print(Panel(table, title="[bold]Configuration preview[/bold]", border_style="#7c5cff"))
 
 
-def render_stage(index: int, title: str, detail: str = "") -> None:
-    label = f"[{index}/5] {title}"
+def render_stage(index: int, title: str, detail: str = "", total: int = 5) -> None:
+    label = f"[{index}/{total}] {title}"
     if not interactive_terminal():
         print(f"\n{label}")
         if detail:

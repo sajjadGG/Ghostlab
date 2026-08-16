@@ -429,6 +429,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_llm_backend_arg(test_parser)
     test_parser.add_argument("--model", default="", help="Model override for the codex judge.")
+    test_parser.add_argument(
+        "--pdf", action="store_true",
+        help="Write a full rollout document (config, purpose, transcript, tool "
+             "calls, verdict, critique) as rollout.html + rollout.pdf per run.",
+    )
 
     review_spec_parser = sub.add_parser(
         "review",
@@ -619,6 +624,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--needs-edit", nargs="*", default=None, dest="needs_edit", help="Case ids to mark needs-edit."
     )
     _add_db_arg(review_parser)
+
+    lab_parser = sub.add_parser(
+        "lab",
+        help="Guided setup for a configured agent: model, MCPs, skills, "
+             "instructions, permissions, and code — then generate scenarios "
+             "and run them fully sandboxed.",
+    )
+    lab_parser.add_argument("--name", default="", help="Evaluation name.")
+    lab_parser.add_argument(
+        "--image", default="",
+        help="Sandbox image: a community name, an image ref, or a Dockerfile "
+             "path (default: the bundled agent sandbox).",
+    )
+    lab_parser.add_argument("--model", default="", help="Model for generation and judging.")
+    lab_parser.add_argument("--personas", type=int, default=0, help="Personas to generate.")
+    lab_parser.add_argument(
+        "--scenarios-per-persona", type=int, default=0, help="Scenarios per persona."
+    )
+    lab_parser.add_argument(
+        "--force", action="store_true", help="Overwrite an existing evaluation."
+    )
+    _add_llm_backend_arg(lab_parser)
 
     doctor_parser = sub.add_parser(
         "doctor",
@@ -1095,16 +1122,31 @@ def cmd_create(args: argparse.Namespace) -> int:
         spec.sandbox["providers"] = list(dict.fromkeys([
             *list(spec.sandbox.get("providers", []) or []), *args.provider,
         ]))
-    runtime = {
-        "backend": "codex",
-        "model": args.model or "",
-        "kind": args.runner_kind or "process",
-        "timeout_seconds": args.runner_timeout or 600,
-        "approval_mode": args.approval_mode or "never",
-        "codex_sandbox": args.codex_sandbox or "read-only",
-        "codex_bin": args.codex_bin or "codex",
-    }
-    existing_runner = dict((spec.agent or {}).get("runner") or {})
+    # An agent config that declares its own runtime (model, instructions,
+    # skills, permissions) *is* the agent under test, so the wizard's codex
+    # defaults must not overwrite it.
+    declared_runtime = dict((spec.agent or {}).get("runtime") or {})
+    declared = str(declared_runtime.get("backend") or "") not in ("", "codex")
+    if declared:
+        if args.model:
+            declared_runtime["model"] = args.model
+        runtime = declared_runtime
+        spec.generation = {
+            **(spec.generation or {}),
+            "backend": str(declared_runtime["backend"]),
+            "model": args.generation_model or str(declared_runtime.get("model") or ""),
+        }
+    else:
+        runtime = {
+            "backend": "codex",
+            "model": args.model or "",
+            "kind": args.runner_kind or "process",
+            "timeout_seconds": args.runner_timeout or 600,
+            "approval_mode": args.approval_mode or "never",
+            "codex_sandbox": args.codex_sandbox or "read-only",
+            "codex_bin": args.codex_bin or "codex",
+        }
+    existing_runner = {} if declared else dict((spec.agent or {}).get("runner") or {})
     if existing_runner:
         runtime["kind"] = args.runner_kind or existing_runner.get("kind", "process")
         runtime["timeout_seconds"] = args.runner_timeout or existing_runner.get("timeout_seconds", 600)
@@ -1747,10 +1789,12 @@ def _get_generated_cases(args: argparse.Namespace, spec, inspect_data: dict) -> 
         print(f"    [{event['phase']}] {event['message']} ({event['completed']}/{event['total']})")
 
     try:
+        # A configured agent is profiled by purpose, not just by tool inventory.
+        agent = spec.agent if (spec.agent or {}).get("runtime") else None
         dataset = generate_conversational_dataset(
             inspect_data, backend, spec_id=spec.id,
             n_personas=n_personas, scenarios_per_persona=scenarios_per_persona,
-            progress=progress,
+            progress=progress, agent=agent,
         )
     except LlmBackendError as exc:
         print(f"  generation skipped ({_backend_error_summary(exc)})")
@@ -1925,6 +1969,82 @@ class _SandboxedOpencodeProject:
             self.sandbox.close()
 
 
+class _SandboxedAgent:
+    """Runs the whole configured agent — CLI, MCPs, and code — in the sandbox.
+
+    The runner JSON is rewritten to an SSH-wrapped `opencode run` inside the
+    container for the length of the run, then restored, so the job directory is
+    left exactly as the user configured it.
+    """
+
+    def __init__(self, runner_path: Path, original: str, handle: "object") -> None:
+        self.runner_path = runner_path
+        self.original = original
+        self.handle = handle
+
+    def restore(self) -> None:
+        try:
+            self.runner_path.write_text(self.original, encoding="utf-8")
+        finally:
+            self.handle.close()
+
+
+def _sandbox_configured_agent(spec, spec_path: Path, out_dir: Path):
+    """Put a fully configured agent inside OpenShell for this run.
+
+    Returns ``None`` when the job has no agent runtime, leaving the simpler
+    MCP-only path (:func:`_sandbox_opencode_aut`) to handle it.
+    """
+    from .agent_sandbox import prepare_agent_sandbox, write_sandboxed_project
+    from .jobs import RUNNERS_DIR
+    from .opencode_config import runtime_input_paths
+
+    agent = dict(spec.agent or {})
+    runtime = dict(agent.get("runtime") or {})
+    if str(runtime.get("backend")) != "opencode" or not runtime:
+        return None
+    if str((spec.sandbox or {}).get("backend")) != "openshell":
+        return None
+
+    job_dir = spec_path.resolve().parent
+    runner_path = job_dir / RUNNERS_DIR / "aut.json"
+    if not runner_path.exists():
+        return None
+    original = runner_path.read_text(encoding="utf-8")
+    runner = json.loads(original)
+
+    target = spec.target_config() if spec.target_type == "mcp" else None
+    handle = prepare_agent_sandbox(
+        agent, dict(spec.sandbox), role="aut", base_dir=job_dir,
+        artifact_dir=out_dir,
+        extra_paths=runtime_input_paths(
+            runtime, list((agent.get("inputs") or {}).get("skills") or [])
+        ),
+    )
+    try:
+        remote_dir = write_sandboxed_project(
+            handle, out_dir / "opencode-aut", agent, target
+        )
+        argv = [
+            "opencode", "run", "--format", "json", "--log-level", "ERROR",
+            "--model", str(runtime.get("model") or ""), "--dir", remote_dir,
+        ]
+        if runtime.get("default_agent"):
+            argv[-2:-2] = ["--agent", str(runtime["default_agent"])]
+        runner["command"] = handle.command(argv, workdir=remote_dir)
+        runner["parser"] = "opencode-json"
+        runner["sandbox"] = {"backend": "local"}  # the wrapper *is* the boundary
+        runner_path.write_text(json.dumps(runner, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        handle.close()
+        raise
+    print(tc.muted(
+        f"  agent sandboxed in OpenShell ({handle.sandbox.name}): "
+        f"CLI, MCPs and workspace all inside"
+    ))
+    return _SandboxedAgent(runner_path, original, handle)
+
+
 def _sandbox_opencode_aut(spec, spec_path: Path, out_dir: Path):
     """Wrap the opencode agent-under-test's stdio MCP in the job's sandbox."""
     from .sandbox import normalize_sandbox, sandbox_stdio_target
@@ -1954,6 +2074,153 @@ def _sandbox_opencode_aut(spec, spec_path: Path, out_dir: Path):
     project.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     print(tc.muted(f"  agent MCP sandboxed in OpenShell ({session.name})"))
     return _SandboxedOpencodeProject(project, original, session)
+
+
+def _write_rollouts(spec, results: dict, out_dir: Path) -> None:
+    """Emit a full rollout document per conversational run in this test run."""
+    from .rollout_report import write_rollout
+
+    profile_path = spec.workspace_dir(out_dir.parent.parent) / "agent-profile.json"
+    agent_profile = None
+    if profile_path.is_file():
+        agent_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+
+    written = 0
+    for entry in results.get("results", []):
+        run_dir = (entry.get("artifacts") or {}).get("run_dir")
+        if not run_dir or not Path(run_dir).is_dir():
+            continue
+        paths = write_rollout(
+            Path(run_dir), title=f"{spec.id} · {entry.get('case', '')}",
+            agent=spec.agent, agent_profile=agent_profile, sandbox=spec.sandbox,
+        )
+        written += 1
+        if "pdf" in paths:
+            print(f"  wrote {paths['pdf']}")
+        else:
+            print(tc.muted(f"  wrote {paths['html']} (PDF unavailable: "
+                           f"{paths.get('pdf_error', 'no browser')})"))
+    if not written:
+        print(tc.muted("  no conversational runs to document"))
+
+
+def cmd_lab(args: argparse.Namespace) -> int:
+    """Guided setup for a configured-agent evaluation, then run it."""
+    from .agent_profile import write_agent_profile
+    from .agent_sandbox import DEFAULT_AGENT_IMAGE
+    from .cli_ui import Prompter, render_config_panel, render_stage
+    from .jobs import create_job, default_agent_job_spec, jobs_dir
+    from .lab import (
+        TOTAL_STEPS, build_agent_interactively, confirm_profile, review_scenarios,
+        sandbox_settings,
+    )
+    from .llm_backend import LlmBackendError, backend_label, create_backend
+    from .spec import save_spec
+
+    prompter = Prompter()
+    print(tc.heading("Ghostlab · configure an agent evaluation"))
+    print(tc.muted(
+        "Everything runs inside OpenShell: the agent CLI, its MCPs, and its code."
+    ))
+    print()
+
+    name = args.name or prompter.text("Evaluation name", "my-agent")
+    agent = build_agent_interactively(prompter, name)
+    sandbox = sandbox_settings(prompter, args.image or DEFAULT_AGENT_IMAGE)
+
+    backend = create_backend(
+        getattr(args, "llm_backend", "") or "opencode",
+        model=args.model or str(agent["runtime"].get("model") or ""),
+    )
+    render_stage(8, "Purpose", f"Inferred with {backend_label(backend)}.", TOTAL_STEPS)
+    try:
+        profile = confirm_profile(prompter, agent, backend)
+    except LlmBackendError as exc:
+        print(tc.verdict(f"  could not infer a purpose: {_backend_error_summary(exc)}", "fail"))
+        return 1
+
+    spec = default_agent_job_spec(name, agent=agent, sandbox=sandbox)
+    spec.generation = {
+        **(spec.generation or {}),
+        "backend": "opencode",
+        "model": args.model or str(agent["runtime"].get("model") or ""),
+        "personas": args.personas or 2,
+        "scenarios_per_persona": args.scenarios_per_persona or 2,
+    }
+    spec_path = create_job(name, spec, jobs_root=jobs_dir(), force=args.force)
+    job_dir = spec_path.parent
+    write_agent_profile(profile, job_dir / "workspace")
+    print(tc.muted(f"  wrote {job_dir}/workspace/agent-profile.json"))
+
+    # Without an agent-under-test host the conversational cases silently skip.
+    # `test` later rewrites this runner to execute inside the sandbox.
+    from .jobs import add_aut_host, build_opencode_aut_runner
+    from .spec import load_spec
+
+    spec = load_spec(spec_path)
+    if not any(host.get("kind") == "process" for host in spec.hosts or []):
+        runner = build_opencode_aut_runner(
+            spec, spec_path, model=spec.generation["model"], timeout_seconds=900,
+        )
+        add_aut_host(spec, spec_path, runner)
+        save_spec(spec, spec_path)
+        print(tc.muted("  configured the agent-under-test host"))
+
+    # `plan` needs the capability inventory, which `discover` writes. For an
+    # agent job that also records the agent definition itself.
+    discover_args = argparse.Namespace(
+        job=name, spec=None, db=None, timeout=30.0, sample="off", skip_setup=True,
+        skip_apps=True, strict=False, sandbox=None, approve_mutations=False,
+        approve_destructive=False, server=None,
+    )
+    if cmd_discover(discover_args) != 0:
+        print(tc.verdict("  discovery failed; fix the agent's capabilities first", "fail"))
+        return 1
+
+    render_stage(9, "Scenarios", "Generated from the purpose you just confirmed.", TOTAL_STEPS)
+    plan_args = argparse.Namespace(
+        job=name, spec=None, out=None, personas=spec.generation["personas"],
+        scenarios_per_persona=spec.generation["scenarios_per_persona"],
+        # approve/reject must stay None: any value puts `plan` in curation-only
+        # mode, which refuses to run before a plan exists.
+        generate=True, regenerate=True, approve=None, reject=None, db=None,
+        codex_bin="", model=spec.generation["model"], llm_backend="opencode",
+        sandbox=None, strict=False,
+    )
+    if cmd_plan(plan_args) != 0:
+        return 1
+
+    from .plan import load_test_plan, write_test_plan
+
+    plan = load_test_plan(job_dir / "test-plan.yaml")
+    conversational = [case for case in plan.get("cases", [])
+                      if case.get("kind") == "conversational"]
+    kept = review_scenarios(prompter, conversational)
+    keep_ids = {case.get("id") for case in kept}
+    for case in plan.get("cases", []):
+        if case.get("kind") == "conversational" and case.get("id") not in keep_ids:
+            case["status"] = "rejected"
+    write_test_plan(plan, job_dir / "test-plan.yaml")
+
+    render_config_panel(name, [
+        ("job", str(job_dir)),
+        ("model", spec.generation["model"]),
+        ("sandbox", f"openshell · {sandbox['image']}"),
+        ("credentials", "in sandbox" if sandbox["credentials"]["opencode_auth"] else "none"),
+        ("scenarios", str(len(kept))),
+    ])
+    if not prompter.confirm("Run the evaluation now?", True):
+        print(tc.muted(f"  later: ghostlab test --job {name}"))
+        return 0
+
+    test_args = argparse.Namespace(
+        job=name, spec=None, plan=None, suite=None, hosts=None, approved_only=False,
+        user_runner=None, apps_mode=False, skip_setup=False, timeout=30.0, repeat=1,
+        resume=False, sandbox=None, profile=None, strict=False, judge=True,
+        codex_bin="", model=spec.generation["model"], llm_backend="opencode",
+        require_semantic=False, pdf=True,
+    )
+    return cmd_test(test_args)
 
 
 def cmd_test(args: argparse.Namespace) -> int:
@@ -2106,7 +2373,10 @@ def cmd_test(args: argparse.Namespace) -> int:
     runtime = SetupRuntime({} if args.skip_setup else spec.setup, out_dir)
     aut_sandbox = None
     try:
-        aut_sandbox = _sandbox_opencode_aut(spec, args.spec, out_dir)
+        # A configured agent goes in whole; otherwise only its MCP is wrapped.
+        aut_sandbox = _sandbox_configured_agent(spec, args.spec, out_dir)
+        if aut_sandbox is None:
+            aut_sandbox = _sandbox_opencode_aut(spec, args.spec, out_dir)
     except SandboxError as exc:
         print(tc.verdict(f"  sandbox setup failed [{exc.kind}]: {exc.detail}", "fail"))
         return 1
@@ -2144,6 +2414,8 @@ def cmd_test(args: argparse.Namespace) -> int:
         json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     results_md.write_text(render_results_md(results), encoding="utf-8")
+    if getattr(args, "pdf", False):
+        _write_rollouts(spec, results, out_dir)
     partial_path = out_dir / "results.partial.json"
     if partial_path.exists():
         partial_path.unlink()
@@ -3108,6 +3380,7 @@ _HANDLERS.update(
         "run-dataset": cmd_run_dataset,
         "review-dataset": cmd_review_dataset,
         "doctor": cmd_doctor,
+        "lab": cmd_lab,
         "evaluate": cmd_evaluate,
         "critique": cmd_critique,
         "compare": cmd_compare,

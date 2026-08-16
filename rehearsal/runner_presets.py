@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
 
 from .codex_backend import CodexError, resolve_codex_bin
 from .config import RunnerConfig, TargetConfig, expand_env
@@ -108,61 +109,52 @@ def _opencode_bin(override: str = "") -> str:
         return "opencode"
 
 
-def opencode_project_config(target: TargetConfig | None) -> dict[str, object]:
+def opencode_project_config(
+    target: TargetConfig | None,
+    runtime: "dict[str, object] | None" = None,
+    skills: "list[dict[str, object]] | None" = None,
+    *,
+    path_map: "Callable[[object], str] | None" = None,
+) -> dict[str, object]:
     """Build the `opencode.json` a runner session uses.
 
-    The AUT gets exactly one MCP — the target — and nothing else. Built-in
-    side-effecting tools are denied so a browsing/filesystem agent cannot reach
-    around the MCP under evaluation and satisfy the user some other way, which
-    would silently invalidate the result.
+    With no ``runtime`` this is the MCP-only shorthand: exactly one MCP — the
+    target — and nothing else, with side-effecting built-ins denied so the agent
+    cannot reach around the capability under evaluation and satisfy the user
+    some other way. A configured agent passes its full runtime instead, and
+    :mod:`rehearsal.opencode_config` renders the complete surface.
     """
-    config: dict[str, object] = {
-        "$schema": "https://opencode.ai/config.json",
-        "permission": {"bash": "deny", "edit": "deny", "webfetch": "deny"},
-    }
-    if target is None:
-        return config
+    from .opencode_config import build_project_config
 
-    conn = expand_env(target.connection)
-    if target.transport == "stdio":
-        command = conn.get("command", "")
-        entry: dict[str, object] = {
-            "type": "local",
-            "command": ([command] if isinstance(command, str) else list(command))
-            + [str(part) for part in conn.get("args", [])],
-            "enabled": True,
-        }
-        if conn.get("env"):
-            entry["environment"] = {
-                str(k): str(v) for k, v in dict(conn["env"]).items()
-            }
-    elif target.transport in ("sse", "streamable-http", "http"):
-        entry = {"type": "remote", "url": conn.get("url", ""), "enabled": True}
-        if conn.get("headers"):
-            entry["headers"] = {
-                str(k): str(v) for k, v in dict(conn["headers"]).items()
-            }
-    else:
-        raise ValueError(f"Unsupported transport for opencode runner: {target.transport}")
-
-    config["mcp"] = {target.id: entry}
-    return config
+    mcps = []
+    if target is not None:
+        mcps.append({
+            "id": target.id,
+            "transport": target.transport,
+            "connection": target.connection,
+        })
+    return build_project_config(runtime, mcps, path_map=path_map, skills=skills)
 
 
 def write_opencode_project(
-    directory: Path, target: TargetConfig | None
+    directory: Path,
+    target: TargetConfig | None,
+    runtime: "dict[str, object] | None" = None,
+    skills: "list[dict[str, object]] | None" = None,
+    *,
+    path_map: "Callable[[object], str] | None" = None,
 ) -> Path:
-    """Materialize an opencode project dir whose config wires up the target MCP."""
+    """Materialize an opencode project dir whose config wires up the agent."""
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "opencode.json"
-    path.write_text(
-        json.dumps(opencode_project_config(target), indent=2) + "\n", encoding="utf-8"
-    )
+    config = opencode_project_config(target, runtime, skills, path_map=path_map)
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return path
 
 
 def _opencode_command(
-    bin_path: str, model: str, project_dir: Path
+    bin_path: str, model: str, project_dir: Path, agent: str = "",
+    remote_dir: str = "",
 ) -> list[str]:
     from .opencode_backend import DEFAULT_OPENCODE_MODEL
 
@@ -173,22 +165,41 @@ def _opencode_command(
         _opencode_bin(bin_path), "run", "--format", "json", "--log-level", "ERROR",
         "--model", model or DEFAULT_OPENCODE_MODEL,
     ]
-    return command + ["--dir", str(project_dir)]
+    if agent:
+        command += ["--agent", agent]
+    return command + ["--dir", remote_dir or str(project_dir)]
 
 
 def opencode_aut_runner(
-    target: TargetConfig,
+    target: TargetConfig | None,
     project_dir: Path,
     *,
     timeout_seconds: int = 600,
     opencode_bin: str = "",
     model: str = "",
+    runtime: "dict[str, object] | None" = None,
+    skills: "list[dict[str, object]] | None" = None,
+    path_map: "Callable[[object], str] | None" = None,
+    remote_dir: str = "",
 ) -> RunnerConfig:
-    """AUT runner: opencode with the target MCP wired in, JSON output for capture."""
-    write_opencode_project(project_dir, target)
+    """AUT runner: opencode configured as the agent under test.
+
+    ``runtime`` carries the agent's full OpenCode configuration (model,
+    instructions, skills, subagents, permissions, extra MCPs). ``path_map`` and
+    ``remote_dir`` rewrite host paths for a sandboxed run, where the project
+    directory is uploaded and OpenCode executes inside the container.
+    """
+    runtime = dict(runtime or {})
+    write_opencode_project(project_dir, target, runtime, skills, path_map=path_map)
     return RunnerConfig(
         kind="process",
-        command=_opencode_command(opencode_bin, model, project_dir),
+        command=_opencode_command(
+            opencode_bin,
+            model or str(runtime.get("model") or ""),
+            project_dir,
+            str(runtime.get("default_agent") or ""),
+            remote_dir,
+        ),
         timeout_seconds=timeout_seconds,
         prompt_mode="stdin",
         parser="opencode-json",
