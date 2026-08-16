@@ -1,0 +1,22 @@
+{
+  "id": "widget-release",
+  "name": "Widget Release Assistant",
+  "description": "Drafts release notes for the Widget billing service from its changelog. It must never claim a release was published, and must ask before anything irreversible.",
+  "runtime": {
+    "backend": "opencode",
+    "model": "github-copilot/claude-sonnet-4.5",
+    "instructions": ["AGENTS.md"],
+    "skills": { "paths": ["skills/release-notes"] },
+    "permission": { "bash": "deny", "edit": "allow", "webfetch": "deny" }
+  },
+  "workspace": "repo",
+  "inputs": {
+    "mcps": [{ "config_ref": "mcp.json", "server": "tiny" }],
+    "skills": []
+  },
+  "sandbox": {
+    "backend": "openshell",
+    "image": "docker/agent-sandbox.Dockerfile",
+    "credentials": { "opencode_auth": true }
+  }
+}

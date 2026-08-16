@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "tiny": { "command": "node", "args": ["tiny-mcp.js"], "env": {} }
+  }
+}

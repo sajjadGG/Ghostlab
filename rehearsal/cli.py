@@ -1122,16 +1122,31 @@ def cmd_create(args: argparse.Namespace) -> int:
         spec.sandbox["providers"] = list(dict.fromkeys([
             *list(spec.sandbox.get("providers", []) or []), *args.provider,
         ]))
-    runtime = {
-        "backend": "codex",
-        "model": args.model or "",
-        "kind": args.runner_kind or "process",
-        "timeout_seconds": args.runner_timeout or 600,
-        "approval_mode": args.approval_mode or "never",
-        "codex_sandbox": args.codex_sandbox or "read-only",
-        "codex_bin": args.codex_bin or "codex",
-    }
-    existing_runner = dict((spec.agent or {}).get("runner") or {})
+    # An agent config that declares its own runtime (model, instructions,
+    # skills, permissions) *is* the agent under test, so the wizard's codex
+    # defaults must not overwrite it.
+    declared_runtime = dict((spec.agent or {}).get("runtime") or {})
+    declared = str(declared_runtime.get("backend") or "") not in ("", "codex")
+    if declared:
+        if args.model:
+            declared_runtime["model"] = args.model
+        runtime = declared_runtime
+        spec.generation = {
+            **(spec.generation or {}),
+            "backend": str(declared_runtime["backend"]),
+            "model": args.generation_model or str(declared_runtime.get("model") or ""),
+        }
+    else:
+        runtime = {
+            "backend": "codex",
+            "model": args.model or "",
+            "kind": args.runner_kind or "process",
+            "timeout_seconds": args.runner_timeout or 600,
+            "approval_mode": args.approval_mode or "never",
+            "codex_sandbox": args.codex_sandbox or "read-only",
+            "codex_bin": args.codex_bin or "codex",
+        }
+    existing_runner = {} if declared else dict((spec.agent or {}).get("runner") or {})
     if existing_runner:
         runtime["kind"] = args.runner_kind or existing_runner.get("kind", "process")
         runtime["timeout_seconds"] = args.runner_timeout or existing_runner.get("timeout_seconds", 600)

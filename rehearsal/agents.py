@@ -31,6 +31,43 @@ def _load_mapping(path: Path) -> dict[str, Any]:
     return data
 
 
+def _localize_stdio(connection: dict[str, Any], base: Path) -> dict[str, Any]:
+    """Resolve a referenced MCP config's relative program paths against itself.
+
+    An agent config points at an MCP config with ``config_ref``, which is
+    resolved relative to the agent file — so a `node server.js` sitting beside
+    that config should resolve the same way. Only rewrites entries that name a
+    file which actually exists there, so flags (`-y`) and package names
+    (`safari-mcp`) are left alone.
+    """
+    resolved = dict(connection)
+
+    def localize(value: Any) -> Any:
+        text = str(value)
+        candidate = Path(text).expanduser()
+        if candidate.is_absolute():
+            return value
+        sibling = base / text
+        return str(sibling.resolve()) if sibling.is_file() else value
+
+    raw = resolved.get("command")
+    if isinstance(raw, list):
+        resolved["command"] = [localize(part) for part in raw]
+    elif raw:
+        resolved["command"] = localize(raw)
+    if resolved.get("args"):
+        resolved["args"] = [localize(part) for part in resolved["args"]]
+    return resolved
+
+
+def _resolve(value: Any, base: Path) -> str:
+    """Resolve a path referenced by an agent config, relative to that config."""
+    candidate = Path(str(value)).expanduser()
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    return str(candidate)
+
+
 def load_agent_definition(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     """Load an agent JSON/YAML and resolve referenced MCPs, skills, and assets.
 
@@ -60,8 +97,8 @@ def load_agent_definition(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             target = load_target(ref, server=item.get("server"))
             mcps.append({
                 "id": target.id, "transport": target.transport,
-                "connection": target.connection, "capabilities": target.capabilities,
-                "startup": target.startup,
+                "connection": _localize_stdio(target.connection, ref.parent),
+                "capabilities": target.capabilities, "startup": target.startup,
             })
         else:
             missing = [key for key in ("id", "transport", "connection") if key not in item]
@@ -141,6 +178,29 @@ def load_agent_definition(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "inputs": {"mcps": mcps, "skills": skills, "assets": list(inputs.get("assets", []) or [])},
         "tests": list(data.get("tests", []) or []),
     }
+    # The declarative runtime is what makes an agent config drivable from a file
+    # instead of the wizard: it carries model, instructions, skills, subagents,
+    # and permissions, and it feeds purpose inference. `description` is the
+    # owner's own words, which purpose inference treats as authoritative.
+    if data.get("runtime"):
+        runtime = dict(data["runtime"])
+        for key in ("instructions",):
+            if runtime.get(key):
+                runtime[key] = [_resolve(item, base) for item in runtime[key]]
+        if (runtime.get("skills") or {}).get("paths"):
+            runtime["skills"] = {
+                **dict(runtime["skills"]),
+                "paths": [_resolve(item, base) for item in runtime["skills"]["paths"]],
+            }
+        for definition in (runtime.get("agents") or {}).values():
+            prompt = (definition or {}).get("prompt")
+            if isinstance(prompt, str) and Path(prompt).suffix in (".md", ".txt"):
+                definition["prompt"] = _resolve(prompt, base)
+        agent["runtime"] = runtime
+    if data.get("description"):
+        agent["description"] = str(data["description"])
+    if workspace_source is not None:
+        agent["workspace"] = str(workspace_source)
     return agent, sandbox
 
 

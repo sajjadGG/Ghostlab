@@ -101,6 +101,79 @@ class OpencodeConfigTest(unittest.TestCase):
         )
 
 
+class AgentDefinitionTest(unittest.TestCase):
+    """A file-driven agent config is what a coding harness can actually drive."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        (self.tmp / "AGENTS.md").write_text("Be careful.", encoding="utf-8")
+        (self.tmp / "repo").mkdir()
+        skill = self.tmp / "skills" / "notes"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("Draft notes.", encoding="utf-8")
+        (self.tmp / "server.js").write_text("// mcp", encoding="utf-8")
+        (self.tmp / "mcp.json").write_text(json.dumps(
+            {"mcpServers": {"tiny": {"command": "node", "args": ["server.js"]}}}
+        ), encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write(self, payload: dict) -> Path:
+        path = self.tmp / "agent.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_runtime_description_and_workspace_survive_loading(self) -> None:
+        from rehearsal.agents import load_agent_definition
+
+        path = self._write({
+            "id": "a", "description": "Cuts releases.",
+            "runtime": {
+                "backend": "opencode", "model": "prov/m",
+                "instructions": ["AGENTS.md"],
+                "skills": {"paths": ["skills/notes"]},
+            },
+            "workspace": "repo",
+            "inputs": {"mcps": [], "skills": []},
+        })
+        agent, _sandbox = load_agent_definition(path)
+        self.assertEqual(agent["runtime"]["model"], "prov/m")
+        self.assertEqual(agent["description"], "Cuts releases.")
+        # Paths resolve against the agent file, not the caller's cwd.
+        root = self.tmp.resolve()   # macOS resolves /var -> /private/var
+        self.assertEqual(agent["runtime"]["instructions"], [str(root / "AGENTS.md")])
+        self.assertEqual(
+            agent["runtime"]["skills"]["paths"], [str(root / "skills" / "notes")]
+        )
+        self.assertTrue(agent["workspace"].endswith("repo"))
+
+    def test_referenced_mcp_program_resolves_beside_its_config(self) -> None:
+        from rehearsal.agents import load_agent_definition
+
+        path = self._write({
+            "id": "a", "runtime": {"backend": "opencode"},
+            "inputs": {"mcps": [{"config_ref": "mcp.json", "server": "tiny"}]},
+        })
+        agent, _sandbox = load_agent_definition(path)
+        args = agent["inputs"]["mcps"][0]["connection"]["args"]
+        self.assertEqual(args, [str((self.tmp.resolve() / "server.js"))])
+
+    def test_flags_and_package_names_are_left_alone(self) -> None:
+        from rehearsal.agents import load_agent_definition
+
+        (self.tmp / "mcp.json").write_text(json.dumps(
+            {"mcpServers": {"pkg": {"command": "npx", "args": ["-y", "safari-mcp"]}}}
+        ), encoding="utf-8")
+        path = self._write({
+            "id": "a", "runtime": {"backend": "opencode"},
+            "inputs": {"mcps": [{"config_ref": "mcp.json", "server": "pkg"}]},
+        })
+        agent, _sandbox = load_agent_definition(path)
+        self.assertEqual(agent["inputs"]["mcps"][0]["connection"]["args"], ["-y", "safari-mcp"])
+
+
 class AgentProfileTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

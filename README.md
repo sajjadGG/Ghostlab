@@ -379,6 +379,42 @@ PDF rendering uses the browser the MCP Apps host already needs
 
 See [Configured Agent Lab](docs/configured-agent-lab.md) for the full design.
 
+### Drive Ghostlab from a coding agent: the `ghostlab` skill
+
+`skills/ghostlab/` packages Ghostlab as a skill, so Claude Code (or any harness
+that loads `SKILL.md`) can set up an evaluation, run it, and read the results
+without being handed the CLI surface each time.
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$PWD/skills/ghostlab" ~/.claude/skills/ghostlab    # or .claude/skills/ for one project
+```
+
+Then just ask: *"test whether this MCP actually works with a real agent"* or
+*"evaluate this agent config and tell me what breaks"*.
+
+The skill steers toward the **file-driven path** rather than the interactive
+wizard, because that is what a harness can actually drive and a reviewer can
+actually diff:
+
+```bash
+ghostlab create --name release-bot --agent ./agent.json --no-discover --yes
+ghostlab discover --job release-bot
+ghostlab plan --job release-bot --llm-backend opencode --model github-copilot/claude-sonnet-4.5
+ghostlab test --job release-bot --llm-backend opencode --model github-copilot/claude-sonnet-4.5 --pdf
+ghostlab review --job release-bot
+```
+
+An `agent.json` carries the full declarative runtime — model, instructions,
+skills, subagents, permissions, and any number of MCPs — with every path
+resolved relative to the file. `examples/agent-lab/` is a complete working one.
+
+It also encodes the judgement calls that are easy to get wrong: that a `fail` is
+usually a real finding rather than a harness bug, that the deterministic
+tool-call record outranks the judge's narrative when they disagree, and that
+`--sandbox local` is *required* (not optional) for MCPs needing host-only
+resources. See [`skills/README.md`](skills/README.md).
+
 ### The UI: `ghostlab ui`
 
 Run the whole pipeline from a browser instead of the CLI:

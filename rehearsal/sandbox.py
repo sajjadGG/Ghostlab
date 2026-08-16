@@ -339,9 +339,11 @@ PROJECT_MARKERS = (
     "package.json", "node_modules", "pyproject.toml", "requirements.txt",
     "setup.py", ".venv", "venv", "go.mod", "Cargo.toml", "deno.json",
 )
-# How far to walk up looking for a marker. Deep enough for `build/index.js` or
-# `src/server/main.py`, shallow enough never to reach a home directory.
-_MARKER_SEARCH_DEPTH = 4
+# How far to walk up looking for a marker. Two levels covers the real layouts
+# (`build/index.js`, `dist/server.js`, `src/main.py`) while keeping a standalone
+# script from climbing out of its own directory into an enclosing monorepo —
+# which would upload that whole repository instead of the server.
+_MARKER_SEARCH_DEPTH = 2
 
 
 def program_root(path: Path) -> Path:
