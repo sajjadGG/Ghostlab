@@ -35,8 +35,13 @@ instructions, and runner, end to end.
 python3 -m venv .venv                # Python 3.10+
 .venv/bin/pip install -e .            # add '.[ui]' for the web UI, '.[apps]' for widget rendering
 
-ghostlab create
+ghostlab create                       # evaluate an MCP server
+ghostlab lab                          # evaluate a configured agent (model, skills, MCPs, code)
 ```
+
+Pick `create` when the thing under test is an **MCP server**, and
+[`lab`](#evaluate-a-configured-agent-ghostlab-lab) when it is an **agent** — a
+model plus instructions, skills, MCPs, permissions, and a codebase.
 
 Ghostlab uses [NVIDIA OpenShell](https://docs.nvidia.com/openshell/latest/)
 as its default execution boundary. Install OpenShell, start a supported compute
@@ -152,6 +157,11 @@ one-skill job is normalized into the same shape.
 | **Plan** | A coverage-driven `test-plan.yaml`: deterministic protocol cases for every tool, plus generated persona/scenario cases for the semantic/security suites |
 | **Test** | Multi-host execution results (`results.json`/`results.md`), a standalone HTML dashboard, and — for conversational cases — full dual-agent transcripts with structured tool-call capture |
 | **Review** | A readiness report: pass/fail gate verdict, failure clusters, and prioritized repairs |
+| **Rollout** | With `--pdf`, one document per run: configuration, inferred purpose, personas, transcript with tool calls, judge evidence, and critique |
+
+For a configured agent, `ghostlab lab` adds an inferred **purpose profile** —
+what the agent is for, its workflows, and its risk surface — and drives
+generation from that instead of from the tool inventory.
 
 ## See it in action
 
@@ -197,7 +207,8 @@ Ghostlab is intentionally **app-agnostic**:
 - Treats an agent configuration—not a single MCP—as the evaluation boundary.
 - Works with MCP servers reachable by stdio/SSE/streamable HTTP and local skills.
 - Supports local or remote MCP endpoints.
-- Supports multiple coding-agent runners (Codex, Claude Code, and future adapters).
+- Supports multiple coding-agent runners (Codex, OpenCode, Claude Code, and future adapters).
+- Expresses an OpenCode agent's full configuration — model, instructions, skills, subagents, tool permissions, and any number of MCPs — and runs all of it inside the sandbox.
 
 No Cortex-specific assumptions are required in the core harness.
 
@@ -268,6 +279,7 @@ network mode, environment allowlist, providers, logs, and cleanup.
 
 The package installs two equivalent console scripts: `ghostlab` and `rehearsal`.
 
+- `ghostlab lab` — guided setup for a **configured agent** (model, instructions, skills, MCPs, permissions, code), then generate scenarios from its inferred purpose and run them fully sandboxed.
 - `ghostlab create` — the end-to-end wizard described above.
 - `ghostlab init` — advanced: scaffold a standalone `ghostlab.yaml` **spec** from a target JSON (see [spec vs job](#spec-vs-job) — most users want `ghostlab create`).
 - `ghostlab discover` — inspect the job's target, lint its contract, refresh capabilities.
@@ -284,10 +296,88 @@ The package installs two equivalent console scripts: `ghostlab` and `rehearsal`.
 - `ghostlab scorecard` — roll run verdicts and critiques into a summary scorecard.
 - `ghostlab compare` — diff two dataset runs for regressions.
 - `ghostlab apps-probe` / `apps-render` — probe/render MCP Apps `ui://` widgets.
-- `ghostlab doctor` — check codex and validate runner presets.
+- `ghostlab doctor` — check the sandbox and both LLM backends (`--probe` for a live check).
 - `ghostlab dashboard` — build a standalone HTML dashboard for a `ghostlab test` run.
 - `ghostlab ui` — launch the Streamlit pipeline UI.
 - `ghostlab db` — manage the SQLite persistence database.
+
+### Evaluate a configured agent: `ghostlab lab`
+
+`ghostlab create` evaluates an **MCP server**. `ghostlab lab` evaluates an
+**agent** — the thing you actually ship: a model plus instructions, skills, MCP
+servers, tool permissions, subagents, and a codebase it operates on.
+
+```bash
+ghostlab lab --name release-bot
+```
+
+It walks ten steps, and nothing generated is used before you have seen it:
+
+| Step | |
+| --- | --- |
+| 1 Source | An existing `opencode.json`, an agent config, or from scratch |
+| 2 Purpose | Your description — authoritative over anything inferred |
+| 3 Model | Only models your OpenCode install can actually reach |
+| 4 Capabilities | Import from a standard `mcpServers` config, pick per server |
+| 5 Instructions, skills, code | Instruction files, skill folders, the workspace |
+| 6 Permissions | `read-only` / `edit-workspace` / `full-shell`, blast radius spelled out |
+| 7 Sandbox | Image, and the explicit credential opt-in |
+| 8 Profile | Review the inferred purpose, workflows, and risk surface |
+| 9 Scenarios | Generated from that profile; drop any you do not want |
+| 10 Run | Execute, judge, and report |
+
+Every answer is written to `job.yaml`, so the result is a reproducible file
+rather than a conversation that happened once.
+
+#### Purpose-driven generation
+
+Persona and scenario generation for an MCP job works from the tool inventory.
+For an agent that is the wrong question: an agent whose purpose lives in its
+prompt would get scenarios about tool families instead of about its job.
+
+Ghostlab instead reads the agent's description, instruction files, skill
+definitions, subagent prompts, permission posture, and MCP inventory, and infers
+what it is *for* — purpose, audience, workflows, and a grounded **risk surface**
+that seeds the adversarial scenarios. From a small release assistant it produced
+risks like *"prompt injection through changelog contents"* and *"claiming a
+release was published, violating the core instruction"*.
+
+The result is written to `workspace/agent-profile.json` and shown for review
+before anything is generated from it.
+
+#### Everything runs in the sandbox
+
+A configured agent is only worth testing with real permissions, and those are
+exactly the ones you do not want on your machine. So the whole agent goes
+inside OpenShell:
+
+- the **CLI** comes from `docker/agent-sandbox.Dockerfile` (a Linux image with
+  OpenCode installed — the host binary is platform-specific and cannot be
+  uploaded), and runs over the SSH channel;
+- its **MCPs** are launched by OpenCode inside that same container;
+- its **code** is an uploaded copy at `/sandbox/workspace`, so `edit` and `bash`
+  act on a throwaway;
+- **credentials** are an explicit opt-in, uploaded outside the workspace at mode
+  600, and redacted from every report;
+- **network** is default-deny, with a generated policy allowing only the model
+  provider and OpenCode's model catalog. Anything else the agent reaches for is
+  denied and shows up in the sandbox log — which is itself a finding.
+
+#### Rollout report
+
+`--pdf` assembles one document per run: the resolved configuration (secrets
+redacted), the inferred purpose, personas and scenarios, the full transcript
+with every tool call and its latency, the judge verdict with per-criterion
+evidence, and the tool-usability critique.
+
+```bash
+ghostlab test --job release-bot --pdf     # rollout.html + rollout.pdf per run
+```
+
+PDF rendering uses the browser the MCP Apps host already needs
+(`pip install 'ghostlab[apps]'`); without it the HTML is still written.
+
+See [Configured Agent Lab](docs/configured-agent-lab.md) for the full design.
 
 ### The UI: `ghostlab ui`
 
