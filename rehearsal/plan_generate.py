@@ -42,8 +42,14 @@ def generate_conversational_dataset(
     scenarios_per_persona: int = DEFAULT_SCENARIOS_PER_PERSONA,
     seed: int = 0,
     progress: Optional[ProgressFn] = None,
+    agent: "Optional[dict[str, Any]]" = None,
 ) -> dict[str, Any]:
-    """Profile the MCP, then generate personas + per-persona scenarios.
+    """Profile the target, then generate personas + per-persona scenarios.
+
+    With ``agent``, the profile describes what the *configured agent* is for —
+    its instructions, skills, subagents, and permissions — instead of only what
+    its tools can do. An agent whose purpose lives in its prompt would otherwise
+    get scenarios about tool families rather than about its job.
 
     Returns the same shape as :func:`rehearsal.dataset.build_dataset`
     (``manifest``/``personas``/``scenarios``), plus the profile used, so
@@ -51,8 +57,15 @@ def generate_conversational_dataset(
     """
     if progress is not None:
         progress({"phase": "profile", "completed": 0, "total": 1,
-                  "message": "Inferring capability profile"})
-    profile = build_capability_profile(inspect_data, backend)
+                  "message": "Inferring agent purpose" if agent else
+                             "Inferring capability profile"})
+    if agent:
+        from .agent_profile import as_capability_profile, build_agent_profile
+
+        agent_profile = build_agent_profile(agent, backend, inspect_data)
+        profile = as_capability_profile(agent_profile, inspect_data)
+    else:
+        profile = build_capability_profile(inspect_data, backend)
     if progress is not None:
         progress({"phase": "profile", "completed": 1, "total": 1,
                   "message": f"Profiled {profile.get('mcp', '?')}"})
@@ -74,10 +87,17 @@ def write_conversational_dataset(dataset: dict[str, Any], out_dir: Path) -> Path
     """Persist personas/scenarios/dataset.json under ``out_dir`` (see build_dataset)."""
     manifest_path = write_dataset(dataset, out_dir)
     if "profile" in dataset:
+        profile = dataset["profile"]
         (out_dir / "profile.json").write_text(
-            json.dumps(dataset["profile"], indent=2, ensure_ascii=False) + "\n",
+            json.dumps(profile, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+        # The inferred purpose is the reviewable artifact for a configured
+        # agent, so it is kept beside the adapted capability profile.
+        if profile.get("agent_profile"):
+            from .agent_profile import write_agent_profile
+
+            write_agent_profile(profile["agent_profile"], out_dir)
     return manifest_path
 
 

@@ -11,6 +11,7 @@ nav:
   - Concepts: concepts.md
   - CLI Reference: cli.md
   - Datasets and Evaluation: datasets-evaluation.md
+  - Configured Agent Lab: configured-agent-lab.md
   - Vision & Roadmap: ghostlab-vision-gap-and-roadmap.md
   - Publishing: publishing.md
 markdown_extensions:
