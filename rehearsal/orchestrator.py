@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -37,6 +38,95 @@ class RunResult:
 def build_run_id(target_id: str, scenario_id: str) -> str:
     timestamp = utc_now().replace("+00:00", "Z").replace(":", "")
     return f"{timestamp}-{target_id}-{scenario_id}"
+
+
+_SNAPSHOT_SKIP = {
+    ".git", "node_modules", ".venv", "__pycache__", ".opencode",
+    ".parcel-cache", "dist", ".turbo", ".cache",
+}
+_TEXT_PREVIEW_SUFFIXES = {".md", ".html", ".json", ".txt", ".css", ".ts", ".tsx", ".js", ".jsx"}
+
+
+def isolate_runner_workdir(config: RunnerConfig, run_dir: Path) -> RunnerConfig:
+    """Give this case its own OpenCode project so leftover files cannot leak in."""
+    command = list(config.command or [])
+    if "--dir" not in command:
+        return config
+    index = command.index("--dir")
+    if index + 1 >= len(command):
+        return config
+    source = Path(str(command[index + 1])).expanduser()
+    if not source.is_dir():
+        return config
+    dest = run_dir / "workspace"
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in ("opencode.json", "AGENTS.md"):
+        src = source / name
+        if src.is_file():
+            shutil.copy2(src, dest / name)
+    command[index + 1] = str(dest)
+    return replace(config, command=command)
+
+
+def _runner_workdir(config: RunnerConfig) -> Path | None:
+    command = list(config.command or [])
+    if "--dir" in command:
+        index = command.index("--dir")
+        if index + 1 < len(command):
+            path = Path(str(command[index + 1])).expanduser()
+            return path if path.exists() else None
+    return None
+
+
+def _workspace_snapshot(root: Path) -> dict[str, int]:
+    files: dict[str, int] = {}
+    if not root.is_dir():
+        return files
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in _SNAPSHOT_SKIP for part in path.parts):
+            continue
+        try:
+            files[str(path.relative_to(root))] = path.stat().st_size
+        except OSError:
+            continue
+    return files
+
+
+def _preview_file(path: Path, limit: int = 240) -> str:
+    if path.suffix.lower() not in _TEXT_PREVIEW_SUFFIXES:
+        return ""
+    try:
+        if path.stat().st_size > 80_000:
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    text = " ".join(text.split())
+    return text[:limit]
+
+
+def write_workspace_artifacts(run_dir: Path, root: Path | None, before: dict[str, int]) -> Path:
+    created: list[dict[str, Any]] = []
+    if root is not None:
+        after = _workspace_snapshot(root)
+        for rel, size in sorted(after.items()):
+            if rel in before:
+                continue
+            created.append({
+                "path": rel,
+                "size": size,
+                "preview": _preview_file(root / rel),
+            })
+    payload = {
+        "root": str(root) if root else "",
+        "created": created,
+        "before_count": len(before),
+    }
+    path = run_dir / "artifacts.json"
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
 
 
 def _runner_model(config: RunnerConfig) -> str:
@@ -138,6 +228,8 @@ def run_scenario(
         except Exception:  # noqa: BLE001 — persistence is best-effort
             run_db_id = None
 
+    if target.transport in ("skill", "agent"):
+        aut_runner_config = isolate_runner_workdir(aut_runner_config, run_dir)
     aut_runner_config = replace(
         aut_runner_config,
         env={
@@ -158,6 +250,8 @@ def run_scenario(
 
     aut_runner = create_runner(aut_runner_config, "aut")
     user_runner = create_runner(user_runner_config, "user")
+    workspace_root = _runner_workdir(aut_runner_config)
+    workspace_before = _workspace_snapshot(workspace_root) if workspace_root else {}
 
     transcript: list[TranscriptTurn] = []
     tool_calls_by_turn: dict[int, list] = {}
@@ -367,6 +461,7 @@ def run_scenario(
         apps_session.close()
     aut_runner.close()
     user_runner.close()
+    write_workspace_artifacts(run_dir, workspace_root, workspace_before)
 
     all_tool_calls = [call for turn in sorted(tool_calls_by_turn) for call in tool_calls_by_turn[turn]]
     emit(

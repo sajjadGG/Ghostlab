@@ -58,6 +58,18 @@ class YamlCodecTest(unittest.TestCase):
         self.assertIsInstance(parsed["numberish"], str)
         self.assertIsInstance(parsed["boolish"], str)
 
+    def test_quoted_mapping_keys_with_colons_round_trip(self) -> None:
+        data = {
+            "coverage": {
+                "tools": {
+                    "NOT exercising: backend development, API integration": ["security"],
+                    "init-artifact.sh for project initialization": ["semantic"],
+                }
+            }
+        }
+        parsed = parse_yaml(dump_yaml(data))
+        self.assertEqual(parsed, data)
+
     def test_parses_flow_lists_and_comments(self) -> None:
         text = (
             "# header comment\n"

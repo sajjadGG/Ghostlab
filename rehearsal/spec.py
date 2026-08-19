@@ -345,13 +345,14 @@ def spec_from_skill(
     skill_path: Path, *, name: str = "", workspace: str = DEFAULT_WORKSPACE,
 ) -> GhostlabSpec:
     """Starter spec for a local SKILL.md target."""
-    from .skills import resolve_skill_path
+    from .skills import resolve_skill_path, skill_root
 
     path = resolve_skill_path(skill_path)
-    target_id = re.sub(r"[^a-z0-9]+", "-", (name or path.parent.name).lower()).strip("-") or "skill"
+    root = skill_root(path)
+    target_id = re.sub(r"[^a-z0-9]+", "-", (name or root.name).lower()).strip("-") or "skill"
     return GhostlabSpec(
         id=target_id,
-        name=name or path.parent.name,
+        name=name or root.name,
         workspace=workspace,
         source_target=str(path),
         target={
@@ -361,7 +362,7 @@ def spec_from_skill(
         agent={
             "id": target_id,
             "runner": {},
-            "inputs": {"mcps": [], "skills": [{"path": str(path)}]},
+            "inputs": {"mcps": [], "skills": [{"path": str(root)}]},
         },
         sandbox=dict(DEFAULT_SANDBOX),
         setup={"commands": [], "health": [], "reset": [], "teardown": [], "fixtures": []},
@@ -600,11 +601,35 @@ class _YamlParser:
         return items
 
     @staticmethod
-    def _looks_like_mapping_entry(content: str) -> bool:
-        if content.startswith(('"', "'", "[", "{")):
-            return False
+    def _split_mapping_entry(content: str) -> tuple[str, str] | None:
+        """Split ``key: value`` including quoted keys that contain colons."""
+        if content.startswith(("[", "{")):
+            return None
+        if content.startswith(('"', "'")):
+            quote = content[0]
+            index = 1
+            while index < len(content):
+                if content[index] == "\\" and quote == '"':
+                    index += 2
+                    continue
+                if content[index] == quote:
+                    if quote == "'" and index + 1 < len(content) and content[index + 1] == "'":
+                        index += 2
+                        continue
+                    rest = content[index + 1:]
+                    if rest.startswith(":") and (rest == ":" or rest[1] == " "):
+                        return content[: index + 1], rest[1:].strip()
+                    return None
+                index += 1
+            return None
         key, sep, rest = content.partition(":")
-        return bool(sep) and (rest == "" or rest.startswith(" "))
+        if not sep or (rest and not rest.startswith(" ")):
+            return None
+        return key.strip(), rest.strip()
+
+    @classmethod
+    def _looks_like_mapping_entry(cls, content: str) -> bool:
+        return cls._split_mapping_entry(content) is not None
 
     def parse_mapping(self, indent: int) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -615,11 +640,11 @@ class _YamlParser:
             _, text = line
             if text.startswith("- ") or text == "-":
                 break
-            if not self._looks_like_mapping_entry(text):
+            split = self._split_mapping_entry(text)
+            if split is None:
                 raise YamlSubsetError(f"expected 'key: value', got: {text!r}")
-            key_text, _, rest = text.partition(":")
+            key_text, rest = split
             key = str(_parse_scalar(key_text.strip()))
-            rest = rest.strip()
             self.pos += 1
             if rest:
                 result[key] = _parse_scalar(rest)

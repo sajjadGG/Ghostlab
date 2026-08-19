@@ -237,5 +237,33 @@ class PromptOverrideTest(unittest.TestCase):
         self.assertEqual(out, "DIG and {mystery}")
 
 
+class OpencodeSkillRunnerTest(unittest.TestCase):
+    def test_skill_job_does_not_emit_a_fake_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill = root / "demo-skill"
+            skill.mkdir()
+            (skill / "SKILL.md").write_text(
+                "---\nname: demo\ndescription: Demo.\n---\n# Demo\n",
+                encoding="utf-8",
+            )
+            spec = jobs.default_skill_job_spec("demo-skill", skill_path=skill)
+            spec.agent["runtime"] = {
+                "backend": "opencode",
+                "model": "github-copilot/mai-code-1.1-flash",
+                "permission": {"bash": "allow", "edit": "allow"},
+            }
+            spec_path = jobs.create_job("demo-skill", spec, jobs_root=root / "jobs")
+            runner = jobs.build_opencode_aut_runner(
+                spec, spec_path, model="github-copilot/mai-code-1.1-flash",
+            )
+            project = spec_path.parent / "runners" / "opencode-aut" / "opencode.json"
+            config = json.loads(project.read_text(encoding="utf-8"))
+            self.assertNotIn("mcp", config)
+            self.assertIn(str(skill.resolve()), config.get("skills", {}).get("paths", []))
+            self.assertEqual(config["permission"]["bash"], "allow")
+            self.assertIn("mai-code-1.1-flash", " ".join(runner["command"]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ from rehearsal.opencode_backend import (
     OpencodeError,
     collect_text,
     extract_json,
+    first_stream_error,
 )
 from rehearsal.runner_presets import (
     opencode_aut_runner,
@@ -47,6 +48,13 @@ class CollectTextTest(unittest.TestCase):
 
     def test_empty_stream_yields_empty_string(self) -> None:
         self.assertEqual(collect_text(""), "")
+
+    def test_stream_error_is_extracted(self) -> None:
+        stream = json.dumps({
+            "type": "error",
+            "error": {"data": {"message": "model \"mai-code-1.1-flash\" is not accessible"}},
+        })
+        self.assertIn("mai-code-1.1-flash", first_stream_error(stream))
 
 
 class ExtractJsonTest(unittest.TestCase):
@@ -103,6 +111,21 @@ class OpencodeBackendTest(unittest.TestCase):
             backend = OpencodeBackend(bin_path="/bin/opencode")
             with self.assertRaises(OpencodeError):
                 backend.generate_json("prompt", self.schema)
+
+    def test_stream_error_event_is_a_model_error(self) -> None:
+        completed = unittest.mock.Mock(
+            returncode=0,
+            stdout=json.dumps({
+                "type": "error",
+                "error": {"data": {"message": "model is not accessible via /chat/completions"}},
+            }),
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=completed):
+            backend = OpencodeBackend(bin_path="/bin/opencode")
+            with self.assertRaises(OpencodeError) as ctx:
+                backend.generate_json("prompt", self.schema)
+        self.assertIn("not accessible", str(ctx.exception))
 
     def test_defaults_to_a_pinned_model(self) -> None:
         completed = unittest.mock.Mock(

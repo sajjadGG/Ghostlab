@@ -11,6 +11,8 @@ from rehearsal.evaluate import (
     combine_verdict,
     deterministic_checks,
     evidence_references,
+    format_artifact_manifest,
+    judge_prompt,
     read_run,
 )
 
@@ -36,6 +38,15 @@ class DeterministicTest(unittest.TestCase):
         self.assertTrue(det["no_tool_calls"])
         self.assertEqual(det["coverage"], "0/3")
 
+    def test_skill_workflow_exercises_are_not_missing_tools(self) -> None:
+        scenario = {"exercises": [
+            "init-artifact.sh for project initialization",
+            "bundle-artifact.sh for final HTML artifact generation",
+        ]}
+        det = deterministic_checks(scenario, [])
+        self.assertEqual(det["coverage"], "n/a")
+        self.assertEqual(det["exercises_missing"], [])
+
 
 class CombineVerdictTest(unittest.TestCase):
     def test_pass_passes_through(self) -> None:
@@ -59,6 +70,12 @@ class CombineVerdictTest(unittest.TestCase):
         verdict, gates = combine_verdict("completed", {}, judge)
         self.assertEqual(verdict, "fail")
         self.assertTrue(any("hallucinated_tools" in g for g in gates))
+
+    def test_skill_eval_ignores_hallucinated_tool_gate(self) -> None:
+        judge = {"verdict": "pass", "failure_signals": [], "hallucinated_tools": ["bash"]}
+        verdict, gates = combine_verdict("completed", {}, judge, skill_like=True)
+        self.assertEqual(verdict, "pass")
+        self.assertEqual(gates, [])
 
     def test_run_crash_forces_fail(self) -> None:
         judge = {"verdict": "partial", "failure_signals": [], "hallucinated_tools": []}
@@ -205,6 +222,33 @@ class ReadRunTest(unittest.TestCase):
         refs = evidence_references(run, "Called student_get_status before updating the learner profile.")
         self.assertIn("assistant turn 2", refs)
         self.assertIn("cortex/student_get_status · turn 2", refs)
+
+
+class SkillJudgeTest(unittest.TestCase):
+    def test_skill_prompt_does_not_pretend_the_target_is_an_mcp(self) -> None:
+        run = {
+            "target": {"transport": "skill", "capabilities": {"target_type": "skill"}},
+            "scenario": {
+                "goal": "Ship a bundled HTML artifact",
+                "success_criteria": ["used the skill scripts"],
+                "failure_signals": ["freehanded a one-file React page"],
+            },
+            "transcript": [{"role": "assistant", "content": "I ran init-artifact.sh"}],
+            "tool_calls": [],
+            "builtin_calls": [{"tool": "bash", "status": "completed"}],
+            "artifacts": {
+                "root": "/tmp/project",
+                "created": [{"path": "bundle.html", "size": 12, "preview": "<html></html>"}],
+            },
+        }
+        prompt = judge_prompt(run)
+        self.assertIn("published skill", prompt)
+        self.assertNotIn("against an MCP server", prompt)
+        self.assertIn("bundle.html", prompt)
+        self.assertIn("init-artifact.sh", prompt)
+
+    def test_artifact_manifest_empty(self) -> None:
+        self.assertIn("no workspace snapshot", format_artifact_manifest(None))
 
 
 if __name__ == "__main__":
