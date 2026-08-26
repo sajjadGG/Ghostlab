@@ -1,0 +1,28 @@
+{
+  "kind": "copilot-session",
+  "command": [
+    "copilot",
+    "--output-format",
+    "json",
+    "--stream",
+    "off",
+    "--no-color",
+    "--no-remote",
+    "--no-auto-update",
+    "--no-ask-user",
+    "--disable-builtin-mcps",
+    "--disable-mcp-server",
+    "target",
+    "--allow-all-tools",
+    "--model",
+    "gpt-5-mini",
+    "--prompt"
+  ],
+  "env": {},
+  "timeout_seconds": 600,
+  "prompt_mode": "append-arg",
+  "parser": "copilot-json",
+  "sandbox": {
+    "backend": "local"
+  }
+}

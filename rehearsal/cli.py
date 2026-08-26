@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 from pathlib import Path
 
 from . import __version__
@@ -199,7 +200,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     create_parser.add_argument(
         "--aut-runner", type=Path, default=None,
-        help="Runner JSON for the agent-under-test host (adds a process host).",
+        help="Low-level runner JSON for the agent-under-test host.",
+    )
+    create_parser.add_argument(
+        "--user-runner", type=Path, default=None,
+        help="Low-level runner JSON for the user emulator.",
+    )
+    create_parser.add_argument(
+        "--aut-backend", choices=["codex", "opencode", "copilot"], default=None,
+        help="Agent-under-test runner backend (default: declared runtime, else codex).",
+    )
+    create_parser.add_argument(
+        "--user-backend", choices=["codex", "opencode", "copilot"], default=None,
+        help="User-emulator runner backend (default: AUT backend).",
     )
     create_parser.add_argument(
         "--personas", type=int, default=None, help="Default personas to generate (default: 2)."
@@ -246,7 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--judge-model", default="", help="Codex model for judging test outcomes.")
     create_parser.add_argument("--generation-model", default="", help="Codex model for persona/scenario generation.")
     create_parser.add_argument(
-        "--runner-kind", choices=["process", "codex-session"], default=None,
+        "--runner-kind", choices=["process", "codex-session", "copilot-session"], default=None,
         help="Agent-under-test runner lifecycle (default: process).",
     )
     create_parser.add_argument("--runner-timeout", type=int, default=None, help="AUT turn timeout in seconds (default: 600).")
@@ -260,6 +273,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="Codex's nested sandbox mode inside OpenShell (default: read-only).",
     )
     create_parser.add_argument("--codex-bin", default="", help="Codex executable for the AUT and generation.")
+    create_parser.add_argument(
+        "--copilot-bin", default="", help="GitHub Copilot CLI executable for the AUT."
+    )
+    create_parser.add_argument(
+        "--user-copilot-bin", default="",
+        help="GitHub Copilot CLI executable for the user emulator.",
+    )
+    create_parser.add_argument(
+        "--aut-agent", default="",
+        help="Custom agent name for the AUT (for example a VS Code .github/agents agent).",
+    )
+    create_parser.add_argument(
+        "--user-agent", default="", help="Custom agent name for the user emulator."
+    )
+    effort_choices = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    create_parser.add_argument(
+        "--aut-reasoning-effort", choices=effort_choices, default="",
+        help="Copilot reasoning effort for the AUT.",
+    )
+    create_parser.add_argument(
+        "--user-reasoning-effort", choices=effort_choices, default="",
+        help="Copilot reasoning effort for the user emulator.",
+    )
+    create_parser.add_argument(
+        "--aut-context", choices=["default", "long_context"], default="",
+        help="Copilot context tier for the AUT.",
+    )
+    create_parser.add_argument(
+        "--user-context", choices=["default", "long_context"], default="",
+        help="Copilot context tier for the user emulator.",
+    )
+    create_parser.add_argument(
+        "--aut-copilot-arg", action="append", default=None, metavar="ARG",
+        help="Additional Copilot CLI argv item for the AUT (repeatable).",
+    )
+    create_parser.add_argument(
+        "--user-copilot-arg", action="append", default=None, metavar="ARG",
+        help="Additional Copilot CLI argv item for the user emulator (repeatable).",
+    )
+    create_parser.add_argument(
+        "--aut-runner-env", action="append", default=None, metavar="NAME=VALUE",
+        help="Environment entry for the AUT runner (repeatable).",
+    )
+    create_parser.add_argument(
+        "--user-runner-env", action="append", default=None, metavar="NAME=VALUE",
+        help="Environment entry for the user runner (repeatable).",
+    )
     _add_llm_backend_arg(create_parser)
 
     config_parser = sub.add_parser(
@@ -638,6 +698,22 @@ def build_parser() -> argparse.ArgumentParser:
              "path (default: the bundled agent sandbox).",
     )
     lab_parser.add_argument("--model", default="", help="Model for generation and judging.")
+    lab_parser.add_argument(
+        "--runner-backend", choices=["opencode", "copilot"], default="",
+        help="Configured-agent runner used by the guided lab.",
+    )
+    lab_parser.add_argument(
+        "--runner-model", default="",
+        help="Configured-agent model (separate from the generation/judge --model).",
+    )
+    lab_parser.add_argument(
+        "--user-runner-backend", choices=["opencode", "copilot"], default="",
+        help="User-emulator runner used by the guided lab (default: AUT backend).",
+    )
+    lab_parser.add_argument("--runner-agent", default="", help="Copilot custom agent for the AUT.")
+    lab_parser.add_argument("--user-agent", default="", help="Copilot custom agent for the user.")
+    lab_parser.add_argument("--user-model", default="", help="User-emulator runner model.")
+    lab_parser.add_argument("--copilot-bin", default="", help="GitHub Copilot CLI executable.")
     lab_parser.add_argument("--personas", type=int, default=0, help="Personas to generate.")
     lab_parser.add_argument(
         "--scenarios-per-persona", type=int, default=0, help="Scenarios per persona."
@@ -858,6 +934,19 @@ def _parse_header_lines(lines: list[str]) -> dict[str, str]:
     return headers
 
 
+def _parse_runner_env(lines: list[str], role: str) -> dict[str, str]:
+    """Parse repeatable ``NAME=VALUE`` runner environment settings."""
+    environment: dict[str, str] = {}
+    for line in lines:
+        name, separator, value = line.partition("=")
+        if not separator or not name.strip():
+            raise ConfigError(
+                f"Invalid {role} runner environment entry {line!r}; expected NAME=VALUE"
+            )
+        environment[name.strip()] = value
+    return environment
+
+
 def _discover_new_job(slug: str) -> int:
     """Run `discover` on a freshly created job (reuses the discover handler)."""
     disc_args = argparse.Namespace(
@@ -890,7 +979,11 @@ def _create_summary(spec, source: str = "") -> list[tuple[str, str]]:
     providers = ", ".join(sandbox.get("providers", []) or []) or "none"
     runner = agent.get("runner", {}) or {}
     runner_kind = runner.get("kind") or next(
-        (host.get("kind") for host in spec.hosts if host.get("kind") in ("process", "codex-session")),
+        (
+            host.get("kind")
+            for host in spec.hosts
+            if host.get("kind") in ("process", "codex-session", "copilot-session")
+        ),
         "auto-configure",
     )
     resolved = resolved_job_config(spec, Path("job.yaml"))
@@ -904,7 +997,15 @@ def _create_summary(spec, source: str = "") -> list[tuple[str, str]]:
         ("AUT model", str(models["agent_under_test"])),
         ("user model", str(models["user_emulator"])),
         ("judge model", str(models["judge"])),
-        ("Codex policy", f"{effective_runner['approval_mode']} · {effective_runner['codex_sandbox']}"),
+        (
+            "AUT policy",
+            (
+                f"agent {effective_runner['agent'] or 'default'} · "
+                f"effort {effective_runner['reasoning_effort'] or 'default'}"
+                if effective_runner["backend"] == "copilot"
+                else f"{effective_runner['approval_mode']} · {effective_runner['codex_sandbox']}"
+            ),
+        ),
         ("sandbox", f"{sandbox.get('backend', 'openshell')} · image {sandbox.get('image', 'base')}"),
         ("providers", providers),
         ("generation", f"{(spec.generation or {}).get('personas', 2)} personas × {(spec.generation or {}).get('scenarios_per_persona', 2)} scenarios"),
@@ -994,35 +1095,182 @@ def cmd_create(args: argparse.Namespace) -> int:
         if args.provider is None:
             providers = ask("OpenShell providers (comma-separated; blank for none)", "")
             args.provider = [part.strip() for part in providers.split(",") if part.strip()]
-    if interactive:
-        if not args.model:
-            args.model = ask("AUT Codex model (blank uses Codex CLI default)", "")
-        if args.runner_kind is None:
-            args.runner_kind = ask_choice(
-                "Runner lifecycle [process/codex-session] (process): ",
-                {"process": "process", "p": "process", "codex-session": "codex-session", "session": "codex-session", "s": "codex-session"},
-                "process",
+
+    declared_backend_hint = ""
+    if args.agent is not None:
+        try:
+            from .agents import load_agent_definition
+
+            hinted_agent, _hinted_sandbox = load_agent_definition(args.agent)
+            declared_backend_hint = str(
+                ((hinted_agent.get("runtime") or {}).get("backend") or "")
             )
+        except (ConfigError, OSError, ValueError):
+            # The normal load below reports the actionable validation error.
+            pass
+    if interactive:
+        if args.aut_backend is None:
+            default_backend = (
+                declared_backend_hint
+                if declared_backend_hint in ("codex", "opencode", "copilot")
+                else "codex"
+            )
+            args.aut_backend = ask_choice(
+                "AUT runner [codex/opencode/copilot]: ",
+                {
+                    "codex": "codex",
+                    "c": "codex",
+                    "opencode": "opencode",
+                    "o": "opencode",
+                    "copilot": "copilot",
+                    "p": "copilot",
+                },
+                default_backend,
+            )
+        if not args.model:
+            args.model = ask(
+                f"AUT {args.aut_backend} model (blank uses runner default)", ""
+            )
+        if args.runner_kind is None:
+            if args.aut_backend == "copilot":
+                args.runner_kind = ask_choice(
+                    "Runner lifecycle [copilot-session/process]: ",
+                    {
+                        "copilot-session": "copilot-session",
+                        "session": "copilot-session",
+                        "s": "copilot-session",
+                        "process": "process",
+                        "p": "process",
+                    },
+                    "copilot-session",
+                )
+            elif args.aut_backend == "codex":
+                args.runner_kind = ask_choice(
+                    "Runner lifecycle [process/codex-session]: ",
+                    {
+                        "process": "process",
+                        "p": "process",
+                        "codex-session": "codex-session",
+                        "session": "codex-session",
+                        "s": "codex-session",
+                    },
+                    "process",
+                )
+            else:
+                args.runner_kind = "process"
         if args.runner_timeout is None:
             try:
                 args.runner_timeout = int(ask("AUT turn timeout seconds", "600"))
             except ValueError:
                 print("Runner timeout must be an integer.")
                 return 1
-        if args.approval_mode is None:
+        if args.aut_backend == "codex" and args.approval_mode is None:
             args.approval_mode = ask_choice(
                 "Codex approval mode [never/on-request/untrusted] (never): ",
                 {"never": "never", "n": "never", "on-request": "on-request", "o": "on-request", "untrusted": "untrusted", "u": "untrusted"},
                 "never",
             )
-        if args.codex_sandbox is None:
+        if args.aut_backend == "codex" and args.codex_sandbox is None:
             args.codex_sandbox = ask_choice(
                 "Nested Codex sandbox [read-only/workspace-write/danger-full-access] (read-only): ",
                 {"read-only": "read-only", "r": "read-only", "workspace-write": "workspace-write", "w": "workspace-write", "danger-full-access": "danger-full-access", "d": "danger-full-access"},
                 "read-only",
             )
+        if args.aut_backend == "copilot":
+            if not args.aut_agent:
+                args.aut_agent = ask(
+                    "AUT custom agent name (blank uses default Copilot agent)", ""
+                )
+            if not args.aut_reasoning_effort:
+                effort = ask_choice(
+                    "AUT reasoning effort [default/none/minimal/low/medium/high/xhigh/max]: ",
+                    {
+                        value: value
+                        for value in (
+                            "default",
+                            "none",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max",
+                        )
+                    },
+                    "default",
+                )
+                args.aut_reasoning_effort = "" if effort == "default" else effort
+            if not args.aut_context:
+                context = ask_choice(
+                    "AUT context [default/long_context]: ",
+                    {"default": "default", "long_context": "long_context", "long": "long_context"},
+                    "default",
+                )
+                args.aut_context = context
+            if args.aut_copilot_arg is None:
+                try:
+                    args.aut_copilot_arg = shlex.split(
+                        ask("Additional AUT Copilot CLI arguments", "")
+                    )
+                except ValueError as exc:
+                    print(f"Invalid AUT Copilot arguments: {exc}")
+                    return 1
+        if args.user_backend is None:
+            args.user_backend = ask_choice(
+                "User runner [codex/opencode/copilot]: ",
+                {
+                    "codex": "codex",
+                    "c": "codex",
+                    "opencode": "opencode",
+                    "o": "opencode",
+                    "copilot": "copilot",
+                    "p": "copilot",
+                },
+                args.aut_backend or "codex",
+            )
         if not args.user_model:
-            args.user_model = ask("User-emulator model (blank uses AUT/default)", "")
+            args.user_model = ask(
+                f"User-emulator {args.user_backend} model (blank uses AUT/default)", ""
+            )
+        if args.user_backend == "copilot":
+            if not args.user_agent:
+                args.user_agent = ask(
+                    "User custom agent name (blank uses default Copilot agent)", ""
+                )
+            if not args.user_reasoning_effort:
+                effort = ask_choice(
+                    "User reasoning effort [default/none/minimal/low/medium/high/xhigh/max]: ",
+                    {
+                        value: value
+                        for value in (
+                            "default",
+                            "none",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max",
+                        )
+                    },
+                    "default",
+                )
+                args.user_reasoning_effort = "" if effort == "default" else effort
+            if not args.user_context:
+                context = ask_choice(
+                    "User context [default/long_context]: ",
+                    {"default": "default", "long_context": "long_context", "long": "long_context"},
+                    "default",
+                )
+                args.user_context = context
+            if args.user_copilot_arg is None:
+                try:
+                    args.user_copilot_arg = shlex.split(
+                        ask("Additional user Copilot CLI arguments", "")
+                    )
+                except ValueError as exc:
+                    print(f"Invalid user Copilot arguments: {exc}")
+                    return 1
         if not args.generation_model:
             args.generation_model = ask("Persona/scenario generation model (blank uses AUT/default)", "")
         if not args.judge_model:
@@ -1076,7 +1324,9 @@ def cmd_create(args: argparse.Namespace) -> int:
         generation["personas"] = args.personas
     if args.scenarios_per_persona is not None:
         generation["scenarios_per_persona"] = args.scenarios_per_persona
-    generation_model = args.generation_model or args.model
+    generation_model = args.generation_model or (
+        args.model if args.aut_backend != "copilot" else ""
+    )
     if generation_model:
         generation["model"] = generation_model
     if args.codex_bin:
@@ -1094,6 +1344,7 @@ def cmd_create(args: argparse.Namespace) -> int:
             spec = default_agent_job_spec(
                 name, agent=agent, sandbox=agent_sandbox, generation=generation,
                 review_gates=review_gates,
+                user_runner=str(args.user_runner) if args.user_runner else None,
             )
             spec.source_target = str(args.agent)
         except (ConfigError, OSError, ValueError) as exc:
@@ -1105,6 +1356,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                 name, skill_path=args.skill, generation=generation,
                 review_gates=review_gates,
                 aut_runner=str(args.aut_runner) if args.aut_runner else None,
+                user_runner=str(args.user_runner) if args.user_runner else None,
             )
         except ConfigError as exc:
             print(str(exc))
@@ -1115,6 +1367,7 @@ def cmd_create(args: argparse.Namespace) -> int:
             name, target=target, source_target=source_target, generation=generation,
             review_gates=review_gates,
             aut_runner=str(args.aut_runner) if args.aut_runner else None,
+            user_runner=str(args.user_runner) if args.user_runner else None,
         )
     if getattr(args, "sandbox", None):
         spec.sandbox["backend"] = args.sandbox
@@ -1124,58 +1377,132 @@ def cmd_create(args: argparse.Namespace) -> int:
         spec.sandbox["providers"] = list(dict.fromkeys([
             *list(spec.sandbox.get("providers", []) or []), *args.provider,
         ]))
-    # An agent config that declares its own runtime (model, instructions,
-    # skills, permissions) *is* the agent under test, so the wizard's codex
-    # defaults must not overwrite it.
     declared_runtime = dict((spec.agent or {}).get("runtime") or {})
-    declared = str(declared_runtime.get("backend") or "") not in ("", "codex")
-    if declared:
-        if args.model:
-            declared_runtime["model"] = args.model
-        runtime = declared_runtime
-        spec.generation = {
-            **(spec.generation or {}),
-            "backend": str(declared_runtime["backend"]),
-            "model": args.generation_model or str(declared_runtime.get("model") or ""),
-        }
+    existing_runner = dict((spec.agent or {}).get("runner") or {})
+    existing_command = [str(part) for part in existing_runner.get("command", [])]
+    existing_parser = str(existing_runner.get("parser") or "")
+    if existing_parser == "copilot-json" or (
+        existing_command and Path(existing_command[0]).name == "copilot"
+    ):
+        inferred_backend = "copilot"
+    elif existing_parser.startswith("opencode") or (
+        existing_command and Path(existing_command[0]).name == "opencode"
+    ):
+        inferred_backend = "opencode"
+    elif existing_parser == "codex-json" or (
+        existing_command and Path(existing_command[0]).name == "codex"
+    ):
+        inferred_backend = "codex"
     else:
-        backend = getattr(args, "llm_backend", "") or "codex"
-        if backend == "opencode":
-            runtime = {
-                "backend": "opencode",
-                "model": args.model or "",
-                "timeout_seconds": args.runner_timeout or 600,
-            }
-            if args.skill is not None:
-                from .skills import inspect_skill, skill_root
+        inferred_backend = "custom" if existing_command else ""
 
-                root = skill_root(args.skill)
-                inspected = inspect_skill(args.skill, spec.id)
-                description = str(inspected.capabilities.get("description") or "")
-                if description:
-                    spec.agent = {**(spec.agent or {}), "description": description}
-                runtime["skills"] = {"paths": [str(root)]}
-                if inspected.capabilities.get("requires_shell"):
-                    runtime["permission"] = {"bash": "allow", "edit": "allow"}
-        else:
-            runtime = {
-                "backend": "codex",
-                "model": args.model or "",
-                "kind": args.runner_kind or "process",
-                "timeout_seconds": args.runner_timeout or 600,
-                "approval_mode": args.approval_mode or "never",
-                "codex_sandbox": args.codex_sandbox or "read-only",
-                "codex_bin": args.codex_bin or "codex",
+    backend = str(
+        args.aut_backend
+        or declared_runtime.get("backend")
+        or inferred_backend
+        or ("opencode" if getattr(args, "llm_backend", "") == "opencode" else "codex")
+    )
+    if backend == "copilot" and not args.generation_model:
+        spec.generation = {**(spec.generation or {}), "model": ""}
+    elif backend == "opencode" and not (spec.generation or {}).get("backend"):
+        spec.generation = {**(spec.generation or {}), "backend": "opencode"}
+    runtime = {**declared_runtime, "backend": backend}
+    if args.model:
+        runtime["model"] = args.model
+    else:
+        runtime.setdefault("model", "")
+    runtime["timeout_seconds"] = int(
+        args.runner_timeout or runtime.get("timeout_seconds") or 600
+    )
+
+    if args.aut_backend and inferred_backend not in ("", args.aut_backend):
+        existing_runner = {}
+    if backend == "copilot":
+        selected_kind = args.runner_kind or runtime.get("kind") or "copilot-session"
+        if selected_kind == "codex-session":
+            print("Copilot runners use 'copilot-session' or 'process', not 'codex-session'.")
+            return 1
+        runtime.update(
+            {
+                "kind": selected_kind,
+                "copilot_bin": args.copilot_bin or runtime.get("copilot_bin") or "copilot",
             }
-    existing_runner = {} if declared else dict((spec.agent or {}).get("runner") or {})
+        )
+        if args.aut_agent:
+            runtime["agent"] = args.aut_agent
+        if args.aut_reasoning_effort:
+            runtime["reasoning_effort"] = args.aut_reasoning_effort
+        if args.aut_context:
+            runtime["context"] = args.aut_context
+        if args.aut_copilot_arg:
+            runtime["extra_args"] = [
+                *list(runtime.get("extra_args") or []),
+                *args.aut_copilot_arg,
+            ]
+    elif backend == "opencode":
+        runtime["kind"] = "process"
+        if args.aut_agent:
+            runtime["default_agent"] = args.aut_agent
+        if args.skill is not None:
+            from .skills import inspect_skill, skill_root
+
+            root = skill_root(args.skill)
+            inspected = inspect_skill(args.skill, spec.id)
+            description = str(inspected.capabilities.get("description") or "")
+            if description:
+                spec.agent = {**(spec.agent or {}), "description": description}
+            runtime["skills"] = {"paths": [str(root)]}
+            if inspected.capabilities.get("requires_shell"):
+                runtime["permission"] = {"bash": "allow", "edit": "allow"}
+    elif backend == "codex":
+        selected_kind = args.runner_kind or runtime.get("kind") or "process"
+        if selected_kind == "copilot-session":
+            print("Codex runners use 'codex-session' or 'process', not 'copilot-session'.")
+            return 1
+        runtime.update(
+            {
+                "kind": selected_kind,
+                "approval_mode": args.approval_mode
+                or runtime.get("approval_mode")
+                or "never",
+                "codex_sandbox": args.codex_sandbox
+                or runtime.get("codex_sandbox")
+                or "read-only",
+                "codex_bin": args.codex_bin or runtime.get("codex_bin") or "codex",
+            }
+        )
+
+    try:
+        aut_environment = _parse_runner_env(
+            list(args.aut_runner_env or []), "AUT"
+        )
+        user_environment = _parse_runner_env(
+            list(args.user_runner_env or []), "user"
+        )
+    except ConfigError as exc:
+        print(str(exc))
+        return 1
+    configured_env_names = [*aut_environment, *user_environment]
+    if configured_env_names and spec.sandbox.get("backend") == "openshell":
+        spec.sandbox["env_allowlist"] = list(
+            dict.fromkeys(
+                [
+                    *list(spec.sandbox.get("env_allowlist", []) or []),
+                    *configured_env_names,
+                ]
+            )
+        )
+    if aut_environment:
+        runtime["env"] = {**dict(runtime.get("env") or {}), **aut_environment}
+
     if existing_runner:
         runtime["kind"] = args.runner_kind or existing_runner.get("kind", "process")
         runtime["timeout_seconds"] = args.runner_timeout or existing_runner.get("timeout_seconds", 600)
         command = existing_runner.get("command") or []
-        if command and Path(str(command[0])).name != "codex":
+        if command and backend not in ("codex", "opencode", "copilot"):
             runtime["backend"] = "custom"
     spec.agent = {**(spec.agent or {}), "runtime": runtime}
-    if existing_runner:
+    if existing_runner and backend == "codex":
         from .jobs import configure_codex_runner
 
         spec.agent["runner"] = configure_codex_runner(
@@ -1187,10 +1514,67 @@ def cmd_create(args: argparse.Namespace) -> int:
             codex_sandbox=args.codex_sandbox or "",
             codex_bin=args.codex_bin,
         )
+    elif existing_runner:
+        spec.agent["runner"] = existing_runner
+    else:
+        spec.agent.pop("runner", None)
+
+    existing_user_runtime = dict((spec.test or {}).get("user_runtime") or {})
+    user_backend = str(
+        args.user_backend
+        or existing_user_runtime.get("backend")
+        or (backend if backend in ("codex", "opencode", "copilot") else "codex")
+    )
+    user_runtime = {**existing_user_runtime, "backend": user_backend}
+    user_runtime["model"] = (
+        args.user_model
+        or user_runtime.get("model")
+        or (args.model if user_backend == backend else "")
+    )
+    user_runtime["timeout_seconds"] = int(
+        user_runtime.get("timeout_seconds") or args.runner_timeout or 600
+    )
+    if user_backend == "copilot":
+        user_runtime.update(
+            {
+                "kind": str(user_runtime.get("kind") or "copilot-session"),
+                "copilot_bin": args.user_copilot_bin
+                or user_runtime.get("copilot_bin")
+                or args.copilot_bin
+                or "copilot",
+            }
+        )
+        if args.user_agent:
+            user_runtime["agent"] = args.user_agent
+        if args.user_reasoning_effort:
+            user_runtime["reasoning_effort"] = args.user_reasoning_effort
+        if args.user_context:
+            user_runtime["context"] = args.user_context
+        if args.user_copilot_arg:
+            user_runtime["extra_args"] = [
+                *list(user_runtime.get("extra_args") or []),
+                *args.user_copilot_arg,
+            ]
+    elif user_backend == "opencode":
+        if args.user_agent:
+            user_runtime["agent"] = args.user_agent
+    else:
+        user_runtime["codex_bin"] = (
+            user_runtime.get("codex_bin") or args.codex_bin or "codex"
+        )
+    if user_environment:
+        user_runtime["env"] = {
+            **dict(user_runtime.get("env") or {}),
+            **user_environment,
+        }
+
     spec.test = {
         **(spec.test or {}),
+        "user_runtime": user_runtime,
         "user_model": args.user_model or args.model or "",
-        "judge_model": args.judge_model or generation_model or args.model or "",
+        "judge_model": args.judge_model
+        or args.generation_model
+        or (args.model if backend != "copilot" else ""),
     }
 
     source_preview = str(args.agent or args.skill or source_target or args.target or "")
@@ -1214,6 +1598,13 @@ def cmd_create(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         print(str(exc))
         return 1
+    try:
+        from .jobs import materialize_job_runners
+
+        written_runners = materialize_job_runners(spec_path)
+    except (ConfigError, OSError, ValueError) as exc:
+        print(f"Job was created, but its runner configuration is invalid: {exc}")
+        return 1
 
     slug = slugify(name)
     job_dir = spec_path.parent
@@ -1224,6 +1615,8 @@ def cmd_create(args: argparse.Namespace) -> int:
         or created_target.connection.get("command") or ""
     )
     print(f"  target: {created_target.transport} {target_location}")
+    for role, runner_path in written_runners.items():
+        print(f"  {role} runner: {runner_path}")
 
     if not run_pipeline:
         print(tc.muted(f"  next: ghostlab discover --job {slug}"))
@@ -1379,11 +1772,18 @@ def _configure_aut_host(spec_path: Path, ask_yn, backend: str = "") -> None:
     A fresh job has no host capable of executing conversational cases, so they
     silently skip in `ghostlab test` until one is configured. Both supported
     agent CLIs can be auto-wired: codex via `-c mcp_servers.*` overrides,
-    opencode via a generated project `opencode.json`. Anything else stays a
-    manual `--aut-runner` / `hosts:` edit.
+    opencode via a generated project `opencode.json`, and GitHub Copilot CLI via
+    `--additional-mcp-config`.
     """
     from .codex_backend import resolve_codex_bin
-    from .jobs import add_aut_host, build_codex_aut_runner, build_opencode_aut_runner
+    from .copilot_backend import CopilotError, resolve_copilot_bin
+    from .jobs import (
+        RUNNER_HOST_KINDS,
+        add_aut_host,
+        build_codex_aut_runner,
+        build_copilot_aut_runner,
+        build_opencode_aut_runner,
+    )
     from .llm_backend import LlmBackendError, resolve_backend_kind
     from .opencode_backend import resolve_opencode_bin
     from .spec import load_spec
@@ -1391,15 +1791,28 @@ def _configure_aut_host(spec_path: Path, ask_yn, backend: str = "") -> None:
     spec = load_spec(spec_path)  # reload: discover just updated `capabilities`
     if (spec.agent or {}).get("runner"):
         return  # An explicit agent config already defines the AUT.
-    if any(h.get("kind") in ("process", "codex-session") for h in spec.hosts):
+    if any(h.get("kind") in RUNNER_HOST_KINDS for h in spec.hosts):
         return  # --aut-runner (or a hand-edited job.yaml) already set one up
 
-    kind = resolve_backend_kind(backend, str((spec.generation or {}).get("backend", "")))
-    resolver = resolve_opencode_bin if kind == "opencode" else resolve_codex_bin
-    if kind == "opencode" or spec.sandbox.get("backend") != "openshell":
+    runtime = dict((spec.agent or {}).get("runtime") or {})
+    runtime_backend = str(runtime.get("backend") or "")
+    kind = (
+        runtime_backend
+        if runtime_backend in ("codex", "opencode", "copilot")
+        else resolve_backend_kind(backend, str((spec.generation or {}).get("backend", "")))
+    )
+    resolver = {
+        "codex": resolve_codex_bin,
+        "opencode": resolve_opencode_bin,
+        "copilot": resolve_copilot_bin,
+    }[kind]
+    if kind in ("opencode", "copilot") or spec.sandbox.get("backend") != "openshell":
         try:
-            resolver()
-        except LlmBackendError:
+            if kind == "copilot":
+                resolver(str(runtime.get("copilot_bin") or ""))
+            else:
+                resolver()
+        except (LlmBackendError, CopilotError):
             print(tc.muted(
                 f"  {kind} not found — semantic/security suites will skip until an "
                 "agent-under-test host is configured (see README)."
@@ -1410,13 +1823,14 @@ def _configure_aut_host(spec_path: Path, ask_yn, backend: str = "") -> None:
         print(tc.muted("  skipping — semantic/security suites will skip for now."))
         return
 
-    runtime = dict((spec.agent or {}).get("runtime") or {})
     if kind == "opencode":
         runner_config = build_opencode_aut_runner(
             spec, spec_path,
             model=str(runtime.get("model") or ""),
             timeout_seconds=int(runtime.get("timeout_seconds") or 600),
         )
+    elif kind == "copilot":
+        runner_config = build_copilot_aut_runner(spec, runtime=runtime)
     else:
         runner_config = build_codex_aut_runner(
             spec,
@@ -2138,7 +2552,12 @@ def cmd_lab(args: argparse.Namespace) -> int:
     from .agent_profile import write_agent_profile
     from .agent_sandbox import DEFAULT_AGENT_IMAGE
     from .cli_ui import Prompter, render_config_panel, render_stage
-    from .jobs import create_job, default_agent_job_spec, jobs_dir
+    from .jobs import (
+        create_job,
+        default_agent_job_spec,
+        jobs_dir,
+        materialize_job_runners,
+    )
     from .lab import (
         TOTAL_STEPS, build_agent_interactively, confirm_profile, review_scenarios,
         sandbox_settings,
@@ -2154,12 +2573,27 @@ def cmd_lab(args: argparse.Namespace) -> int:
     print()
 
     name = args.name or prompter.text("Evaluation name", "my-agent")
-    agent = build_agent_interactively(prompter, name)
-    sandbox = sandbox_settings(prompter, args.image or DEFAULT_AGENT_IMAGE)
+    agent = build_agent_interactively(prompter, name, args.runner_backend)
+    runner_backend = str(agent["runtime"].get("backend") or "opencode")
+    if args.runner_agent:
+        agent["runtime"]["agent"] = args.runner_agent
+    if args.copilot_bin and runner_backend == "copilot":
+        agent["runtime"]["copilot_bin"] = args.copilot_bin
+    if args.runner_model or (args.model and runner_backend == "opencode"):
+        agent["runtime"]["model"] = args.runner_model or args.model
+    sandbox = sandbox_settings(
+        prompter, args.image or DEFAULT_AGENT_IMAGE, runner_backend
+    )
 
+    llm_backend = getattr(args, "llm_backend", "") or "opencode"
+    generation_model = args.model or (
+        str(agent["runtime"].get("model") or "")
+        if runner_backend == "opencode"
+        else ""
+    )
     backend = create_backend(
-        getattr(args, "llm_backend", "") or "opencode",
-        model=args.model or str(agent["runtime"].get("model") or ""),
+        llm_backend,
+        model=generation_model,
     )
     render_stage(8, "Purpose", f"Inferred with {backend_label(backend)}.", TOTAL_STEPS)
     try:
@@ -2171,29 +2605,48 @@ def cmd_lab(args: argparse.Namespace) -> int:
     spec = default_agent_job_spec(name, agent=agent, sandbox=sandbox)
     spec.generation = {
         **(spec.generation or {}),
-        "backend": "opencode",
-        "model": args.model or str(agent["runtime"].get("model") or ""),
+        "backend": llm_backend,
+        "model": generation_model,
         "personas": args.personas or 2,
         "scenarios_per_persona": args.scenarios_per_persona or 2,
+    }
+    user_backend = args.user_runner_backend or runner_backend
+    spec.test = {
+        **(spec.test or {}),
+        "user_runtime": {
+            "backend": user_backend,
+            "model": args.user_model
+            or (
+                str(agent["runtime"].get("model") or "")
+                if user_backend == runner_backend
+                else ""
+            ),
+            "kind": "copilot-session" if user_backend == "copilot" else "process",
+            **({"agent": args.user_agent} if args.user_agent else {}),
+            **(
+                {"copilot_bin": args.copilot_bin or "copilot"}
+                if user_backend == "copilot"
+                else {}
+            ),
+            "timeout_seconds": 900,
+        },
+        "user_model": args.user_model
+        or (
+            str(agent["runtime"].get("model") or "")
+            if user_backend == runner_backend
+            else ""
+        ),
     }
     spec_path = create_job(name, spec, jobs_root=jobs_dir(), force=args.force)
     job_dir = spec_path.parent
     write_agent_profile(profile, job_dir / "workspace")
     print(tc.muted(f"  wrote {job_dir}/workspace/agent-profile.json"))
 
-    # Without an agent-under-test host the conversational cases silently skip.
-    # `test` later rewrites this runner to execute inside the sandbox.
-    from .jobs import add_aut_host, build_opencode_aut_runner
     from .spec import load_spec
 
+    materialize_job_runners(spec_path)
     spec = load_spec(spec_path)
-    if not any(host.get("kind") == "process" for host in spec.hosts or []):
-        runner = build_opencode_aut_runner(
-            spec, spec_path, model=spec.generation["model"], timeout_seconds=900,
-        )
-        add_aut_host(spec, spec_path, runner)
-        save_spec(spec, spec_path)
-        print(tc.muted("  configured the agent-under-test host"))
+    print(tc.muted("  configured the agent-under-test and user-emulator hosts"))
 
     # `plan` needs the capability inventory, which `discover` writes. For an
     # agent job that also records the agent definition itself.
@@ -2213,7 +2666,7 @@ def cmd_lab(args: argparse.Namespace) -> int:
         # approve/reject must stay None: any value puts `plan` in curation-only
         # mode, which refuses to run before a plan exists.
         generate=True, regenerate=True, approve=None, reject=None, db=None,
-        codex_bin="", model=spec.generation["model"], llm_backend="opencode",
+        codex_bin="", model=spec.generation["model"], llm_backend=llm_backend,
         sandbox=None, strict=False,
     )
     if cmd_plan(plan_args) != 0:
@@ -2235,7 +2688,12 @@ def cmd_lab(args: argparse.Namespace) -> int:
         ("job", str(job_dir)),
         ("model", spec.generation["model"]),
         ("sandbox", f"openshell · {sandbox['image']}"),
-        ("credentials", "in sandbox" if sandbox["credentials"]["opencode_auth"] else "none"),
+        (
+            "credentials",
+            "OpenCode auth in sandbox"
+            if sandbox["credentials"]["opencode_auth"]
+            else "token environment" if runner_backend == "copilot" else "none",
+        ),
         ("scenarios", str(len(kept))),
     ])
     if not prompter.confirm("Run the evaluation now?", True):
@@ -2246,7 +2704,7 @@ def cmd_lab(args: argparse.Namespace) -> int:
         job=name, spec=None, plan=None, suite=None, hosts=None, approved_only=False,
         user_runner=None, apps_mode=False, skip_setup=False, timeout=30.0, repeat=1,
         resume=False, sandbox=None, profile=None, strict=False, judge=True,
-        codex_bin="", model=spec.generation["model"], llm_backend="opencode",
+        codex_bin="", model=spec.generation["model"], llm_backend=llm_backend,
         require_semantic=False, pdf=True,
     )
     return cmd_test(test_args)
@@ -2281,8 +2739,17 @@ def cmd_test(args: argparse.Namespace) -> int:
         args.apps_mode = True
     if not args.approved_only and t.get("approved_only"):
         args.approved_only = True
-    if args.user_runner is None and t.get("user_runner"):
-        args.user_runner = Path(t["user_runner"])
+    configured_user_runner = t.get("user_runner")
+    inline_user_runner = (
+        dict(configured_user_runner)
+        if isinstance(configured_user_runner, dict)
+        else None
+    )
+    if args.user_runner is None and isinstance(configured_user_runner, str) and configured_user_runner:
+        configured_path = Path(configured_user_runner)
+        if not configured_path.is_absolute():
+            configured_path = args.spec.resolve().parent / configured_path
+        args.user_runner = configured_path
     if args.repeat == 1 and t.get("repeat"):
         args.repeat = int(t["repeat"])
     if args.timeout == 30.0 and t.get("timeout") is not None:
@@ -2317,6 +2784,21 @@ def cmd_test(args: argparse.Namespace) -> int:
 
     if args.user_runner is not None:
         user_runner_config = load_runner(args.user_runner)
+    elif inline_user_runner is not None:
+        from .config import runner_from_dict
+
+        user_runner_config = runner_from_dict(
+            inline_user_runner,
+            source=f"{args.spec}:test.user_runner",
+        )
+    elif t.get("user_runtime"):
+        from .jobs import build_user_runner
+        from .config import runner_from_dict
+
+        user_runner_config = runner_from_dict(
+            build_user_runner(spec, args.spec, runtime=dict(t["user_runtime"])),
+            source=f"{args.spec}:test.user_runtime",
+        )
     else:
         # Zero-config default: a plain agent session with no MCP wired in, so it
         # plays a human, never another tool-using agent. Mirrors
@@ -2957,13 +3439,19 @@ def _validate_runner(path: Path) -> tuple[bool, str]:
         runner = load_runner(path)
     except ConfigError as exc:
         return False, str(exc)
-    if runner.kind not in ("mock", "process", "codex-session"):
+    if runner.kind not in ("mock", "process", "codex-session", "copilot-session"):
         return False, f"unknown kind '{runner.kind}'"
-    if runner.kind in ("process", "codex-session") and not runner.command:
+    if runner.kind in ("process", "codex-session", "copilot-session") and not runner.command:
         return False, "empty command"
     if runner.kind == "codex-session" and "exec" not in runner.command:
         return False, "codex-session command must contain 'exec'"
-    if runner.parser not in ("text", "codex-json"):
+    if runner.kind == "copilot-session" and not any(
+        part in ("-p", "--prompt") for part in runner.command
+    ):
+        return False, "copilot-session command must contain '--prompt'"
+    if runner.parser not in (
+        "text", "codex-json", "opencode-json", "opencode-text", "copilot-json"
+    ):
         return False, f"unknown parser '{runner.parser}'"
     return True, f"kind={runner.kind} parser={runner.parser}"
 

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import uuid
 from dataclasses import dataclass
 
 from .config import RunnerConfig
@@ -43,7 +44,7 @@ class RunnerResult:
 def _exec(command: list[str], input_text: str | None, env: dict[str, str], timeout: int) -> RunnerResult:
     """Run a command once, keeping stdout and stderr separate."""
     full_env = os.environ.copy()
-    full_env.update(env)
+    full_env.update({key: os.path.expandvars(value) for key, value in env.items()})
     try:
         completed = subprocess.run(
             command,
@@ -172,6 +173,92 @@ class CodexSessionRunner(AgentRunner):
         return result
 
 
+def _copilot_session_id(command: list[str]) -> str:
+    for index, part in enumerate(command):
+        if part == "--session-id" and index + 1 < len(command):
+            return command[index + 1]
+        if part.startswith("--session-id="):
+            return part.partition("=")[2]
+    return str(uuid.uuid4())
+
+
+def _copilot_session_command(command: list[str], session_id: str) -> list[str]:
+    if any(
+        part == "--session-id" or part.startswith("--session-id=")
+        for part in command
+    ):
+        return command
+    insert_at = command.index("--prompt") if "--prompt" in command else len(command)
+    command[insert_at:insert_at] = ["--session-id", session_id]
+    return command
+
+
+def _copilot_command_env(command: list[str]) -> list[str]:
+    """Expand secret placeholders only when Copilot is about to execute."""
+    return [os.path.expandvars(part) for part in command]
+
+
+class CopilotSessionRunner(AgentRunner):
+    """Keep a GitHub Copilot CLI conversation across process invocations."""
+
+    stateful = True
+
+    def __init__(self, config: RunnerConfig) -> None:
+        if not config.command:
+            raise ValueError("Copilot session runner requires a non-empty command")
+        if not any(part in ("-p", "--prompt") for part in config.command):
+            raise ValueError("copilot-session command must contain '--prompt'")
+        self.config = config
+        self.session_id = _copilot_session_id(config.command)
+        # Existing run metadata calls this field thread_id for stateful runners.
+        self.thread_id = self.session_id
+
+    def _command_for_turn(self) -> list[str]:
+        return _copilot_command_env(
+            _copilot_session_command(list(self.config.command), self.session_id)
+        )
+
+    def run_turn(self, prompt: str) -> RunnerResult:
+        prepared = _prompt_command(
+            self._command_for_turn(), self.config.prompt_mode, prompt
+        )
+        if isinstance(prepared, RunnerResult):
+            return prepared
+        return _copilot_error_result(
+            _exec(*prepared, self.config.env, self.config.timeout_seconds)
+        )
+
+
+def _copilot_error_result(result: RunnerResult) -> RunnerResult:
+    if result.exit_code != 0:
+        return result
+    from .tool_capture import parse_copilot_output
+
+    errors = parse_copilot_output(result.output).get("errors") or []
+    if not errors:
+        return result
+    detail = "; ".join(str(error) for error in errors)[:500]
+    return RunnerResult(
+        output=result.output,
+        exit_code=1,
+        timed_out=result.timed_out,
+        stderr=(f"copilot error: {detail}\n{result.stderr}").strip(),
+    )
+
+
+class CopilotProcessRunner(ProcessRunner):
+    """Fresh-process Copilot runner with JSONL error propagation."""
+
+    def run_turn(self, prompt: str) -> RunnerResult:
+        command = _copilot_command_env(list(self.config.command))
+        prepared = _prompt_command(command, self.config.prompt_mode, prompt)
+        if isinstance(prepared, RunnerResult):
+            return prepared
+        return _copilot_error_result(
+            _exec(*prepared, self.config.env, self.config.timeout_seconds)
+        )
+
+
 def _prompt_command(
     command: list[str], prompt_mode: str, prompt: str
 ) -> tuple[list[str], str | None] | RunnerResult:
@@ -249,6 +336,43 @@ class OpenShellCodexSessionRunner(OpenShellProcessRunner):
         return result
 
 
+class OpenShellCopilotSessionRunner(OpenShellProcessRunner):
+    """Copilot session resume semantics inside one OpenShell sandbox."""
+
+    stateful = True
+
+    def __init__(self, config: RunnerConfig, name: str) -> None:
+        super().__init__(config, name)
+        if not any(part in ("-p", "--prompt") for part in config.command):
+            raise ValueError("copilot-session command must contain '--prompt'")
+        self.session_id = _copilot_session_id(config.command)
+        self.thread_id = self.session_id
+
+    def _command_for_turn(self) -> list[str]:
+        return _copilot_command_env(
+            _copilot_session_command(list(self.config.command), self.session_id)
+        )
+
+    def run_turn(self, prompt: str) -> RunnerResult:
+        prepared = _prompt_command(
+            self._command_for_turn(), self.config.prompt_mode, prompt
+        )
+        if isinstance(prepared, RunnerResult):
+            return prepared
+        return _copilot_error_result(self._run(*prepared))
+
+
+class OpenShellCopilotProcessRunner(OpenShellProcessRunner):
+    """Fresh-process Copilot runner inside OpenShell."""
+
+    def run_turn(self, prompt: str) -> RunnerResult:
+        command = _copilot_command_env(list(self.config.command))
+        prepared = _prompt_command(command, self.config.prompt_mode, prompt)
+        if isinstance(prepared, RunnerResult):
+            return prepared
+        return _copilot_error_result(self._run(*prepared))
+
+
 class OpencodeProcessRunner(ProcessRunner):
     """ProcessRunner that treats an opencode `error` event as a failed turn.
 
@@ -281,13 +405,21 @@ def create_runner(config: RunnerConfig, name: str) -> AgentRunner:
         return OpencodeProcessRunner(config)
     backend = str((config.sandbox or {}).get("backend", "local"))
     if backend == "openshell" and config.kind == "process":
+        if config.parser == "copilot-json":
+            return OpenShellCopilotProcessRunner(config, name)
         return OpenShellProcessRunner(config, name)
     if backend == "openshell" and config.kind == "codex-session":
         return OpenShellCodexSessionRunner(config, name)
+    if backend == "openshell" and config.kind == "copilot-session":
+        return OpenShellCopilotSessionRunner(config, name)
     if backend not in ("local", "openshell"):
         raise ValueError(f"Unsupported sandbox backend: {backend}")
     if config.kind == "process":
+        if config.parser == "copilot-json":
+            return CopilotProcessRunner(config)
         return ProcessRunner(config)
     if config.kind == "codex-session":
         return CodexSessionRunner(config)
+    if config.kind == "copilot-session":
+        return CopilotSessionRunner(config)
     raise ValueError(f"Unsupported runner kind: {config.kind}")

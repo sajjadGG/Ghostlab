@@ -56,7 +56,7 @@ non-zero. Standalone callers can enforce the same contract with
 ## Examples (config you can copy)
 
 - [examples/](https://github.com/sajjadGG/Ghostlab/tree/main/examples): ready-to-run agent, skill, target, scenario, and `mcpServers` configs.
-- [runners/](https://github.com/sajjadGG/Ghostlab/tree/main/runners): agent-runner presets (Codex process / session).
+- [runners/](https://github.com/sajjadGG/Ghostlab/tree/main/runners): agent-runner presets (Codex process/session and GitHub Copilot session, with separate AUT/user examples).
 - [specs/](https://github.com/sajjadGG/Ghostlab/tree/main/specs): end-to-end design specs (vanilla MCP + MCP Apps).
 
 ## Contributing & issues

@@ -12,7 +12,7 @@
 [![llms.txt](https://img.shields.io/badge/llms.txt-✓-purple)](llms.txt)
 
 **Test an agent the way it is actually used** — not only with unit tests against
-the protocol, but with a real coding agent (Codex / Claude) that picks tools,
+the protocol, but with a real coding agent (Codex / GitHub Copilot / Claude) that picks tools,
 makes mistakes, and tries to accomplish goals, while a second agent plays the
 user. Protocol-level checks (schema errors, a tool call that 500s) are useful
 sanity checks, but they aren't the real test — the real test is whether an
@@ -81,9 +81,10 @@ MCP processes in the job pipeline are routed through the same boundary. OpenShel
 
 That's the whole flow. Interactive `ghostlab create` guides you through the
 evaluation subject (agent/MCP/skill), OpenShell image/providers, generation
-size, four model roles (AUT, user emulator, generation, and judge), Codex
-approval/sandbox policy, runner lifecycle/timeout, release gate, and whether to
-run immediately. The Questionary/Rich terminal UI provides arrow-key selection,
+size, four model roles (AUT, user emulator, generation, and judge), separate AUT
+and user runner backends, Copilot/VS Code custom-agent names, runner policy,
+lifecycle/timeout, release gate, and whether to run immediately. The
+Questionary/Rich terminal UI provides arrow-key selection,
 multi-select suite picking, color, and numbered progress. The same choices
 remain available as flags for scripts and CI.
 
@@ -93,9 +94,10 @@ remain available as flags for scripts and CI.
    skills, workspace, and assets. `--target` and `--skill` remain simple shorthands.
 2. **Discover** — connects to the target, lints its contract (schema errors,
    risk labels), and probes any MCP Apps `ui://` widgets.
-3. **Configure semantic testing** — wires the configured runner (Codex by
-   default) as the **agent-under-test** and displays its exact command, model,
-   approval mode, nested sandbox, parser, and timeout.
+3. **Configure semantic testing** — wires the configured runner (Codex,
+   OpenCode, or GitHub Copilot CLI) as the **agent-under-test** and displays its
+   exact command, model, custom agent, policy, parser, and timeout. The user
+   emulator receives a separate runner and never receives the AUT's target MCP.
 4. **Generate a test plan** — personas × scenarios for the semantic/security
    suites, plus deterministic coverage for every discovered tool
    (`test-plan.yaml`), all editable afterward.
@@ -625,10 +627,10 @@ if the render errored or any assertion failed.
 ### Session runner (one live agent across turns)
 
 By default each turn spawns a fresh agent process and the orchestrator replays
-the transcript. The session runner (`"kind": "codex-session"`) instead keeps
-one codex session alive: turn 1 records the `thread_id`, and later turns run
-`codex exec resume <thread_id>` so codex retains context — fewer tokens, no
-repeated cold-start noise.
+the transcript. Stateful runners keep native agent context: `codex-session`
+captures a Codex `thread_id` and resumes it, while `copilot-session` assigns one
+Copilot `--session-id` to every turn. Both avoid repeated cold starts and prompt
+replay.
 
 ```bash
 ghostlab run --target target.json --scenario <scenario.json> \
@@ -648,7 +650,7 @@ validates each runner's kind, command, and parser, and checks the OpenShell
 CLI/gateway by default. Add `--probe` to verify a backend can actually answer
 instead of only confirming its binary exists.
 
-### Coding-agent backends (codex or opencode)
+### Generation and judge backends (codex or opencode)
 
 Ghostlab drives a coding-agent CLI for generation, the agent-under-test, and
 judging. `inspect` needs no agent — it is a direct MCP client.
@@ -700,12 +702,12 @@ pass/fail/skip verdicts, gate failures). Set `NO_COLOR=1` (or
 `GHOSTLAB_COLOR=0`) to disable it, `GHOSTLAB_COLOR=1` to force it on (e.g.
 piping into a pager that groks ANSI).
 
-Use `ghostlab config --job <name>` to see the exact effective Codex command,
-model, approval policy, nested sandbox, runner parser/timeout, all four model
-roles, composed MCP/skill inputs, and OpenShell configuration. Add `--json` for
-machine-readable output. If a command omits `-m`, Ghostlab resolves the
-top-level model from Codex's `config.toml` and identifies that source. The
-Streamlit Overview and Configure tab expose the same values.
+Use `ghostlab config --job <name>` to see the exact effective AUT and user
+runner commands, backend/model/custom-agent selection, policy, parser/timeout,
+all four model roles, composed MCP/skill inputs, and OpenShell configuration.
+Add `--json` for machine-readable output. If a Codex command omits `-m`,
+Ghostlab resolves the top-level model from Codex's `config.toml` and identifies
+that source. The Streamlit Overview and Configure tab expose the same values.
 
 ## Runner Configs
 
@@ -729,7 +731,9 @@ Process runner:
 
 The process runner starts one fresh process per turn. `prompt_mode` can be
 `stdin`, `append-arg`, or `replace-placeholder`. `ghostlab create` synthesizes
-one of these automatically for the agent-under-test host (wiring the target
+separate `jobs/<name>/runners/aut.json` and
+`jobs/<name>/runners/user.json` files. The AUT receives the target MCP while
+the user emulator explicitly does not. Codex wires the target
 MCP in via codex's `-c mcp_servers.<id>...` overrides, including
 `bearer_token_env_var` for `Bearer ${VAR}`-style auth headers) — see
 `jobs/<name>/runners/aut.json` after running it. To use Claude Code or another
@@ -737,6 +741,31 @@ agent as the AUT instead, hand-write a runner JSON (see
 `runners/claude-process.example.json`) and pass it via `--aut-runner` to
 `ghostlab create`/`ghostlab plan`, or add it directly under `hosts:` in
 `job.yaml`.
+
+GitHub Copilot CLI is a native runner, including custom agents shared with VS
+Code:
+
+```bash
+ghostlab create --name copilot-eval --target https://example.com/mcp \
+  --aut-backend copilot --user-backend copilot \
+  --model gpt-5.4 --user-model gpt-5-mini \
+  --aut-agent release-reviewer --user-agent realistic-user \
+  --aut-reasoning-effort high --aut-context long_context \
+  --sandbox local --no-discover --yes
+```
+
+`--aut-agent`/`--user-agent` map to Copilot's `--agent`; a
+`.github/agents/release-reviewer.agent.md` used in VS Code can therefore be
+selected as `release-reviewer`. Use repeatable `--aut-copilot-arg` /
+`--user-copilot-arg` and `--aut-runner-env` / `--user-runner-env` for settings
+not represented by a dedicated flag. The declarative `agent.runtime` and
+`test.user_runtime` objects in `job.yaml` expose model, agent, effort, context,
+permissions, MCP/plugin settings, environment, and `extra_args`; the UI
+Configure tab provides full JSON editors for both.
+
+See `runners/copilot-aut.example.json`, `runners/copilot-user.example.json`,
+and `examples/copilot-agent.json`. To use another process as either role, pass
+low-level JSON with `--aut-runner` and/or `--user-runner`.
 
 ## Install from PyPI
 

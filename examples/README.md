@@ -11,6 +11,7 @@ work with zero setup.
 | `scenario.json` | A dual-agent scenario (persona, goal, success/failure criteria) | `ghostlab run` |
 | `mcp-config.json` | Standard `mcpServers` client config | `ghostlab create`, `ghostlab inspect` |
 | `agent.json` | Composed agent (runner + skill + OpenShell policy) | `ghostlab create --agent` |
+| `copilot-agent.json` | Declarative GitHub Copilot/VS Code custom-agent runtime | `ghostlab create --agent --aut-backend copilot` |
 
 ## Try it
 
@@ -50,6 +51,17 @@ Scaffold an agent-centric evaluation:
 ```bash
 ghostlab create --name concise-helper --agent examples/agent.json --yes
 ```
+
+To use GitHub Copilot CLI for both roles, including a VS Code custom agent:
+
+```bash
+ghostlab create --name copilot-helper --agent examples/copilot-agent.json \
+  --aut-backend copilot --user-backend copilot \
+  --user-model gpt-5-mini --sandbox local --no-discover --yes
+```
+
+Edit `runtime.agent` in `copilot-agent.json` to the name of a custom agent
+available to Copilot CLI (for example one defined under `.github/agents/`).
 
 `agent.json` attaches an OpenShell provider named `openai`. Confirm it exists
 with `openshell provider list`, or edit the example to use a provider already

@@ -145,7 +145,8 @@ class CliSpecFlowTest(unittest.TestCase):
         jobs_root = self.tmp / "guided-jobs"
         answers = [
             "Guided Eval", "mcp", str(self.target_path), "local",
-            "", "process", "600", "never", "read-only", "", "", "",
+            "codex", "", "process", "600", "never", "read-only",
+            "codex", "", "", "",
             "3", "2", "0.85", "y",
         ]
         with (

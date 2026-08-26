@@ -212,6 +212,7 @@ def opencode_user_runner(
     timeout_seconds: int = 600,
     opencode_bin: str = "",
     model: str = "",
+    agent: str = "",
 ) -> RunnerConfig:
     """User-emulator runner: opencode with no MCP at all, plain-text output.
 
@@ -221,7 +222,7 @@ def opencode_user_runner(
     write_opencode_project(project_dir, None)
     return RunnerConfig(
         kind="process",
-        command=_opencode_command(opencode_bin, model, project_dir),
+        command=_opencode_command(opencode_bin, model, project_dir, agent),
         timeout_seconds=timeout_seconds,
         prompt_mode="stdin",
         parser="opencode-text",

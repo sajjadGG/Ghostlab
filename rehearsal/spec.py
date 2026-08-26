@@ -71,6 +71,10 @@ DEFAULT_TEST = {
     "repeat": 1,
     "timeout": 30.0,
     "user_runner": "",
+    # Declarative settings used to materialize the user-emulator runner. This is
+    # intentionally separate from agent.runtime so the two roles never share an
+    # MCP-enabled session by accident.
+    "user_runtime": {},
     "user_model": "",
     "judge_model": "",
     "approved_only": False,
@@ -82,6 +86,7 @@ DEFAULT_PROMPTS = {
     "agent_aut": "",
     "skill_aut": "",
     "user_emulator": "",
+    "user_emulator_resume": "",
     "judge": "",
     "critique": "",
     "persona_gen": "",

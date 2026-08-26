@@ -12,6 +12,7 @@ import argparse
 import contextlib
 import io
 import json
+import shlex
 from pathlib import Path
 
 import streamlit as st
@@ -24,11 +25,14 @@ from rehearsal.dashboard import build_dashboard
 from rehearsal.jobs import (
     add_aut_host,
     build_codex_aut_runner,
+    configure_codex_runner,
     create_job,
     default_agent_job_spec,
     default_job_spec,
     default_skill_job_spec,
     jobs_dir,
+    materialize_job_runners,
+    refresh_job_runners,
     resolve_job,
     slugify,
     target_from_url,
@@ -253,7 +257,7 @@ with st.sidebar:
             st.caption("OpenShell: " + ("✅ connected" if ready else "❌ unavailable · run ghostlab doctor"))
         host_kinds = [h.get("kind") for h in spec.hosts]
         st.caption(
-            "Semantic host: " + ("✅ configured" if any(k in ("process", "codex-session") for k in host_kinds)
+            "Semantic host: " + ("✅ configured" if any(k in ("process", "codex-session", "copilot-session") for k in host_kinds)
                                   else "⚠️ not configured")
         )
         with st.expander("Advanced"):
@@ -292,18 +296,82 @@ if choice == "+ New job":
             personas = g1.number_input("Personas", 1, 20, 2)
             scenarios = g2.number_input("Scenarios each", 1, 10, 2)
             min_rate = st.slider("Minimum pass rate", 0.0, 1.0, 0.9, 0.05)
-        with st.expander("Codex runtime and models", expanded=True):
+        with st.expander("Agent runners and models", expanded=True):
+            b1, b2 = st.columns(2)
+            create_aut_backend = b1.selectbox(
+                "AUT runner", ["codex", "opencode", "copilot"]
+            )
+            create_user_backend = b2.selectbox(
+                "User runner", ["codex", "opencode", "copilot"],
+                index=["codex", "opencode", "copilot"].index(create_aut_backend),
+            )
             m1, m2, m3, m4 = st.columns(4)
-            create_aut_model = m1.text_input("AUT model", placeholder="Codex CLI default")
-            create_user_model = m2.text_input("User model", placeholder="AUT / default")
+            create_aut_model = m1.text_input("AUT model", placeholder="Runner default")
+            create_user_model = m2.text_input("User model", placeholder="AUT / runner default")
             create_generation_model = m3.text_input("Generation model", placeholder="AUT / default")
             create_judge_model = m4.text_input("Judge model", placeholder="Generation / default")
             r1, r2, r3, r4 = st.columns(4)
-            create_runner_kind = r1.selectbox("Runner lifecycle", ["process", "codex-session"])
+            lifecycle_options = (
+                ["copilot-session", "process"]
+                if create_aut_backend == "copilot"
+                else ["process", "codex-session"]
+                if create_aut_backend == "codex"
+                else ["process"]
+            )
+            create_runner_kind = r1.selectbox("Runner lifecycle", lifecycle_options)
             create_runner_timeout = r2.number_input("Turn timeout", 10, 3600, 600)
-            create_approval = r3.selectbox("Approval mode", ["never", "on-request", "untrusted"])
-            create_codex_sandbox = r4.selectbox("Codex sandbox", ["read-only", "workspace-write", "danger-full-access"])
-            create_codex_bin = st.text_input("Codex executable", value="codex")
+            create_approval = r3.selectbox(
+                "Codex approval mode",
+                ["never", "on-request", "untrusted"],
+                disabled=create_aut_backend != "codex",
+            )
+            create_codex_sandbox = r4.selectbox(
+                "Codex sandbox",
+                ["read-only", "workspace-write", "danger-full-access"],
+                disabled=create_aut_backend != "codex",
+            )
+            a1, a2 = st.columns(2)
+            create_aut_agent = a1.text_input(
+                "AUT custom agent",
+                placeholder="VS Code/Copilot custom agent name",
+                disabled=create_aut_backend != "copilot",
+            )
+            create_user_agent = a2.text_input(
+                "User custom agent",
+                placeholder="Optional Copilot custom agent name",
+                disabled=create_user_backend != "copilot",
+            )
+            c1, c2, c3, c4 = st.columns(4)
+            create_aut_effort = c1.selectbox(
+                "AUT reasoning",
+                ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                disabled=create_aut_backend != "copilot",
+            )
+            create_user_effort = c2.selectbox(
+                "User reasoning",
+                ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                disabled=create_user_backend != "copilot",
+            )
+            create_aut_context = c3.selectbox(
+                "AUT context", ["default", "long_context"],
+                disabled=create_aut_backend != "copilot",
+            )
+            create_user_context = c4.selectbox(
+                "User context", ["default", "long_context"],
+                disabled=create_user_backend != "copilot",
+            )
+            x1, x2 = st.columns(2)
+            create_codex_bin = x1.text_input("Codex executable", value="codex")
+            create_copilot_bin = x2.text_input("Copilot executable", value="copilot")
+            create_aut_extra = st.text_input(
+                "Additional AUT Copilot argv",
+                placeholder="--available-tools=shell,read",
+                disabled=create_aut_backend != "copilot",
+            )
+            create_user_extra = st.text_input(
+                "Additional user Copilot argv",
+                disabled=create_user_backend != "copilot",
+            )
         st.caption("Nothing runs yet. This creates an editable job; use the guided stages to discover, plan, run, and review.")
         create_clicked = st.form_submit_button("Create evaluation", type="primary", use_container_width=True)
 
@@ -333,15 +401,87 @@ if choice == "+ New job":
                 if sandbox == "openshell":
                     spec.sandbox["image"] = image or "base"
                     spec.sandbox["providers"] = [item.strip() for item in providers.split(",") if item.strip()]
-                created_path = create_job(new_name, spec)
-                update_agent_runtime(
-                    spec, created_path, model=create_aut_model, kind=create_runner_kind,
-                    timeout_seconds=int(create_runner_timeout), approval_mode=create_approval,
-                    codex_sandbox=create_codex_sandbox, codex_bin=create_codex_bin,
-                    user_model=create_user_model or create_aut_model,
-                    generation_model=create_generation_model or create_aut_model,
-                    judge_model=create_judge_model or create_generation_model or create_aut_model,
+                aut_runtime = {
+                    **dict((spec.agent or {}).get("runtime") or {}),
+                    "backend": create_aut_backend,
+                    "model": create_aut_model,
+                    "kind": create_runner_kind,
+                    "timeout_seconds": int(create_runner_timeout),
+                }
+                if create_aut_backend == "codex":
+                    aut_runtime.update({
+                        "approval_mode": create_approval,
+                        "codex_sandbox": create_codex_sandbox,
+                        "codex_bin": create_codex_bin,
+                    })
+                elif create_aut_backend == "copilot":
+                    aut_runtime.update({
+                        "agent": create_aut_agent,
+                        "reasoning_effort": "" if create_aut_effort == "default" else create_aut_effort,
+                        "context": create_aut_context,
+                        "copilot_bin": create_copilot_bin,
+                        "extra_args": shlex.split(create_aut_extra),
+                    })
+                user_runtime = {
+                    "backend": create_user_backend,
+                    "model": create_user_model or create_aut_model,
+                    "timeout_seconds": int(create_runner_timeout),
+                }
+                if create_user_backend == "copilot":
+                    user_runtime.update({
+                        "kind": "copilot-session",
+                        "agent": create_user_agent,
+                        "reasoning_effort": "" if create_user_effort == "default" else create_user_effort,
+                        "context": create_user_context,
+                        "copilot_bin": create_copilot_bin,
+                        "extra_args": shlex.split(create_user_extra),
+                    })
+                elif create_user_backend == "codex":
+                    user_runtime["codex_bin"] = create_codex_bin
+                agent_payload = {**(spec.agent or {}), "runtime": aut_runtime}
+                existing_runner = dict(agent_payload.get("runner") or {})
+                existing_parser = str(existing_runner.get("parser") or "")
+                existing_command = list(existing_runner.get("command") or [])
+                existing_binary = (
+                    Path(str(existing_command[0])).name if existing_command else ""
                 )
+                existing_backend = (
+                    "copilot"
+                    if existing_parser == "copilot-json" or existing_binary == "copilot"
+                    else "opencode"
+                    if existing_parser.startswith("opencode") or existing_binary == "opencode"
+                    else "codex"
+                    if existing_parser == "codex-json" or existing_binary == "codex"
+                    else ""
+                )
+                if existing_backend == "codex" and create_aut_backend == "codex":
+                    agent_payload["runner"] = configure_codex_runner(
+                        existing_runner,
+                        model=create_aut_model,
+                        kind=create_runner_kind,
+                        timeout_seconds=int(create_runner_timeout),
+                        approval_mode=create_approval,
+                        codex_sandbox=create_codex_sandbox,
+                        codex_bin=create_codex_bin,
+                    )
+                elif existing_backend:
+                    agent_payload.pop("runner", None)
+                spec.agent = agent_payload
+                spec.generation = {
+                    **(spec.generation or {}),
+                    "model": create_generation_model
+                    or (create_aut_model if create_aut_backend != "copilot" else ""),
+                }
+                spec.test = {
+                    **(spec.test or {}),
+                    "user_runtime": user_runtime,
+                    "user_model": user_runtime["model"],
+                    "judge_model": create_judge_model
+                    or create_generation_model
+                    or (create_aut_model if create_aut_backend != "copilot" else ""),
+                }
+                created_path = create_job(new_name, spec)
+                materialize_job_runners(created_path)
                 st.session_state["job"] = slugify(new_name)
                 st.success("Evaluation created. Opening the guided pipeline…")
                 st.rerun()
@@ -392,9 +532,16 @@ with tabs[0]:
         column.metric(label.replace("_", " ").title(), value)
     runner_view = resolved["agent"]["runner"]
     st.code(" ".join(runner_view["command"]) or "Runner not materialized yet", language="bash")
+    policy = (
+        f"agent {runner_view['agent'] or 'default'} · "
+        f"effort {runner_view['reasoning_effort'] or 'default'}"
+        if runner_view["backend"] == "copilot"
+        else f"approval {runner_view['approval_mode']} · "
+        f"Codex sandbox {runner_view['codex_sandbox']}"
+    )
     st.caption(
-        f"{runner_view['kind']} · timeout {runner_view['timeout_seconds']}s · "
-        f"approval {runner_view['approval_mode']} · Codex sandbox {runner_view['codex_sandbox']} · "
+        f"{runner_view['backend']} · {runner_view['kind']} · "
+        f"timeout {runner_view['timeout_seconds']}s · {policy} · "
         f"parser {runner_view['parser']}"
     )
     with st.expander("Full resolved configuration"):
@@ -451,7 +598,10 @@ with tabs[2]:
     )
     spec = _spec()
     agent_runner = dict((spec.agent or {}).get("runner") or {})
-    has_aut = bool(agent_runner) or any(h.get("kind") in ("process", "codex-session") for h in spec.hosts)
+    has_aut = bool(agent_runner) or any(
+        h.get("kind") in ("process", "codex-session", "copilot-session")
+        for h in spec.hosts
+    )
     resolved = resolved_job_config(spec, _spec_path())
     runner_view = resolved["agent"]["runner"]
     with st.container(border=True):
@@ -509,6 +659,60 @@ with tabs[2]:
                 )
                 st.success("Saved the AUT, user, generation, and judge runtime configuration.")
                 st.rerun()
+        elif runner_view["backend"] == "copilot":
+            with st.form("copilot-runtime-config"):
+                st.caption(
+                    "These JSON objects expose every Copilot runner setting. "
+                    "Use extra_args for new Copilot CLI flags and env for role-specific environment."
+                )
+                runtime = dict((spec.agent or {}).get("runtime") or {})
+                user_runtime = dict((spec.test or {}).get("user_runtime") or {})
+                left, right = st.columns(2)
+                aut_runtime_json = left.text_area(
+                    "AUT Copilot runtime JSON",
+                    value=json.dumps(runtime, indent=2),
+                    height=360,
+                )
+                user_runtime_json = right.text_area(
+                    "User Copilot runtime JSON",
+                    value=json.dumps(user_runtime, indent=2),
+                    height=360,
+                )
+                g1, g2 = st.columns(2)
+                generation_model = g1.text_input(
+                    "Generation model", value=str((spec.generation or {}).get("model") or "")
+                )
+                judge_model = g2.text_input(
+                    "Judge model", value=str((spec.test or {}).get("judge_model") or "")
+                )
+                st.code(" ".join(runner_view["command"]), language="bash")
+                save_copilot_runtime = st.form_submit_button(
+                    "Save Copilot runtimes", type="primary"
+                )
+            if save_copilot_runtime:
+                try:
+                    parsed_aut = json.loads(aut_runtime_json)
+                    parsed_user = json.loads(user_runtime_json)
+                    if not isinstance(parsed_aut, dict) or not isinstance(parsed_user, dict):
+                        raise ValueError("Both runtime values must be JSON objects")
+                    parsed_aut["backend"] = "copilot"
+                    parsed_user["backend"] = "copilot"
+                    spec.agent = {**(spec.agent or {}), "runtime": parsed_aut}
+                    spec.generation = {
+                        **(spec.generation or {}), "model": generation_model
+                    }
+                    spec.test = {
+                        **(spec.test or {}),
+                        "user_runtime": parsed_user,
+                        "user_model": str(parsed_user.get("model") or ""),
+                        "judge_model": judge_model,
+                    }
+                    refresh_job_runners(spec, _spec_path())
+                except (json.JSONDecodeError, OSError, ValueError, ConfigError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.success("Saved and rematerialized both Copilot runners.")
+                    st.rerun()
         else:
             st.info("This job uses a custom runner. Edit its command in agent.runner/job.yaml; Ghostlab displays the exact resolved command on the Overview tab.")
     with st.container(border=True):
@@ -517,7 +721,7 @@ with tabs[2]:
             if agent_runner:
                 st.success(f"`agent.runner` ({agent_runner.get('kind', 'process')}) — configured inline")
             for host in spec.hosts:
-                if host.get("kind") in ("process", "codex-session"):
+                if host.get("kind") in ("process", "codex-session", "copilot-session"):
                     st.success(f"`{host['id']}` ({host['kind']}) — {host.get('config_ref', '')}")
         else:
             try:

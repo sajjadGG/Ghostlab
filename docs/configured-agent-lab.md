@@ -100,6 +100,35 @@ agent:
     assets: [./fixtures/changelog.md]
 ```
 
+GitHub Copilot CLI is also a native runtime. Its `agent` value selects the same
+custom-agent name used by VS Code, and each role has an independent runtime:
+
+```yaml
+agent:
+  runtime:
+    backend: copilot
+    kind: copilot-session
+    model: gpt-5.4
+    agent: release-reviewer
+    reasoning_effort: high
+    context: long_context
+    allow_all_tools: true
+    deny_tools: [write(.env)]
+    disable_builtin_mcps: true
+    env: {}
+    extra_args: []
+test:
+  user_runtime:
+    backend: copilot
+    kind: copilot-session
+    model: gpt-5-mini
+    agent: realistic-user
+```
+
+The job creator materializes both runtimes as `runners/aut.json` and
+`runners/user.json`. Only the AUT config receives `agent.inputs.mcps`; the user
+runner disables those server names.
+
 Rules:
 
 - **Validated against a vendored subset of the OpenCode schema.** An unknown or
@@ -149,7 +178,7 @@ end state is a reproducible file rather than a transcript.
 
 | Step | What happens |
 | --- | --- |
-| 1 Source | Import an existing `opencode.json`/project, an `agent.yaml`, or start from scratch |
+| 1 Source | Choose OpenCode or Copilot, import an existing project/agent config, or start from scratch |
 | 2 Purpose | User describes the agent, or accepts an inferred draft |
 | 3 Model | Pick provider/model from what is actually authenticated |
 | 4 MCPs | Import from a standard `mcpServers` config; enable per server; `discover` runs for each |
@@ -169,15 +198,14 @@ continues a partially configured lab.
 
 Today only the MCP process is sandboxed. This closes the gap.
 
-- **Image.** Ghostlab ships `docker/agent-sandbox.Dockerfile` (Linux, Node, the
-  OpenCode CLI). `sandbox.image` accepts a community name, an image reference,
-  or a path to a Dockerfile — OpenShell's `--from` builds it. The host's own
-  OpenCode binary is *not* uploaded: it is a platform-specific binary and will
-  not run in the container.
-- **Agent execution.** The runner command becomes the SSH-wrapped
-  `opencode run …` inside the sandbox, reusing the transport already proven for
-  stdio MCPs. The agent's MCPs are launched by OpenCode *inside* the same
-  container, so they are sandboxed by construction.
+- **Image.** Ghostlab ships `docker/agent-sandbox.Dockerfile` (Linux, Node,
+  OpenCode, and GitHub Copilot CLI). `sandbox.image` accepts a community name,
+  an image reference, or a path to a Dockerfile — OpenShell's `--from` builds
+  it. Host agent binaries are *not* uploaded: they are platform-specific and
+  will not run in the container.
+- **Agent execution.** The runner invokes OpenCode or Copilot inside the
+  sandbox. The agent's MCPs are launched *inside* the same container, so they
+  are sandboxed by construction.
 - **Code.** `workspace` uploads to `/sandbox/workspace` and becomes the agent's
   working directory, so `edit`/`bash` permissions act on a copy, never on the
   user's checkout.
@@ -186,6 +214,8 @@ Today only the MCP process is sandboxed. This closes the gap.
   `sandbox.credentials.opencode_auth: true` uploads the OpenCode auth file to
   the container's data dir. Without it the run fails fast and says why. The
   value is never logged, never printed, and is redacted from every report.
+  Copilot uses an allowlisted `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or
+  `GITHUB_TOKEN` environment reference instead.
 - **Network.** Default deny. Ghostlab generates a policy allowing only the
   provider endpoints the chosen model needs, plus any declared remote MCP
   hosts. Anything else the agent reaches for is denied and shows up in the

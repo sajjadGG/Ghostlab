@@ -117,7 +117,19 @@ A dataset is a persona x scenario matrix. It contains a manifest, generated pers
 
 ## Runner
 
-A runner controls how Ghostlab talks to an agent host. Mock runners are deterministic. Process runners start a fresh command per turn. Codex session runners keep one live Codex thread across turns by resuming the thread id captured from JSONL output.
+A runner controls how Ghostlab talks to an agent host. Mock runners are
+deterministic. Process runners start a fresh command per turn. Codex session
+runners keep one Codex thread across turns by resuming the captured thread id.
+GitHub Copilot session runners keep one Copilot conversation by assigning and
+reusing a `--session-id`; `--agent` can select the same custom agent definition
+used by VS Code. Copilot's JSONL stream supplies structured assistant messages,
+MCP calls, built-in calls, arguments, results, and errors.
+
+The agent under test and user emulator have independent runner configuration.
+Generated jobs materialize both under `runners/`; only the AUT receives the
+target MCP. `agent.runtime` configures the AUT and `test.user_runtime`
+configures the emulator, so model, custom agent, reasoning effort, permissions,
+environment, and forward-compatible CLI arguments can differ by role.
 
 ## Permissions and approvals
 
