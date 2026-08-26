@@ -15,6 +15,7 @@ Two rules shape every step:
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -139,15 +140,20 @@ def _prompt_paths(prompter: Prompter, message: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def build_agent_interactively(prompter: Prompter, name: str) -> dict[str, Any]:
+def build_agent_interactively(
+    prompter: Prompter, name: str, runner_backend: str = ""
+) -> dict[str, Any]:
     """Steps 1-6: what the agent *is*."""
     render_stage(1, "Agent source", "Import an existing agent, or start from scratch.", TOTAL_STEPS)
+    selected_backend = runner_backend or prompter.select(
+        "Coding-agent runner", ["opencode", "copilot"], "opencode"
+    )
     source = prompter.select(
         "Where does this agent come from?",
         ["scratch", "opencode project", "agent config"], "scratch",
     )
     agent: dict[str, Any] = {"id": name, "name": name,
-                             "runtime": {"backend": "opencode"},
+                             "runtime": {"backend": selected_backend},
                              "inputs": {"mcps": [], "skills": []}}
     if source != "scratch":
         location = prompter.text(
@@ -156,7 +162,7 @@ def build_agent_interactively(prompter: Prompter, name: str) -> dict[str, Any]:
         if location:
             imported = _read_agent_source(Path(location))
             agent = {**agent, **imported}
-            agent.setdefault("runtime", {})["backend"] = "opencode"
+            agent.setdefault("runtime", {})["backend"] = selected_backend
             print(tc.muted(
                 f"  imported: {len((agent.get('inputs') or {}).get('mcps') or [])} MCP(s), "
                 f"model={agent['runtime'].get('model') or 'unset'}"
@@ -168,16 +174,41 @@ def build_agent_interactively(prompter: Prompter, name: str) -> dict[str, Any]:
         str(agent.get("description") or ""),
     )
 
-    render_stage(3, "Model", "Only models your OpenCode install can reach.", TOTAL_STEPS)
-    models = available_models()
+    model_detail = (
+        "A model available to GitHub Copilot CLI."
+        if selected_backend == "copilot"
+        else "Only models your OpenCode install can reach."
+    )
+    render_stage(3, "Model", model_detail, TOTAL_STEPS)
     current = str(agent["runtime"].get("model") or "")
-    if models:
-        default = current if current in models else models[0]
-        agent["runtime"]["model"] = prompter.select("Model", models, default)
-    else:
-        agent["runtime"]["model"] = prompter.text(
-            "Model (provider/model)", current or "github-copilot/claude-sonnet-4.5"
+    if selected_backend == "copilot":
+        agent["runtime"]["model"] = prompter.text("Model", current or "auto")
+        agent["runtime"]["agent"] = prompter.text(
+            "Custom agent name (blank uses the default Copilot agent)",
+            str(agent["runtime"].get("agent") or ""),
         )
+        effort = prompter.select(
+            "Reasoning effort",
+            ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+            "default",
+        )
+        if effort != "default":
+            agent["runtime"]["reasoning_effort"] = effort
+        agent["runtime"]["context"] = prompter.select(
+            "Context tier", ["default", "long_context"], "default"
+        )
+        extra = prompter.text("Additional Copilot CLI arguments", "")
+        if extra:
+            agent["runtime"]["extra_args"] = shlex.split(extra)
+    else:
+        models = available_models()
+        if models:
+            default = current if current in models else models[0]
+            agent["runtime"]["model"] = prompter.select("Model", models, default)
+        else:
+            agent["runtime"]["model"] = prompter.text(
+                "Model (provider/model)", current or "github-copilot/claude-sonnet-4.5"
+            )
 
     render_stage(4, "Capabilities", "MCP servers this agent can call.", TOTAL_STEPS)
     config_path = prompter.text(
@@ -218,7 +249,14 @@ def build_agent_interactively(prompter: Prompter, name: str) -> dict[str, Any]:
     preset = prompter.select(
         "Permission preset", list(PERMISSION_PRESETS), "read-only"
     )
-    agent["runtime"]["permission"] = dict(PERMISSION_PRESETS[preset])
+    if selected_backend == "copilot":
+        agent["runtime"]["allow_all_tools"] = True
+        if preset == "read-only":
+            agent["runtime"]["deny_tools"] = ["shell", "write"]
+        elif preset == "edit-workspace":
+            agent["runtime"]["deny_tools"] = ["shell"]
+    else:
+        agent["runtime"]["permission"] = dict(PERMISSION_PRESETS[preset])
     return agent
 
 
@@ -276,21 +314,32 @@ def review_scenarios(prompter: Prompter, cases: list[dict[str, Any]]) -> list[di
     return kept
 
 
-def sandbox_settings(prompter: Prompter, image_default: str) -> dict[str, Any]:
+def sandbox_settings(
+    prompter: Prompter, image_default: str, runner_backend: str = "opencode"
+) -> dict[str, Any]:
     """Step 7: the execution boundary, including the credential opt-in."""
     render_stage(7, "Sandbox", "The agent, its MCPs, and its code all run inside.", TOTAL_STEPS)
     image = prompter.text("Sandbox image (name, image ref, or Dockerfile)", image_default)
-    credentials = prompter.confirm(
-        "Copy your OpenCode credentials into the sandbox? "
-        "(required for the agent to call its model)", True,
+    credentials = (
+        prompter.confirm(
+            "Copy your OpenCode credentials into the sandbox? "
+            "(required for the agent to call its model)", True,
+        )
+        if runner_backend == "opencode"
+        else False
     )
     if credentials:
         print(tc.muted(
             "  the auth file is uploaded outside the workspace, mode 600, and is "
             "redacted from every report"
         ))
-    return {
+    settings = {
         "backend": "openshell",
         "image": image,
         "credentials": {"opencode_auth": credentials},
     }
+    if runner_backend == "copilot":
+        settings["env_allowlist"] = [
+            "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"
+        ]
+    return settings

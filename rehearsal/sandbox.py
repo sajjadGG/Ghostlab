@@ -200,7 +200,10 @@ class OpenShellSandbox:
         allow = set(self.config.get("env_allowlist", []))
         requested = {
             **{name: os.environ[name] for name in allow if name in os.environ},
-            **requested,
+            **{
+                name: os.path.expandvars(value)
+                for name, value in requested.items()
+            },
         }
         internal = {key for key in requested if key.startswith("REHEARSAL_") or key.startswith("GHOSTLAB_")}
         return {key: value for key, value in requested.items() if key in allow or key in internal}

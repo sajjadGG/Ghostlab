@@ -16,18 +16,34 @@ ghostlab --version
 
 ## Install A Coding-Agent CLI
 
-Ghostlab needs one agent CLI to generate scenarios, play the agent under test,
-and judge runs. Either works:
+Ghostlab needs Codex or OpenCode for scenario generation and judging. The AUT
+and user runner can independently use Codex, OpenCode, or GitHub Copilot CLI:
 
 ```bash
 codex --version                 # uses your ChatGPT/Codex plan
 opencode --version              # uses GitHub Copilot, Azure, etc.
+copilot --version               # native GitHub Copilot / VS Code custom-agent runner
 ```
 
 For opencode, authenticate a provider once (`opencode auth login`) and select it
 per command with `--llm-backend opencode --model github-copilot/claude-sonnet-4.5`,
 or per job via `generation.backend` in `job.yaml`. See the README's
 "Coding-agent backends" section for precedence and model selection.
+
+Copilot CLI is a runner rather than a generation/judge backend. Authenticate it
+with `copilot login`, then select it per role:
+
+```bash
+ghostlab create --name copilot-eval --target https://example.com/mcp \
+  --aut-backend copilot --user-backend copilot \
+  --aut-agent release-reviewer --model gpt-5.4 \
+  --sandbox local --no-discover --yes
+```
+
+The `--agent` value passed to Copilot can name a custom agent from
+`.github/agents/*.agent.md`, so the same definition can run in VS Code and in a
+Ghostlab evaluation. See the CLI reference for every role-specific runtime and
+permission setting.
 
 ## Install And Verify OpenShell
 

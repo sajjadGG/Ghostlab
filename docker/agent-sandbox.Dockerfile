@@ -3,8 +3,8 @@
 # The agent CLI must run *inside* the sandbox, not on the host: an agent
 # configured with bash/edit permissions is exactly the configuration worth
 # testing and the least safe to run on a developer's machine. The host's own
-# OpenCode binary cannot be uploaded — it is a platform-specific executable —
-# so the Linux build is installed here instead.
+# Agent binaries cannot be uploaded — they are platform-specific executables —
+# so the Linux builds are installed here instead.
 #
 # Build is handled by OpenShell:
 #   sandbox:
@@ -17,8 +17,12 @@ USER root
 # Pinned so a sandbox rebuild cannot silently change the agent runtime under an
 # evaluation. Bump deliberately, and re-record the version in run artifacts.
 ARG OPENCODE_VERSION=1.4.3
-RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" \
-    && opencode --version
+ARG COPILOT_VERSION=1.0.80
+RUN npm install -g \
+        "opencode-ai@${OPENCODE_VERSION}" \
+        "@github/copilot@${COPILOT_VERSION}" \
+    && opencode --version \
+    && copilot --version
 
 # OpenCode keeps credentials and session state under XDG paths. Fixing them
 # outside $HOME keeps them off the uploaded workspace, so an agent with `edit`

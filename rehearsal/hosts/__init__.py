@@ -56,7 +56,7 @@ def build_hosts(
                     base_dir=spec_path.resolve().parent,
                 )
             )
-        elif kind in ("process", "codex-session"):
+        elif kind in ("process", "codex-session", "copilot-session"):
             adapters.append(
                 RunnerHost(host_id, kind, host, spec_path, backend=backend,
                           show_progress=show_progress,
@@ -67,7 +67,8 @@ def build_hosts(
     if agent_runner and not any(isinstance(adapter, RunnerHost) for adapter in adapters):
         adapters.append(
             RunnerHost(
-                "agent", "process", {"agent": True}, spec_path, backend=backend,
+                "agent", str(agent_runner.get("kind") or "process"),
+                {"agent": True}, spec_path, backend=backend,
                 show_progress=show_progress, user_runner_config=user_runner_config,
                 apps_mode=apps_mode,
             )

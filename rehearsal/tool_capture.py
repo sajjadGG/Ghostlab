@@ -263,6 +263,133 @@ def parse_opencode_output(
     }
 
 
+def parse_copilot_output(jsonl_text: str) -> dict[str, Any]:
+    """Parse GitHub Copilot CLI ``--output-format json`` events.
+
+    Copilot identifies MCP tools explicitly on both request and execution-start
+    events. That lets Ghostlab separate evaluated MCP calls from built-in coding
+    tools without relying on name prefixes.
+    """
+    messages: list[str] = []
+    calls: list[dict[str, Any]] = []
+    builtins: list[dict[str, Any]] = []
+    errors: list[str] = []
+    pending: dict[str, dict[str, Any]] = {}
+
+    def start_call(data: dict[str, Any]) -> dict[str, Any]:
+        call_id = str(data.get("toolCallId") or "")
+        existing = pending.get(call_id)
+        if existing is not None:
+            server = str(data.get("mcpServerName") or "")
+            existing["arguments"] = data.get("arguments", existing.get("arguments"))
+            existing["server"] = str(
+                server or existing.get("server") or "copilot"
+            )
+            existing["tool"] = str(
+                data.get("mcpToolName")
+                or data.get("toolName")
+                or existing.get("tool")
+                or "?"
+            )
+            if server and existing in builtins:
+                builtins.remove(existing)
+                calls.append(existing)
+                for index, record in enumerate(builtins, start=1):
+                    record["index"] = index
+                existing["index"] = len(calls)
+            return existing
+        server = str(data.get("mcpServerName") or "")
+        record: dict[str, Any] = {
+            "index": 0,
+            "server": server or "copilot",
+            "tool": str(data.get("mcpToolName") or data.get("toolName") or data.get("name") or "?"),
+            "status": "unknown",
+            "arguments": data.get("arguments"),
+            "result": None,
+            "error": None,
+        }
+        target = calls if server else builtins
+        target.append(record)
+        record["index"] = len(target)
+        if call_id:
+            pending[call_id] = record
+        return record
+
+    for line in jsonl_text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = str(event.get("type") or "")
+        data = event.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+
+        if kind == "assistant.message":
+            content = data.get("content")
+            if content:
+                messages.append(str(content))
+            for request in data.get("toolRequests") or []:
+                if isinstance(request, dict):
+                    start_call(
+                        {
+                            "toolCallId": request.get("toolCallId"),
+                            "toolName": request.get("name"),
+                            "arguments": request.get("arguments"),
+                            "mcpServerName": request.get("mcpServerName"),
+                            "mcpToolName": request.get("mcpToolName"),
+                        }
+                    )
+            continue
+
+        if kind == "tool.execution_start":
+            start_call(data)
+            continue
+
+        if kind == "tool.execution_complete":
+            call_id = str(data.get("toolCallId") or "")
+            record = pending.get(call_id)
+            if record is None:
+                record = start_call(
+                    {
+                        "toolCallId": call_id,
+                        "toolName": data.get("toolName") or "?",
+                    }
+                )
+            success = bool(data.get("success"))
+            error = data.get("error")
+            record.update(
+                {
+                    "status": "completed" if success else "failed",
+                    "result": data.get("result"),
+                    "error": error,
+                }
+            )
+            if not success:
+                record["failure_cause"] = classify_tool_failure(error)
+                if error:
+                    record["failure_detail"] = " ".join(str(error).split())[:500]
+            continue
+
+        if kind in ("session.error", "assistant.error"):
+            detail = data.get("message") or data.get("error") or event.get("error")
+            errors.append(str(detail or kind))
+        elif kind == "result" and int(event.get("exitCode") or 0) != 0:
+            errors.append(f"Copilot CLI exited with code {event.get('exitCode')}")
+
+    return {
+        # Intermediate assistant messages normally contain tool intent. The last
+        # non-empty message is the conversational reply after tool execution.
+        "message": messages[-1].strip() if messages else "",
+        "tool_calls": calls,
+        "builtin_calls": builtins,
+        "errors": errors,
+    }
+
+
 def summarize_tool_calls(calls: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate counts by tool and by status for quick reporting."""
     by_tool: dict[str, int] = {}

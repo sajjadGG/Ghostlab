@@ -284,6 +284,15 @@ Style examples (copy the realism, not the words):
 Write ONLY your next message, nothing else. If your goal is genuinely met, or the conversation clearly cannot progress any further, write exactly REHEARSAL_DONE instead of a message."""
 
 
+# Placeholders: {widget_section} {last_assistant_message}
+USER_EMULATOR_RESUME_TEMPLATE = """Continue as the same user with the same persona, private goal, and conversational rules already established in this session.
+{widget_section}
+The assistant's latest message is:
+{last_assistant_message}
+
+React naturally and write ONLY the user's next message. If the goal is genuinely met, or the conversation clearly cannot progress any further, write exactly REHEARSAL_DONE."""
+
+
 def normalize_user_emulator_message(text: str, *, max_chars: int = 500) -> str:
     """Keep emulator output inside a realistic chat-message envelope.
 
@@ -322,5 +331,20 @@ def build_user_emulator_prompt(
         goal=scenario.goal,
         widget_section=widget_section,
         transcript=format_transcript(transcript),
+        last_assistant_message=last_assistant_message,
+    )
+
+
+def build_user_emulator_resume_prompt(
+    last_assistant_message: str,
+    widgets: list[dict[str, Any]] | None = None,
+) -> str:
+    """Send only new context to a user emulator whose session holds its role."""
+    widget_note = describe_widgets(widgets or [])
+    widget_section = f"\n\n{widget_note}\n" if widget_note else ""
+    return render(
+        "user_emulator_resume",
+        USER_EMULATOR_RESUME_TEMPLATE,
+        widget_section=widget_section,
         last_assistant_message=last_assistant_message,
     )

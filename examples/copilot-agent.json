@@ -1,0 +1,46 @@
+{
+  "id": "copilot-release-agent",
+  "name": "Copilot Release Agent",
+  "instructions": "Use the configured MCP tools and report concrete evidence.",
+  "runtime": {
+    "backend": "copilot",
+    "copilot_bin": "copilot",
+    "kind": "copilot-session",
+    "model": "gpt-5.4",
+    "agent": "release-reviewer",
+    "reasoning_effort": "high",
+    "context": "long_context",
+    "timeout_seconds": 600,
+    "allow_all_tools": true,
+    "allow_tools": [
+      "huggingface"
+    ],
+    "deny_tools": [
+      "write(.env)"
+    ],
+    "allow_urls": [],
+    "deny_urls": [],
+    "add_dirs": [],
+    "disable_builtin_mcps": true,
+    "no_custom_instructions": false,
+    "no_ask_user": true,
+    "additional_mcp_configs": [],
+    "plugin_dirs": [],
+    "secret_env_vars": [],
+    "env": {},
+    "extra_args": []
+  },
+  "inputs": {
+    "mcps": [
+      {
+        "config_ref": "mcp-config.json",
+        "server": "huggingface"
+      }
+    ],
+    "skills": [],
+    "assets": []
+  },
+  "sandbox": {
+    "backend": "local"
+  }
+}

@@ -33,6 +33,89 @@ def _codex_default_model() -> tuple[str, str]:
     return "Codex CLI default (not declared)", str(config_path)
 
 
+def _describe_runner(
+    runner: dict[str, Any], runtime: dict[str, Any], source: str
+) -> dict[str, Any]:
+    command = [str(part) for part in runner.get("command", [])]
+    is_codex = bool(command and (
+        Path(command[0]).name == "codex"
+        or runtime.get("backend") == "codex"
+        or runner.get("parser") == "codex-json"
+    ))
+    is_copilot = bool(
+        runtime.get("backend") == "copilot"
+        or runner.get("parser") == "copilot-json"
+        or (command and Path(command[0]).name == "copilot")
+    )
+    is_opencode = bool(
+        runtime.get("backend") == "opencode"
+        or str(runner.get("parser") or "").startswith("opencode")
+        or (command and Path(command[0]).name == "opencode")
+    )
+    planned = not runner and runtime.get("backend") in ("codex", "opencode", "copilot")
+    if is_codex:
+        backend = "codex"
+    elif is_copilot:
+        backend = "copilot"
+    elif is_opencode:
+        backend = "opencode"
+    else:
+        backend = "custom" if command else "not configured"
+    explicit_model = _option(command, "-m", "--model") or str(runtime.get("model") or "")
+    default_model, default_model_source = _codex_default_model()
+    if backend == "copilot":
+        fallback_model = "Copilot CLI default (auto)"
+        fallback_source = "Copilot model routing"
+    elif backend == "opencode":
+        fallback_model = "OpenCode default (not declared)"
+        fallback_source = "OpenCode configuration"
+    else:
+        fallback_model = default_model
+        fallback_source = default_model_source
+    configured = backend != "not configured"
+    default_kind = (
+        "copilot-session"
+        if backend == "copilot"
+        else "process"
+        if backend in ("codex", "opencode")
+        else "not configured"
+    )
+    default_prompt_mode = "append-arg" if backend == "copilot" else "stdin"
+    default_parser = {
+        "codex": "codex-json",
+        "opencode": "opencode-json",
+        "copilot": "copilot-json",
+    }.get(backend, "text")
+    return {
+        "source": source if runner else "runtime (pending materialization)" if planned else "not configured",
+        "kind": runner.get("kind") or runtime.get("kind") or default_kind,
+        "command": command,
+        "backend": backend,
+        "model": (explicit_model or fallback_model) if configured else "n/a",
+        "model_source": (
+            "runner command" if explicit_model and _option(command, "-m", "--model")
+            else "agent.runtime" if explicit_model
+            else fallback_source
+        ) if configured else "n/a",
+        "agent": _option(command, "--agent") or str(runtime.get("agent") or runtime.get("default_agent") or ""),
+        "reasoning_effort": _option(command, "--effort", "--reasoning-effort")
+        or str(runtime.get("reasoning_effort") or ""),
+        "context": _option(command, "--context") or str(runtime.get("context") or ""),
+        "approval_mode": _option(command, "-a", "--ask-for-approval")
+        or runtime.get("approval_mode")
+        or ("default" if backend == "codex" else "n/a"),
+        "codex_sandbox": _option(command, "--sandbox")
+        or runtime.get("codex_sandbox")
+        or ("default" if backend == "codex" else "n/a"),
+        "timeout_seconds": int(runner.get("timeout_seconds") or runtime.get("timeout_seconds") or 180),
+        "prompt_mode": runner.get("prompt_mode", default_prompt_mode),
+        "parser": runner.get("parser", default_parser),
+        "environment_keys": sorted(
+            set((runner.get("env") or {}).keys()) | set((runtime.get("env") or {}).keys())
+        ),
+    }
+
+
 def _runner(spec, spec_path: Path) -> dict[str, Any]:
     runner = dict((spec.agent or {}).get("runner") or {})
     runtime = dict((spec.agent or {}).get("runtime") or {})
@@ -40,7 +123,9 @@ def _runner(spec, spec_path: Path) -> dict[str, Any]:
     if not runner:
         for host in spec.hosts or []:
             ref = host.get("config_ref")
-            if host.get("kind") not in ("process", "codex-session") or not ref:
+            if host.get("kind") not in (
+                "process", "codex-session", "copilot-session"
+            ) or not ref:
                 continue
             path = Path(str(ref))
             if not path.is_absolute():
@@ -49,33 +134,28 @@ def _runner(spec, spec_path: Path) -> dict[str, Any]:
                 runner = json.loads(path.read_text(encoding="utf-8"))
                 source = str(path)
                 break
-    command = [str(part) for part in runner.get("command", [])]
-    is_codex = bool(command and (
-        Path(command[0]).name == "codex"
-        or runtime.get("backend") == "codex"
-        or runner.get("parser") == "codex-json"
-    ))
-    planned_codex = not runner and runtime.get("backend") == "codex"
-    explicit_model = _option(command, "-m", "--model") or str(runtime.get("model") or "")
-    default_model, default_model_source = _codex_default_model()
-    return {
-        "source": source if runner else "agent.runtime (pending materialization)" if planned_codex else "not configured",
-        "kind": runner.get("kind") or runtime.get("kind") or "not configured",
-        "command": command,
-        "backend": "codex" if is_codex or planned_codex else "custom" if command else "not configured",
-        "model": (explicit_model or default_model) if is_codex or planned_codex else "n/a",
-        "model_source": (
-            "runner command" if explicit_model and _option(command, "-m", "--model")
-            else "agent.runtime" if explicit_model
-            else default_model_source
-        ) if is_codex or planned_codex else "n/a",
-        "approval_mode": _option(command, "-a", "--ask-for-approval") or runtime.get("approval_mode") or ("default" if is_codex or planned_codex else "n/a"),
-        "codex_sandbox": _option(command, "--sandbox") or runtime.get("codex_sandbox") or ("default" if is_codex or planned_codex else "n/a"),
-        "timeout_seconds": int(runner.get("timeout_seconds") or runtime.get("timeout_seconds") or 180),
-        "prompt_mode": runner.get("prompt_mode", "stdin"),
-        "parser": runner.get("parser", "text"),
-        "environment_keys": sorted((runner.get("env") or {}).keys()),
-    }
+    return _describe_runner(runner, runtime, source)
+
+
+def _user_runner(spec, spec_path: Path) -> dict[str, Any]:
+    test = spec.test or {}
+    runtime = dict(test.get("user_runtime") or {})
+    configured = test.get("user_runner")
+    runner: dict[str, Any] = {}
+    source = "test.user_runtime"
+    if isinstance(configured, dict):
+        runner = dict(configured)
+        source = "test.user_runner"
+    elif isinstance(configured, str) and configured:
+        path = Path(configured)
+        if not path.is_absolute():
+            path = spec_path.resolve().parent / path
+        if path.exists():
+            runner = json.loads(path.read_text(encoding="utf-8"))
+            source = str(path)
+    if test.get("user_model") and not runtime.get("model"):
+        runtime["model"] = test["user_model"]
+    return _describe_runner(runner, runtime, source)
 
 
 def resolved_job_config(spec, spec_path: Path) -> dict[str, Any]:
@@ -85,6 +165,7 @@ def resolved_job_config(spec, spec_path: Path) -> dict[str, Any]:
     generation = spec.generation or {}
     test = spec.test or {}
     runner = _runner(spec, spec_path)
+    user_runner = _user_runner(spec, spec_path)
     codex_default_model, codex_default_source = _codex_default_model()
     return {
         "job": {"id": spec.id, "name": spec.name, "type": spec.target_type},
@@ -97,6 +178,7 @@ def resolved_job_config(spec, spec_path: Path) -> dict[str, Any]:
             "skills": inputs.get("skills", []) or [],
             "assets": inputs.get("assets", []) or [],
         },
+        "user_emulator": {"runner": user_runner},
         "sandbox": {
             "backend": sandbox.get("backend", "openshell"),
             "image": sandbox.get("image", "base"),
@@ -110,7 +192,11 @@ def resolved_job_config(spec, spec_path: Path) -> dict[str, Any]:
         },
         "models": {
             "agent_under_test": runner["model"],
-            "user_emulator": test.get("user_model") or codex_default_model,
+            "user_emulator": (
+                user_runner["model"]
+                if user_runner["model"] != "n/a"
+                else test.get("user_model") or codex_default_model
+            ),
             "generation": generation.get("model") or codex_default_model,
             "judge": test.get("judge_model") or generation.get("model") or codex_default_model,
             "codex_default_source": codex_default_source,

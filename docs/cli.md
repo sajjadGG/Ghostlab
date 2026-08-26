@@ -15,6 +15,10 @@ ghostlab create --name full-agent --agent ./agent.yaml \
   --image base --provider openai --model gpt-5.2-codex \
   --user-model gpt-5.2-codex --generation-model gpt-5.2-codex \
   --judge-model gpt-5.2-codex --yes
+ghostlab create --name copilot-agent --agent ./copilot-agent.json \
+  --aut-backend copilot --user-backend copilot \
+  --aut-agent release-reviewer --user-agent realistic-user \
+  --model gpt-5.4 --user-model gpt-5-mini --sandbox local --yes
 ```
 
 `--agent`, `--skill`, and `--target` are mutually exclusive. `--agent` accepts
@@ -28,11 +32,72 @@ Use repeatable `--provider NAME` flags and `--image IMAGE` to configure
 OpenShell without editing the generated job.
 
 Without `--yes`, the Questionary/Rich creator asks for the subject, sandbox,
-OpenShell image/providers, AUT/user/generation/judge models, runner lifecycle
-and timeout, Codex approval/nested-sandbox policy, scenario size, and release
-gate. Arrow-key choices and a checkbox suite picker replace ambiguous text
-prompts. It previews the effective configuration and prints stable `[1/5]`
+OpenShell image/providers, separate AUT and user runner backends,
+AUT/user/generation/judge models, runner lifecycle and timeout, custom agent
+names plus Copilot reasoning/context settings, Codex policy, scenario size, and
+release gate. Arrow-key choices and a checkbox suite picker replace ambiguous
+text prompts. It previews the effective configuration and prints stable `[1/5]`
 through `[5/5]` progress. `--yes` keeps the non-interactive automation path.
+
+### GitHub Copilot and VS Code custom agents
+
+Use `--aut-backend copilot` and/or `--user-backend copilot` to drive a role
+with GitHub Copilot CLI. Copilot custom agents are shared with VS Code:
+`--aut-agent release-reviewer` selects the
+`.github/agents/release-reviewer.agent.md` definition that VS Code shows as
+`release-reviewer`.
+
+Ghostlab does not automate the VS Code window or extension UI. It uses the
+supported headless Copilot CLI session API, which is reproducible in CI while
+still exercising the same custom-agent definition.
+
+```bash
+ghostlab create --name release-eval --target https://example.com/mcp \
+  --aut-backend copilot --user-backend copilot \
+  --model gpt-5.4 --user-model gpt-5-mini \
+  --aut-agent release-reviewer --user-agent realistic-user \
+  --aut-reasoning-effort high --aut-context long_context \
+  --copilot-bin copilot \
+  --aut-copilot-arg=--no-custom-instructions \
+  --aut-runner-env COPILOT_GITHUB_TOKEN='$COPILOT_GITHUB_TOKEN' \
+  --sandbox local --no-discover --yes
+```
+
+The creator writes two independent files:
+`jobs/<name>/runners/aut.json` includes the target MCP, while
+`jobs/<name>/runners/user.json` excludes it and explicitly disables the target
+server name. `copilot-session` reuses one `--session-id` across turns and the
+`copilot-json` parser captures the final message, MCP arguments/results/errors,
+and built-in tool calls.
+
+Quote `$NAME` environment references as shown above. The placeholder is stored
+in the job instead of the secret and expanded only when the runner starts.
+For OpenShell jobs, explicitly configured runner environment names are also
+added to the sandbox environment allowlist.
+
+The generated `agent.runtime` and `test.user_runtime` mappings are the complete
+declarative configuration. Supported keys include:
+
+- identity and model: `copilot_bin`, `model`, `agent`, `reasoning_effort`,
+  `context`, `mode`, `kind`, `working_directory`, and `timeout_seconds`;
+- permissions: `allow_all`, `allow_all_tools`, `allow_all_paths`,
+  `allow_all_urls`, `allow_tools`, `deny_tools`, `available_tools`,
+  `excluded_tools`, `allow_urls`, `deny_urls`, `add_dirs`, and
+  `disallow_temp_dir`;
+- MCP/plugins: `disable_builtin_mcps`, `disable_mcp_servers`,
+  `additional_mcp_configs`, `allow_all_mcp_server_instructions`,
+  `add_github_mcp_tools`, `add_github_mcp_toolsets`,
+  `enable_all_github_mcp_tools`, and `plugin_dirs`;
+- session/process: `no_custom_instructions`, `no_ask_user`, `enable_memory`,
+  `enable_reasoning_summaries`, `max_ai_credits`,
+  `max_autopilot_continues`, `secret_env_vars`, `bash_env`, `env`, and
+  `extra_args`.
+
+`extra_args` is the forward-compatible escape hatch for new Copilot CLI
+options. Ghostlab rejects only protocol-owned flags (`--prompt`,
+`--session-id`, `--output-format`, and `--stream`) because overriding those
+would break turn delivery or JSONL capture. For a fully hand-written command,
+use `--aut-runner` and `--user-runner`.
 
 The full creator requires a real semantic result. It exits non-zero instead of
 claiming completion when generation only produced inert placeholders or every
@@ -45,10 +110,10 @@ artifacts, then resumes per-case testing where possible.
 
 ## config
 
-Show every effective agent setting, including the exact runner command and its
-source, AUT/user/generation/judge models, runner lifecycle, timeout, parser,
-approval mode, nested Codex sandbox, composed MCPs/skills/assets, and OpenShell
-providers/uploads/policy:
+Show every effective agent setting, including the exact AUT and user runner
+commands and their sources, backend/model/custom-agent selection,
+AUT/user/generation/judge models, runner lifecycle, timeout, parser, policy,
+composed MCPs/skills/assets, and OpenShell providers/uploads/policy:
 
 ```bash
 ghostlab config --job my-agent
@@ -58,9 +123,10 @@ ghostlab config --job my-agent --json
 The readable form is syntax-colored; `--json` is stable machine-readable
 output. When `-m` is omitted, Ghostlab reads only the top-level `model` from
 Codex's `config.toml` and reports that inherited model plus its source instead
-of the ambiguous label “CLI default.” The dashboard Overview exposes the same resolved view, and its
-Configure tab edits the Codex and OpenShell fields in `job.yaml` plus a
-materialized AUT runner together.
+of the ambiguous label “CLI default.” The dashboard Overview exposes the same
+resolved view. Its Configure tab edits Codex settings directly and provides
+full AUT/user runtime JSON editors for Copilot before rematerializing both
+runner files.
 
 ## init
 

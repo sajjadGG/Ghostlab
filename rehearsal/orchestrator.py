@@ -13,6 +13,7 @@ from .mcp_config import write_mcp_servers_config
 from .prompts import (
     build_aut_prompt,
     build_user_emulator_prompt,
+    build_user_emulator_resume_prompt,
     normalize_user_emulator_message,
 )
 from .report import write_markdown_report
@@ -20,6 +21,7 @@ from .runners import create_runner, redact_host_noise
 from .tool_capture import (
     annotate_tool_failures,
     parse_codex_output,
+    parse_copilot_output,
     parse_opencode_output,
     parse_tool_calls,
     summarize_tool_calls,
@@ -70,8 +72,10 @@ def isolate_runner_workdir(config: RunnerConfig, run_dir: Path) -> RunnerConfig:
 
 def _runner_workdir(config: RunnerConfig) -> Path | None:
     command = list(config.command or [])
-    if "--dir" in command:
-        index = command.index("--dir")
+    for flag in ("--dir", "-C"):
+        if flag not in command:
+            continue
+        index = command.index(flag)
         if index + 1 < len(command):
             path = Path(str(command[index + 1])).expanduser()
             return path if path.exists() else None
@@ -286,6 +290,7 @@ def run_scenario(
 
     user_message = scenario.opening_message
     aut_stateful = getattr(aut_runner, "stateful", False)
+    user_stateful = getattr(user_runner, "stateful", False)
 
     # MCP Apps mode: a live host that renders the widgets the agent opens and
     # lets the user operate them for real (DOM actions -> backend tools/calls,
@@ -345,6 +350,11 @@ def run_scenario(
                  .get("inputs", {}) or {}).get("mcps", []) or []
             ]
             parsed = parse_opencode_output(aut_result.output, servers=servers)
+            aut_message = parsed["message"] or redact_host_noise(aut_result.output)
+            tool_calls = parsed["tool_calls"]
+            builtin_calls = parsed["builtin_calls"]
+        elif aut_runner_config.parser == "copilot-json":
+            parsed = parse_copilot_output(aut_result.output)
             aut_message = parsed["message"] or redact_host_noise(aut_result.output)
             tool_calls = parsed["tool_calls"]
             builtin_calls = parsed["builtin_calls"]
@@ -409,16 +419,26 @@ def run_scenario(
             user_message = widget_follow_up
             continue
 
-        user_prompt = build_user_emulator_prompt(
-            scenario, transcript, aut_message, persona, widgets=widgets
-        )
+        if user_stateful and turn_index > 1:
+            user_prompt = build_user_emulator_resume_prompt(
+                aut_message, widgets=widgets
+            )
+        else:
+            user_prompt = build_user_emulator_prompt(
+                scenario, transcript, aut_message, persona, widgets=widgets
+            )
         emit(Event.create("user_emulator_prompt", turn=turn_index, prompt=user_prompt))
         user_result = user_runner.run_turn(user_prompt)
         if user_runner_config.parser in ("opencode-json", "opencode-text"):
-            # The emulator speaks over an opencode JSON event stream; recover the
+            # The emulator speaks over a JSON event stream; recover the
             # human-visible reply so the AUT never sees raw protocol frames.
             user_message_out = (
                 parse_opencode_output(user_result.output)["message"]
+                or redact_host_noise(user_result.output)
+            )
+        elif user_runner_config.parser == "copilot-json":
+            user_message_out = (
+                parse_copilot_output(user_result.output)["message"]
                 or redact_host_noise(user_result.output)
             )
         else:

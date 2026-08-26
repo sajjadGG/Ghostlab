@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import asdict
 from pathlib import Path
 
 from .config import ConfigError, TargetConfig
@@ -38,6 +39,8 @@ JOB_FILE = "job.yaml"
 DEFAULT_JOBS_DIR = "jobs"
 RUNNERS_DIR = "runners"
 AUT_RUNNER_FILE = "aut.json"
+USER_RUNNER_FILE = "user.json"
+RUNNER_HOST_KINDS = ("process", "codex-session", "copilot-session")
 
 _BEARER_ENV_RE = re.compile(r"Bearer\s+\$\{(\w+)\}")
 
@@ -52,6 +55,7 @@ _PROMPT_PLACEHOLDERS = {
     "skill_aut": "target_id, transport, capabilities, mcp_config_path, scenario_id, "
                  "scenario_title, goal, transcript, user_message",
     "user_emulator": "persona, goal, widget_section, transcript, last_assistant_message",
+    "user_emulator_resume": "widget_section, last_assistant_message",
     "judge": "goal, criteria_block, signals_block, tools_line, tool_calls, transcript",
     "critique": "goal, tools, transcript",
     "persona_gen": "mcp, domain_summary, categories, n",
@@ -147,6 +151,7 @@ def default_job_spec(
     test: dict | None = None,
     review_gates: dict | None = None,
     aut_runner: str | None = None,
+    user_runner: str | None = None,
 ) -> GhostlabSpec:
     """Build a fully-defaulted job spec (the pure builder the wizard/tests call)."""
     slug = slugify(name)
@@ -198,12 +203,15 @@ def default_job_spec(
             "config_ref": aut_runner,
             "roles": ["agent_under_test"],
         })
+    if user_runner:
+        spec.test = {**spec.test, "user_runner": user_runner}
     return spec
 
 
 def default_skill_job_spec(
     name: str, *, skill_path: Path, generation: dict | None = None,
     review_gates: dict | None = None, aut_runner: str | None = None,
+    user_runner: str | None = None,
 ) -> GhostlabSpec:
     spec = spec_from_skill(skill_path, name=name, workspace=JOB_WORKSPACE)
     if generation:
@@ -215,12 +223,15 @@ def default_skill_job_spec(
             "id": "aut", "kind": "process", "config_ref": aut_runner,
             "roles": ["agent_under_test"],
         })
+    if user_runner:
+        spec.test = {**spec.test, "user_runner": user_runner}
     return spec
 
 
 def default_agent_job_spec(
     name: str, *, agent: dict, sandbox: dict | None = None,
     generation: dict | None = None, review_gates: dict | None = None,
+    user_runner: str | None = None,
 ) -> GhostlabSpec:
     """Build a job around an arbitrary composed agent definition."""
     slug = slugify(name)
@@ -260,6 +271,8 @@ def default_agent_job_spec(
         spec.generation.update(generation)
     if review_gates:
         spec.review["gates"].update(review_gates)
+    if user_runner:
+        spec.test["user_runner"] = user_runner
     return spec
 
 
@@ -421,6 +434,103 @@ def build_opencode_aut_runner(
     }
 
 
+def _runner_payload(config) -> dict:
+    return asdict(config)
+
+
+def _agent_mcps(spec: GhostlabSpec) -> list[dict]:
+    inputs = dict((spec.agent or {}).get("inputs") or {})
+    mcps = [dict(entry) for entry in inputs.get("mcps", []) or []]
+    if not mcps and spec.target_type == "mcp":
+        target = spec.target_config()
+        mcps.append(
+            {
+                "id": target.id,
+                "transport": target.transport,
+                "connection": target.connection,
+            }
+        )
+    return mcps
+
+
+def build_copilot_aut_runner(
+    spec: GhostlabSpec, *, runtime: dict | None = None
+) -> dict:
+    """Synthesize a stateful GitHub Copilot CLI AUT with all MCPs attached."""
+    from .copilot_backend import copilot_runner
+
+    configured = {
+        **dict((spec.agent or {}).get("runtime") or {}),
+        **dict(runtime or {}),
+        "backend": "copilot",
+    }
+    workspace = (spec.agent or {}).get("workspace")
+    if workspace and not configured.get("working_directory"):
+        configured["working_directory"] = (
+            (spec.sandbox or {}).get("workdir")
+            if (spec.sandbox or {}).get("backend") == "openshell"
+            else workspace
+        )
+    return _runner_payload(
+        copilot_runner(
+            configured,
+            mcps=_agent_mcps(spec),
+            sandbox=dict(spec.sandbox),
+        )
+    )
+
+
+def build_copilot_user_runner(
+    spec: GhostlabSpec, *, runtime: dict | None = None
+) -> dict:
+    """Build an isolated Copilot user emulator with the AUT MCPs disabled."""
+    from .copilot_backend import copilot_runner
+
+    configured = {**dict(runtime or {}), "backend": "copilot"}
+    target_servers = [str(entry.get("id")) for entry in _agent_mcps(spec) if entry.get("id")]
+    return _runner_payload(
+        copilot_runner(
+            configured,
+            disabled_mcp_servers=target_servers,
+            sandbox=dict(spec.sandbox),
+        )
+    )
+
+
+def build_user_runner(
+    spec: GhostlabSpec, spec_path: Path, *, runtime: dict
+) -> dict:
+    """Build a user-emulator runner from its declarative runtime."""
+    backend = str(runtime.get("backend") or "codex")
+    if backend == "copilot":
+        return build_copilot_user_runner(spec, runtime=runtime)
+    if backend == "opencode":
+        from .runner_presets import opencode_user_runner
+
+        runner = opencode_user_runner(
+            spec_path.resolve().parent / RUNNERS_DIR / "opencode-user",
+            timeout_seconds=int(runtime.get("timeout_seconds") or 600),
+            opencode_bin=str(runtime.get("opencode_bin") or ""),
+            model=str(runtime.get("model") or ""),
+            agent=str(runtime.get("agent") or runtime.get("default_agent") or ""),
+        )
+        payload = _runner_payload(runner)
+        payload["sandbox"] = {"backend": "local"}
+        return payload
+    if backend == "codex":
+        from .runner_presets import codex_user_runner
+
+        runner = codex_user_runner(
+            timeout_seconds=int(runtime.get("timeout_seconds") or 600),
+            codex_bin=str(runtime.get("codex_bin") or ""),
+            model=str(runtime.get("model") or ""),
+        )
+        payload = _runner_payload(runner)
+        payload["sandbox"] = dict(spec.sandbox)
+        return payload
+    raise ConfigError(f"Unsupported user runner backend: {backend}")
+
+
 def add_aut_host(spec: GhostlabSpec, spec_path: Path, runner_config: dict) -> Path:
     """Write ``runner_config`` under the job dir and append it as an AUT host.
 
@@ -449,6 +559,137 @@ def add_aut_host(spec: GhostlabSpec, spec_path: Path, runner_config: dict) -> Pa
     return runner_path
 
 
+def add_user_runner(spec: GhostlabSpec, spec_path: Path, runner_config: dict) -> Path:
+    """Materialize the user-emulator runner and reference it from ``test``."""
+    runners_dir = spec_path.resolve().parent / RUNNERS_DIR
+    runners_dir.mkdir(exist_ok=True)
+    runner_path = runners_dir / USER_RUNNER_FILE
+    runner_path.write_text(json.dumps(runner_config, indent=2) + "\n", encoding="utf-8")
+    spec.test = {
+        **(spec.test or {}),
+        "user_runner": f"{RUNNERS_DIR}/{USER_RUNNER_FILE}",
+    }
+    save_spec(spec, spec_path)
+    return runner_path
+
+
+def materialize_job_runners(spec_path: Path) -> dict[str, Path]:
+    """Write declarative AUT/user runtimes as self-contained runner files."""
+    from .spec import load_spec
+
+    spec = load_spec(spec_path)
+    written: dict[str, Path] = {}
+    has_aut = any(host.get("kind") in RUNNER_HOST_KINDS for host in spec.hosts or [])
+    runner = dict((spec.agent or {}).get("runner") or {})
+    runtime = dict((spec.agent or {}).get("runtime") or {})
+    if not has_aut:
+        if not runner:
+            backend = str(runtime.get("backend") or "")
+            if backend == "copilot":
+                runner = build_copilot_aut_runner(spec, runtime=runtime)
+            elif backend == "opencode":
+                runner = build_opencode_aut_runner(
+                    spec,
+                    spec_path,
+                    model=str(runtime.get("model") or ""),
+                    timeout_seconds=int(runtime.get("timeout_seconds") or 600),
+                    opencode_bin=str(runtime.get("opencode_bin") or ""),
+                )
+            elif backend == "codex":
+                runner = build_codex_aut_runner(
+                    spec,
+                    model=str(runtime.get("model") or ""),
+                    kind=str(runtime.get("kind") or "process"),
+                    timeout_seconds=int(runtime.get("timeout_seconds") or 600),
+                    approval_mode=str(runtime.get("approval_mode") or "never"),
+                    codex_sandbox=str(runtime.get("codex_sandbox") or "read-only"),
+                    codex_bin=str(runtime.get("codex_bin") or "codex"),
+                )
+        if runner:
+            written["aut"] = add_aut_host(spec, spec_path, runner)
+
+    configured_user = (spec.test or {}).get("user_runner")
+    if isinstance(configured_user, dict):
+        written["user"] = add_user_runner(spec, spec_path, dict(configured_user))
+    elif not configured_user:
+        user_runtime = dict((spec.test or {}).get("user_runtime") or {})
+        if user_runtime:
+            written["user"] = add_user_runner(
+                spec,
+                spec_path,
+                build_user_runner(spec, spec_path, runtime=user_runtime),
+            )
+    return written
+
+
+def refresh_job_runners(spec: GhostlabSpec, spec_path: Path) -> dict[str, Path]:
+    """Rebuild both materialized runners after a runtime edit."""
+    runtime = dict((spec.agent or {}).get("runtime") or {})
+    backend = str(runtime.get("backend") or "")
+    if backend == "copilot":
+        aut_runner = build_copilot_aut_runner(spec, runtime=runtime)
+    elif backend == "opencode":
+        aut_runner = build_opencode_aut_runner(
+            spec,
+            spec_path,
+            model=str(runtime.get("model") or ""),
+            timeout_seconds=int(runtime.get("timeout_seconds") or 600),
+            opencode_bin=str(runtime.get("opencode_bin") or ""),
+        )
+    elif backend == "codex":
+        aut_runner = build_codex_aut_runner(
+            spec,
+            model=str(runtime.get("model") or ""),
+            kind=str(runtime.get("kind") or "process"),
+            timeout_seconds=int(runtime.get("timeout_seconds") or 600),
+            approval_mode=str(runtime.get("approval_mode") or "never"),
+            codex_sandbox=str(runtime.get("codex_sandbox") or "read-only"),
+            codex_bin=str(runtime.get("codex_bin") or "codex"),
+        )
+    else:
+        raise ConfigError(f"Unsupported AUT runner backend: {backend or 'not configured'}")
+
+    runners_dir = spec_path.resolve().parent / RUNNERS_DIR
+    runners_dir.mkdir(exist_ok=True)
+    aut_path = runners_dir / AUT_RUNNER_FILE
+    aut_path.write_text(json.dumps(aut_runner, indent=2) + "\n", encoding="utf-8")
+    aut_host = next(
+        (host for host in spec.hosts or [] if host.get("id") == "aut"),
+        None,
+    )
+    if aut_host is None:
+        spec.hosts.append(
+            {
+                "id": "aut",
+                "kind": str(aut_runner.get("kind") or "process"),
+                "config_ref": f"{RUNNERS_DIR}/{AUT_RUNNER_FILE}",
+                "roles": ["agent_under_test"],
+            }
+        )
+    else:
+        aut_host.update(
+            {
+                "kind": str(aut_runner.get("kind") or "process"),
+                "config_ref": f"{RUNNERS_DIR}/{AUT_RUNNER_FILE}",
+            }
+        )
+    spec.agent = {**(spec.agent or {}), "runner": aut_runner}
+
+    user_runtime = dict((spec.test or {}).get("user_runtime") or {})
+    written = {"aut": aut_path}
+    if user_runtime:
+        user_runner = build_user_runner(spec, spec_path, runtime=user_runtime)
+        user_path = runners_dir / USER_RUNNER_FILE
+        user_path.write_text(json.dumps(user_runner, indent=2) + "\n", encoding="utf-8")
+        spec.test = {
+            **(spec.test or {}),
+            "user_runner": f"{RUNNERS_DIR}/{USER_RUNNER_FILE}",
+        }
+        written["user"] = user_path
+    save_spec(spec, spec_path)
+    return written
+
+
 def update_agent_runtime(
     spec: GhostlabSpec, spec_path: Path, *, model: str, kind: str,
     timeout_seconds: int, approval_mode: str, codex_sandbox: str, codex_bin: str,
@@ -467,7 +708,9 @@ def update_agent_runtime(
             "model": generation_model or str(existing.get("model") or ""),
         }
         spec.test = {
-            **(spec.test or {}), "user_model": user_model, "judge_model": judge_model,
+            **(spec.test or {}),
+            "user_model": user_model,
+            "judge_model": judge_model,
         }
         return
 
@@ -491,11 +734,20 @@ def update_agent_runtime(
         **(spec.generation or {}), "model": generation_model, "codex_bin": codex_bin,
     }
     spec.test = {
-        **(spec.test or {}), "user_model": user_model, "judge_model": judge_model,
+        **(spec.test or {}),
+        "user_model": user_model,
+        "judge_model": judge_model,
+        "user_runtime": {
+            **dict((spec.test or {}).get("user_runtime") or {}),
+            "backend": "codex",
+            "model": user_model,
+            "timeout_seconds": timeout_seconds,
+            "codex_bin": codex_bin,
+        },
     }
     for host in spec.hosts or []:
         ref = host.get("config_ref")
-        if host.get("kind") not in ("process", "codex-session") or not ref:
+        if host.get("kind") not in RUNNER_HOST_KINDS or not ref:
             continue
         path = Path(str(ref))
         if not path.is_absolute():
@@ -503,7 +755,15 @@ def update_agent_runtime(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(runner, indent=2) + "\n", encoding="utf-8")
         host["kind"] = kind
-    save_spec(spec, spec_path)
+    add_user_runner(
+        spec,
+        spec_path,
+        build_user_runner(
+            spec,
+            spec_path,
+            runtime=dict(spec.test["user_runtime"]),
+        ),
+    )
 
 
 def create_job(

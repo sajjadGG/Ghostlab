@@ -1,0 +1,30 @@
+{
+  "kind": "copilot-session",
+  "command": [
+    "copilot",
+    "--output-format",
+    "json",
+    "--stream",
+    "off",
+    "--no-color",
+    "--no-remote",
+    "--no-auto-update",
+    "--no-ask-user",
+    "--disable-builtin-mcps",
+    "--allow-all-tools",
+    "--model",
+    "gpt-5.4",
+    "--agent",
+    "my-vscode-agent",
+    "--additional-mcp-config",
+    "{\"mcpServers\":{\"target\":{\"type\":\"http\",\"url\":\"https://example.test/mcp\",\"tools\":[\"*\"]}}}",
+    "--prompt"
+  ],
+  "env": {},
+  "timeout_seconds": 600,
+  "prompt_mode": "append-arg",
+  "parser": "copilot-json",
+  "sandbox": {
+    "backend": "local"
+  }
+}
