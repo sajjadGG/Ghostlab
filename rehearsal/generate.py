@@ -69,12 +69,28 @@ def profile_tool_names(profile: dict[str, Any]) -> set[str]:
     return names
 
 
+def _is_skill_like(profile: dict[str, Any]) -> bool:
+    return profile.get("target_type") in ("skill", "agent")
+
+
+def profile_procedure_names(profile: dict[str, Any]) -> set[str]:
+    """Named procedures a skill/agent scenario may claim to exercise."""
+    names = set(profile_tool_names(profile))
+    names.update(str(item) for item in profile.get("scripts") or [] if item)
+    for workflow in profile.get("workflows") or []:
+        names.update(str(step) for step in workflow.get("steps") or [] if step)
+    return names
+
+
 def _profile_digest(profile: dict[str, Any]) -> str:
+    kind = "Skill" if profile.get("target_type") == "skill" else (
+        "Agent" if profile.get("target_type") == "agent" else "MCP"
+    )
     lines = [
-        f"MCP: {profile.get('mcp', '?')}",
+        f"{kind}: {profile.get('mcp', '?')}",
         f"Domain: {profile.get('domain_summary', '')}",
         "",
-        "Tool categories:",
+        "Tool categories:" if not _is_skill_like(profile) else "Skill procedures / files:",
     ]
     cat_desc = {c.get("key"): c for c in profile.get("categories", [])}
     for family, names in profile.get("taxonomy", {}).items():
@@ -90,6 +106,8 @@ def _profile_digest(profile: dict[str, Any]) -> str:
         f"Read-only tools: {', '.join(surfaces.get('read', [])) or 'none'}",
         f"Mutating tools: {', '.join(surfaces.get('write', [])) or 'none'}",
     ]
+    if profile.get("scripts"):
+        lines.append("Companion scripts: " + ", ".join(str(s) for s in profile["scripts"]))
     missing = profile.get("gaps", {}).get("missing_referenced_tools", [])
     if missing:
         lines.append(f"Non-exposed tools mentioned in docs (do NOT rely on these): {', '.join(missing)}")
@@ -130,7 +148,7 @@ Capability profile:
 Generate exactly {n} diverse, realistic scenarios that this capability can support. Spread them across intents:
 - happy_path: a primary, well-supported use case.
 - edge_case: ambiguous requests, missing prerequisites, or conflicting/stale state.
-- adversarial: the user asks for something the MCP can't do, or pushes on the known gaps/failure modes.
+- adversarial: the user asks for something the capability can't or must not do, or pushes on the known gaps/failure modes.
 
 For each scenario provide:
 - id: short kebab-case identifier.
@@ -140,9 +158,9 @@ For each scenario provide:
 - goal: what the user wants to achieve in this conversation.
 - max_turns: an integer between 3 and 6.
 - opening_message: the user's first message, in their voice.
-- success_criteria: 2-4 observable things the assistant should do (reference real behavior/tools).
+- success_criteria: 2-4 observable things the assistant should do (reference real behavior, skill steps, or tools).
 - failure_signals: 2-4 things that would indicate a bug or bad behavior to probe for.
-- exercises: for MCP targets, the real tool names this should exercise; for skill targets with no tools, use an empty array.
+- exercises: for MCP targets, the real tool names this should exercise; for skill/agent targets, the real skill scripts or workflow steps this should exercise.
 
 Output only the JSON object with a `scenarios` array."""
 
@@ -166,9 +184,16 @@ def _build_prompt(profile: dict[str, Any], n: int, persona: dict[str, Any] | Non
     )
 
 
-def _to_scenario_dict(raw: dict[str, Any], tool_names: set[str], index: int) -> dict[str, Any]:
+def _to_scenario_dict(
+    raw: dict[str, Any],
+    tool_names: set[str],
+    index: int,
+    *,
+    keep_ungrounded_exercises: bool = False,
+) -> dict[str, Any]:
     """Normalize one generated scenario into a ScenarioConfig-shaped dict."""
-    exercises = [t for t in raw.get("exercises", []) if t in tool_names]
+    raw_exercises = [str(t) for t in raw.get("exercises", []) if t]
+    exercises = raw_exercises if keep_ungrounded_exercises else [t for t in raw_exercises if t in tool_names]
     scenario_id = _slug(str(raw.get("id") or raw.get("title") or f"scenario-{index}"))
     max_turns = raw.get("max_turns", 4)
     try:
@@ -200,14 +225,16 @@ def generate_scenarios(
     n: int,
     persona: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    tool_names = profile_tool_names(profile)
+    tool_names = profile_procedure_names(profile) if _is_skill_like(profile) else profile_tool_names(profile)
     result = backend.generate_json(_build_prompt(profile, n, persona), _SCENARIOS_SCHEMA)
     raw_scenarios = result.get("scenarios", []) if isinstance(result, dict) else []
 
     scenarios: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for index, raw in enumerate(raw_scenarios, start=1):
-        scenario = _to_scenario_dict(raw, tool_names, index)
+        scenario = _to_scenario_dict(
+            raw, tool_names, index, keep_ungrounded_exercises=_is_skill_like(profile),
+        )
         # De-duplicate ids.
         base_id = scenario["id"]
         suffix = 2
@@ -216,7 +243,8 @@ def generate_scenarios(
             suffix += 1
         seen_ids.add(scenario["id"])
         scenarios.append(scenario)
-    return scenarios
+    # Models often ignore "exactly n" and emit one scenario per intent.
+    return scenarios[: max(1, n)]
 
 
 def write_scenarios(scenarios: list[dict[str, Any]], out_dir: Path, prefix: str = "") -> list[Path]:

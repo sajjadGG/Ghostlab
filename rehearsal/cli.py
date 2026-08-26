@@ -1081,6 +1081,8 @@ def cmd_create(args: argparse.Namespace) -> int:
         generation["model"] = generation_model
     if args.codex_bin:
         generation["codex_bin"] = args.codex_bin
+    if getattr(args, "llm_backend", ""):
+        generation["backend"] = args.llm_backend
     review_gates = {"min_pass_rate": args.min_pass_rate} if args.min_pass_rate is not None else None
 
     if args.agent is not None:
@@ -1137,15 +1139,34 @@ def cmd_create(args: argparse.Namespace) -> int:
             "model": args.generation_model or str(declared_runtime.get("model") or ""),
         }
     else:
-        runtime = {
-            "backend": "codex",
-            "model": args.model or "",
-            "kind": args.runner_kind or "process",
-            "timeout_seconds": args.runner_timeout or 600,
-            "approval_mode": args.approval_mode or "never",
-            "codex_sandbox": args.codex_sandbox or "read-only",
-            "codex_bin": args.codex_bin or "codex",
-        }
+        backend = getattr(args, "llm_backend", "") or "codex"
+        if backend == "opencode":
+            runtime = {
+                "backend": "opencode",
+                "model": args.model or "",
+                "timeout_seconds": args.runner_timeout or 600,
+            }
+            if args.skill is not None:
+                from .skills import inspect_skill, skill_root
+
+                root = skill_root(args.skill)
+                inspected = inspect_skill(args.skill, spec.id)
+                description = str(inspected.capabilities.get("description") or "")
+                if description:
+                    spec.agent = {**(spec.agent or {}), "description": description}
+                runtime["skills"] = {"paths": [str(root)]}
+                if inspected.capabilities.get("requires_shell"):
+                    runtime["permission"] = {"bash": "allow", "edit": "allow"}
+        else:
+            runtime = {
+                "backend": "codex",
+                "model": args.model or "",
+                "kind": args.runner_kind or "process",
+                "timeout_seconds": args.runner_timeout or 600,
+                "approval_mode": args.approval_mode or "never",
+                "codex_sandbox": args.codex_sandbox or "read-only",
+                "codex_bin": args.codex_bin or "codex",
+            }
     existing_runner = {} if declared else dict((spec.agent or {}).get("runner") or {})
     if existing_runner:
         runtime["kind"] = args.runner_kind or existing_runner.get("kind", "process")
@@ -1228,7 +1249,8 @@ def cmd_create(args: argparse.Namespace) -> int:
         job=slug, spec=None, db=None, out=None, approve=None, reject=None,
         generate=True, regenerate=False,
         personas=args.personas, scenarios_per_persona=args.scenarios_per_persona,
-        codex_bin="", model="", require_semantic=True,
+        codex_bin="", model=args.generation_model or args.model or "",
+        require_semantic=True, llm_backend=getattr(args, "llm_backend", ""),
     )
     if cmd_plan(plan_args) != 0:
         print(tc.muted(f"  job created; fix the plan then: ghostlab plan --job {slug}"))
@@ -1256,7 +1278,8 @@ def cmd_create(args: argparse.Namespace) -> int:
         job=slug, spec=None, db=None, plan=None, suite=chosen_suites, hosts=None,
         approved_only=False, user_runner=None, apps_mode=False, skip_setup=False,
         timeout=30.0, repeat=1, profile=None, strict=False, judge=None,
-        codex_bin="", model="", require_semantic=True,
+        codex_bin="", model=args.model or "", require_semantic=True,
+        llm_backend=getattr(args, "llm_backend", ""),
     )
     test_rc = cmd_test(test_args)
     if test_rc != 0:
@@ -1499,10 +1522,16 @@ def _discover_skill(args, spec, target, out_dir: Path) -> int:
         "generated_from": generated_from, "discovered_at": contract["generated_at"],
         "target_type": "skill", "name": result.server_info.get("name", spec.id),
         "description": description, "tools": [], "ui_resources": [],
+        "scripts": list(result.capabilities.get("scripts") or []),
+        "files": list(result.capabilities.get("files") or []),
+        "requires_shell": bool(result.capabilities.get("requires_shell")),
     }
     spec.target["capabilities"] = {
         "target_type": "skill", "description": description,
         "instructions": result.instructions,
+        "scripts": list(result.capabilities.get("scripts") or []),
+        "root": result.capabilities.get("root", ""),
+        "requires_shell": bool(result.capabilities.get("requires_shell")),
     }
     save_spec(spec, args.spec)
     print(tc.heading(f"Discovered skill '{result.server_info.get('name', spec.id)}'"))
@@ -2279,6 +2308,7 @@ def cmd_test(args: argparse.Namespace) -> int:
                 getattr(args, "llm_backend", ""),
                 bin_path=args.codex_bin, model=args.model,
                 sandbox=normalize_sandbox(spec.sandbox, args.spec.resolve().parent),
+                spec_value=str((spec.generation or {}).get("backend", "")),
             )
             candidate._bin()  # resolve now so a missing codex degrades gracefully
             backend = candidate

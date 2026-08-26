@@ -125,39 +125,89 @@ Produce a JSON object with:
 
 Output only the JSON object."""
 
+SKILL_PROFILE_TEMPLATE = """You are analyzing an agent skill so its behaviour can be tested.
 
-def _build_prompt(digest: str, families: list[str]) -> str:
+{digest}
+
+The skill's named procedures/files are: {families}.
+
+Produce a JSON object with:
+- domain_summary: 1-3 sentences on what this skill is for and who would use it.
+- categories: one entry per procedure family above (or a single `skill` category if none). `key` is the family string; `label` is a short human label; `description` says what that part of the skill does.
+- workflows: 3-6 realistic multi-step jobs a user would bring to an agent that has this skill installed. `steps` are user-visible or script-named steps from the skill, not invented tools. Ground them in the skill instructions and companion files.
+
+Do not invent MCP tools. Output only the JSON object."""
+
+
+def _is_skill_like(inspect: dict[str, Any]) -> bool:
+    return inspect.get("transport") in ("skill", "agent")
+
+
+def _procedure_taxonomy(inspect: dict[str, Any]) -> dict[str, list[str]]:
+    """Group a skill's companion scripts/files so generation has named procedures."""
+    files = list((inspect.get("capabilities") or {}).get("files") or [])
+    groups: dict[str, list[str]] = {}
+    for entry in files:
+        name = str(entry.get("path") or "")
+        if not name:
+            continue
+        kind = str(entry.get("kind") or "file")
+        groups.setdefault(kind, []).append(name)
+    if not groups:
+        name = str((inspect.get("server_info") or {}).get("name") or "skill")
+        groups["skill"] = [name]
+    return dict(sorted(groups.items()))
+
+
+def _build_prompt(digest: str, families: list[str], *, skill_like: bool = False) -> str:
     from . import prompts
 
     return prompts.render(
         "profile",
-        PROFILE_TEMPLATE,
+        SKILL_PROFILE_TEMPLATE if skill_like else PROFILE_TEMPLATE,
         digest=digest,
-        families=", ".join(families),
+        families=", ".join(families) or "(none)",
     )
 
 
 def profile_prompt(inspect: dict[str, Any]) -> str:
     """The exact prompt that `build_capability_profile` sends to codex."""
-    families = list(taxonomy(inspect.get("tools", [])).keys())
-    return _build_prompt(_digest(inspect), families)
+    skill_like = _is_skill_like(inspect)
+    tax = taxonomy(inspect.get("tools", [])) if not skill_like else _procedure_taxonomy(inspect)
+    return _build_prompt(_digest(inspect), list(tax.keys()), skill_like=skill_like)
 
 
 def build_capability_profile(inspect: dict[str, Any], backend: CodexBackend) -> dict[str, Any]:
     tools = inspect.get("tools", [])
-    tax = taxonomy(tools)
+    skill_like = _is_skill_like(inspect)
+    tax = taxonomy(tools) if not skill_like else _procedure_taxonomy(inspect)
     surfaces = state_surfaces(tools)
     families = list(tax.keys())
 
-    generated = backend.generate_json(_build_prompt(_digest(inspect), families), _PROFILE_SCHEMA)
+    generated = backend.generate_json(
+        _build_prompt(_digest(inspect), families, skill_like=skill_like),
+        _PROFILE_SCHEMA,
+    )
 
     tool_names = {t.get("name", "") for t in tools}
-    # Drop any hallucinated steps that don't correspond to real tools.
+    procedure_names = {name for names in tax.values() for name in names}
+    # Drop MCP-tool hallucinations. Skill workflows are user-visible steps and
+    # must not be emptied just because the skill exposes no tools.
     clean_workflows = []
     for wf in generated.get("workflows", []):
-        steps = [s for s in wf.get("steps", []) if s in tool_names]
+        raw_steps = [str(s) for s in wf.get("steps", []) if s]
+        if skill_like:
+            steps = raw_steps
+        else:
+            steps = [s for s in raw_steps if s in tool_names]
         if steps:
             clean_workflows.append({**wf, "steps": steps})
+    if skill_like and not clean_workflows and procedure_names:
+        clean_workflows.append({
+            "name": "Follow the published skill workflow",
+            "description": generated.get("domain_summary", ""),
+            "steps": sorted(procedure_names),
+        })
 
     missing_tools = sorted({f["referenced"] for f in inspect.get("lint", [])})
     write_only_no_read = []  # families that mutate but expose no read-back tool
@@ -181,6 +231,8 @@ def build_capability_profile(inspect: dict[str, Any], backend: CodexBackend) -> 
             "resources": len(inspect.get("resources", [])),
             "prompts": len(inspect.get("prompts", [])),
         },
+        "files": list((inspect.get("capabilities") or {}).get("files") or []),
+        "scripts": list((inspect.get("capabilities") or {}).get("scripts") or []),
     }
 
 

@@ -382,7 +382,9 @@ def build_opencode_aut_runner(
     """
     from .runner_presets import opencode_aut_runner
 
-    agent_mcps = ((spec.agent or {}).get("inputs", {}) or {}).get("mcps", []) or []
+    agent = spec.agent or {}
+    inputs = dict(agent.get("inputs", {}) or {})
+    agent_mcps = inputs.get("mcps", []) or []
     if agent_mcps:
         entry = agent_mcps[0]
         target = TargetConfig(
@@ -390,13 +392,21 @@ def build_opencode_aut_runner(
             transport=str(entry.get("transport") or "streamable-http"),
             connection=dict(entry.get("connection") or {}),
         )
-    else:
+    elif spec.target_type == "mcp":
         target = spec.target_config()
+    else:
+        # Skill/agent jobs are not MCPs. Passing transport=skill into
+        # opencode.json would crash config rendering and invent a fake server.
+        target = None
 
     project_dir = spec_path.resolve().parent / RUNNERS_DIR / "opencode-aut"
+    runtime = dict(agent.get("runtime") or {})
+    if model:
+        runtime["model"] = model
     runner = opencode_aut_runner(
         target, project_dir, timeout_seconds=timeout_seconds,
-        opencode_bin=opencode_bin, model=model,
+        opencode_bin=opencode_bin, model=model or str(runtime.get("model") or ""),
+        runtime=runtime, skills=list(inputs.get("skills") or []),
     )
     return {
         "kind": runner.kind,

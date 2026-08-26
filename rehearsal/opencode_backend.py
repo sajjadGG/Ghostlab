@@ -64,6 +64,29 @@ def resolve_opencode_bin() -> str:
     )
 
 
+def first_stream_error(stream_text: str) -> str:
+    """Return the first API/session error from an OpenCode JSON event stream."""
+    for line in stream_text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "error":
+            continue
+        payload = event.get("error") or {}
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        message = ""
+        if isinstance(data, dict):
+            message = str(data.get("message") or "")
+        if not message and isinstance(payload, dict):
+            message = str(payload.get("message") or payload.get("name") or "")
+        return message or "opencode reported an error event"
+    return ""
+
+
 def collect_text(stream_text: str) -> str:
     """Reassemble the assistant reply from an ``opencode run --format json`` stream.
 
@@ -191,7 +214,11 @@ class OpencodeBackend:
             detail = (completed.stderr or completed.stdout or "").strip()[-2000:]
             raise OpencodeError(f"opencode exited {completed.returncode}:\n{detail}")
 
-        reply = collect_text(completed.stdout)
+        stream = completed.stdout or ""
+        api_error = first_stream_error(stream)
+        if api_error:
+            raise OpencodeError(f"opencode model error: {api_error}")
+        reply = collect_text(stream)
         if not reply:
             detail = (completed.stderr or "").strip()[-1000:]
             raise OpencodeError(

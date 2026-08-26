@@ -112,10 +112,21 @@ def collect_evidence(
     ]
     for item in skill_paths:
         path = Path(str(item)).expanduser()
-        if path.is_dir():
-            path = path / "SKILL.md"
-        if path.is_file():
-            skills.append({"path": str(item), "content": _read_text(path)})
+        root = path if path.is_dir() else path.parent
+        skill_file = path / "SKILL.md" if path.is_dir() else path
+        if skill_file.is_file():
+            content = _read_text(skill_file)
+            companions: list[str] = []
+            if root.is_dir():
+                from .skills import list_skill_files
+
+                for entry in list_skill_files(root):
+                    if entry.get("kind") == "skill":
+                        continue
+                    companions.append(f"{entry['path']} ({entry['kind']}, {entry['size']} bytes)")
+            if companions:
+                content = content + "\n\nCompanion files:\n- " + "\n- ".join(companions)
+            skills.append({"path": str(item), "content": content})
 
     subagents = []
     for name, definition in (runtime.get("agents") or {}).items():
@@ -259,7 +270,9 @@ def as_capability_profile(
     tax = taxonomy(tools) if tools else {}
     return {
         "mcp": profile.get("agent_id") or "agent",
-        "target_type": "agent",
+        "target_type": (
+            "skill" if (inspect or {}).get("transport") == "skill" else "agent"
+        ),
         "domain_summary": summary,
         "categories": [
             {"key": key, "label": key, "description": f"{key} capabilities"}

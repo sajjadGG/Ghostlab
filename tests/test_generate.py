@@ -45,6 +45,32 @@ class GroundingTest(unittest.TestCase):
         scenario = _to_scenario_dict({"exercises": []}, set(), 7)
         self.assertEqual(scenario["id"], "scenario-7")
 
+    def test_skill_scenarios_keep_workflow_exercises(self) -> None:
+        raw = {"id": "build", "exercises": ["scripts/init-artifact.sh", "bundle"]}
+        scenario = _to_scenario_dict(raw, set(), 1, keep_ungrounded_exercises=True)
+        self.assertEqual(scenario["exercises"], ["scripts/init-artifact.sh", "bundle"])
+
+
+class GenerateCountTest(unittest.TestCase):
+    def test_caps_overproduced_scenarios_to_n(self) -> None:
+        from rehearsal.generate import generate_scenarios
+
+        class Fake:
+            def generate_json(self, prompt, schema):
+                return {"scenarios": [
+                    {"id": "a", "title": "a", "intent": "happy_path", "persona": "",
+                     "goal": "", "max_turns": 3, "opening_message": "hi",
+                     "success_criteria": [], "failure_signals": [], "exercises": []},
+                    {"id": "b", "title": "b", "intent": "edge_case", "persona": "",
+                     "goal": "", "max_turns": 3, "opening_message": "hi",
+                     "success_criteria": [], "failure_signals": [], "exercises": []},
+                    {"id": "c", "title": "c", "intent": "adversarial", "persona": "",
+                     "goal": "", "max_turns": 3, "opening_message": "hi",
+                     "success_criteria": [], "failure_signals": [], "exercises": []},
+                ]}
+
+        self.assertEqual(len(generate_scenarios({}, Fake(), 1)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
