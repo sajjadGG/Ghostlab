@@ -76,6 +76,11 @@ sandbox:
 `--sandbox local` for trusted compatibility work. It is never selected as a
 fallback after an OpenShell error.
 
+Ghostlab marks coding-agent sessions as evaluation traffic without changing the
+conversation: Codex receives `originator: ghostlab`, and generated Copilot
+session UUIDs use Ghostlab's reserved UUID prefix. Rollout collectors such as
+Retro can exclude these synthetic sessions during discovery.
+
 The standalone `ghostlab inspect` command is intentionally a low-level direct
 MCP client and does not consume a job sandbox declaration. Use
 `ghostlab create`/`ghostlab discover` for untrusted local stdio MCP code.

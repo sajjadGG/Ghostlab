@@ -12,6 +12,10 @@ from rehearsal.runners import OpenShellProcessRunner, create_runner
 from rehearsal.sandbox import (
     OpenShellSandbox, SandboxError, normalize_sandbox, sandbox_stdio_target,
 )
+from rehearsal.session_provenance import (
+    CODEX_ORIGINATOR_ENV,
+    GHOSTLAB_ORIGINATOR,
+)
 
 
 class FakeCommands:
@@ -55,7 +59,12 @@ class OpenShellSandboxTest(unittest.TestCase):
             )
             result = sandbox.exec(
                 ["codex", "exec", "-"], input_text="hello",
-                env={"BLOCKED_TOKEN": "nope", "REHEARSAL_TARGET_ID": "target"}, timeout=10,
+                env={
+                    "BLOCKED_TOKEN": "nope",
+                    "REHEARSAL_TARGET_ID": "target",
+                    CODEX_ORIGINATOR_ENV: GHOSTLAB_ORIGINATOR,
+                },
+                timeout=10,
             )
             self.assertEqual(result.stdout, "agent reply")
             create_command = next(call[0] for call in fake.calls if call[0][1:3] == ["sandbox", "create"])
@@ -65,6 +74,10 @@ class OpenShellSandboxTest(unittest.TestCase):
             rendered = " ".join(exec_command)
             self.assertIn("ALLOWED_TOKEN=secret", rendered)
             self.assertIn("REHEARSAL_TARGET_ID=target", rendered)
+            self.assertIn(
+                f"{CODEX_ORIGINATOR_ENV}={GHOSTLAB_ORIGINATOR}",
+                rendered,
+            )
             self.assertNotIn("BLOCKED_TOKEN", rendered)
             sandbox.close()
             self.assertTrue((Path(tmp) / "openshell-aut.log").exists())

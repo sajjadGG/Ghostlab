@@ -4,11 +4,14 @@ import json
 import os
 import re
 import subprocess
-import uuid
 from dataclasses import dataclass
 
 from .config import RunnerConfig
 from .sandbox import OpenShellSandbox, SandboxError
+from .session_provenance import (
+    new_copilot_session_id,
+    with_ghostlab_provenance,
+)
 
 # Known host noise that should never be treated as conversational content.
 # Matched line-by-line and stripped from the message passed to the other agent.
@@ -103,7 +106,7 @@ class ProcessRunner(AgentRunner):
     def __init__(self, config: RunnerConfig) -> None:
         if not config.command:
             raise ValueError("Process runner requires a non-empty command")
-        self.config = config
+        self.config = with_ghostlab_provenance(config)
 
     def run_turn(self, prompt: str) -> RunnerResult:
         command = list(self.config.command)
@@ -140,7 +143,7 @@ class CodexSessionRunner(AgentRunner):
             raise ValueError("Session runner requires a non-empty command")
         if "exec" not in config.command:
             raise ValueError("codex-session command must contain 'exec'")
-        self.config = config
+        self.config = with_ghostlab_provenance(config)
         self.thread_id: str | None = None
 
     def _command_for_turn(self) -> list[str]:
@@ -179,7 +182,7 @@ def _copilot_session_id(command: list[str]) -> str:
             return command[index + 1]
         if part.startswith("--session-id="):
             return part.partition("=")[2]
-    return str(uuid.uuid4())
+    return new_copilot_session_id()
 
 
 def _copilot_session_command(command: list[str], session_id: str) -> list[str]:
@@ -188,7 +191,14 @@ def _copilot_session_command(command: list[str], session_id: str) -> list[str]:
         for part in command
     ):
         return command
-    insert_at = command.index("--prompt") if "--prompt" in command else len(command)
+    insert_at = next(
+        (
+            index
+            for index, part in enumerate(command)
+            if part in ("-p", "--prompt")
+        ),
+        len(command),
+    )
     command[insert_at:insert_at] = ["--session-id", session_id]
     return command
 
@@ -250,7 +260,12 @@ class CopilotProcessRunner(ProcessRunner):
     """Fresh-process Copilot runner with JSONL error propagation."""
 
     def run_turn(self, prompt: str) -> RunnerResult:
-        command = _copilot_command_env(list(self.config.command))
+        command = _copilot_command_env(
+            _copilot_session_command(
+                list(self.config.command),
+                new_copilot_session_id(),
+            )
+        )
         prepared = _prompt_command(command, self.config.prompt_mode, prompt)
         if isinstance(prepared, RunnerResult):
             return prepared
@@ -282,7 +297,7 @@ class OpenShellProcessRunner(AgentRunner):
     def __init__(self, config: RunnerConfig, name: str) -> None:
         if not config.command:
             raise ValueError("OpenShell process runner requires a non-empty command")
-        self.config = config
+        self.config = with_ghostlab_provenance(config)
         self.sandbox = OpenShellSandbox(config.sandbox, role=name)
 
     def _run(self, command: list[str], input_text: str | None) -> RunnerResult:
@@ -366,7 +381,12 @@ class OpenShellCopilotProcessRunner(OpenShellProcessRunner):
     """Fresh-process Copilot runner inside OpenShell."""
 
     def run_turn(self, prompt: str) -> RunnerResult:
-        command = _copilot_command_env(list(self.config.command))
+        command = _copilot_command_env(
+            _copilot_session_command(
+                list(self.config.command),
+                new_copilot_session_id(),
+            )
+        )
         prepared = _prompt_command(command, self.config.prompt_mode, prompt)
         if isinstance(prepared, RunnerResult):
             return prepared

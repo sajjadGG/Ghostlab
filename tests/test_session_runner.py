@@ -5,6 +5,10 @@ import unittest
 
 from rehearsal.config import RunnerConfig
 from rehearsal.runners import CodexSessionRunner, create_runner
+from rehearsal.session_provenance import (
+    CODEX_ORIGINATOR_ENV,
+    GHOSTLAB_ORIGINATOR,
+)
 
 BASE_COMMAND = ["codex", "-c", "x=1", "exec", "--json", "--skip-git-repo-check", "-"]
 
@@ -36,6 +40,30 @@ class SessionCommandTest(unittest.TestCase):
 
     def test_is_stateful(self) -> None:
         self.assertTrue(create_runner(RunnerConfig(kind="codex-session", command=BASE_COMMAND), "aut").stateful)
+
+    def test_tags_codex_sessions_with_ghostlab_originator(self) -> None:
+        runner = CodexSessionRunner(
+            RunnerConfig(
+                kind="codex-session",
+                command=list(BASE_COMMAND),
+                env={"EXISTING": "value", CODEX_ORIGINATOR_ENV: "spoofed"},
+            )
+        )
+        self.assertEqual(runner.config.env["EXISTING"], "value")
+        self.assertEqual(
+            runner.config.env[CODEX_ORIGINATOR_ENV],
+            GHOSTLAB_ORIGINATOR,
+        )
+
+    def test_tags_fresh_codex_processes_with_ghostlab_originator(self) -> None:
+        runner = create_runner(
+            RunnerConfig(kind="process", command=["codex", "exec", "-"]),
+            "user",
+        )
+        self.assertEqual(
+            runner.config.env[CODEX_ORIGINATOR_ENV],
+            GHOSTLAB_ORIGINATOR,
+        )
 
     def test_requires_exec_in_command(self) -> None:
         with self.assertRaises(ValueError):
