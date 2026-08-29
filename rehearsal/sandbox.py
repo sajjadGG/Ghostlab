@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .session_provenance import CODEX_ORIGINATOR_ENV
+
 
 DEFAULT_SANDBOX: dict[str, Any] = {
     "backend": "openshell",
@@ -205,7 +207,13 @@ class OpenShellSandbox:
                 for name, value in requested.items()
             },
         }
-        internal = {key for key in requested if key.startswith("REHEARSAL_") or key.startswith("GHOSTLAB_")}
+        internal = {
+            key
+            for key in requested
+            if key.startswith("REHEARSAL_")
+            or key.startswith("GHOSTLAB_")
+            or key == CODEX_ORIGINATOR_ENV
+        }
         return {key: value for key, value in requested.items() if key in allow or key in internal}
 
     def exec(

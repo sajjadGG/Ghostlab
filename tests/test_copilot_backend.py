@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import io
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,6 +32,7 @@ from rehearsal.runners import (
     RunnerResult,
     create_runner,
 )
+from rehearsal.session_provenance import GHOSTLAB_COPILOT_SESSION_ID_PREFIX
 from rehearsal.spec import load_spec
 from rehearsal.tool_capture import parse_copilot_output
 
@@ -196,10 +198,57 @@ class CopilotSessionRunnerTest(unittest.TestCase):
         first_id = first[first.index("--session-id") + 1]
         second_id = second[second.index("--session-id") + 1]
         self.assertEqual(first_id, second_id)
+        self.assertTrue(first_id.startswith(GHOSTLAB_COPILOT_SESSION_ID_PREFIX))
+        self.assertEqual(uuid.UUID(first_id).version, 4)
         self.assertEqual(first[-1], "first")
         self.assertEqual(second[-1], "second")
         self.assertEqual(runner.thread_id, first_id)
         self.assertTrue(create_runner(config, "aut").stateful)
+
+    def test_fresh_process_tags_each_copilot_session(self) -> None:
+        config = RunnerConfig(
+            kind="process",
+            command=["copilot", "--output-format", "json", "--prompt"],
+            prompt_mode="append-arg",
+            parser="copilot-json",
+        )
+        runner = CopilotProcessRunner(config)
+        with patch(
+            "rehearsal.runners._exec",
+            return_value=RunnerResult(output="", exit_code=0),
+        ) as execute:
+            runner.run_turn("first")
+            runner.run_turn("second")
+
+        session_ids = []
+        for call in execute.call_args_list:
+            command = call.args[0]
+            session_id = command[command.index("--session-id") + 1]
+            self.assertTrue(
+                session_id.startswith(GHOSTLAB_COPILOT_SESSION_ID_PREFIX)
+            )
+            self.assertEqual(uuid.UUID(session_id).version, 4)
+            session_ids.append(session_id)
+        self.assertNotEqual(session_ids[0], session_ids[1])
+
+    def test_places_session_id_before_short_prompt_flag(self) -> None:
+        runner = CopilotSessionRunner(
+            RunnerConfig(
+                kind="copilot-session",
+                command=["copilot", "-p"],
+                prompt_mode="append-arg",
+                parser="copilot-json",
+            )
+        )
+        with patch(
+            "rehearsal.runners._exec",
+            return_value=RunnerResult(output="", exit_code=0),
+        ) as execute:
+            runner.run_turn("hello")
+
+        command = execute.call_args.args[0]
+        self.assertLess(command.index("--session-id"), command.index("-p"))
+        self.assertEqual(command[-1], "hello")
 
     def test_requires_prompt_flag(self) -> None:
         with self.assertRaisesRegex(ValueError, "--prompt"):
@@ -219,6 +268,9 @@ class CopilotSessionRunnerTest(unittest.TestCase):
             "aut",
         )
         self.assertIsInstance(runner, OpenShellCopilotSessionRunner)
+        self.assertTrue(
+            runner.session_id.startswith(GHOSTLAB_COPILOT_SESSION_ID_PREFIX)
+        )
 
     def test_copilot_json_errors_fail_even_when_process_exits_zero(self) -> None:
         config = RunnerConfig(
