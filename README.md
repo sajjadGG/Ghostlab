@@ -295,7 +295,9 @@ The package installs two equivalent console scripts: `ghostlab` and `rehearsal`.
 - `ghostlab run` — run one dual-agent E2E scenario directly.
 - `ghostlab evaluate` — score a run into a pass/fail verdict (codex judge).
 - `ghostlab critique` — rate a run's tool ergonomics from the agent's perspective (codex).
-- `ghostlab scorecard` — roll run verdicts and critiques into a summary scorecard.
+- `ghostlab scorecard` — roll run verdicts and critiques into a summary scorecard, or aggregate benchmark attempts with `--attempts`.
+- `ghostlab artifact-run` — run one configured agent once on a mutable workspace and export what it produced.
+- `ghostlab scorer-run` — score an exported candidate workspace with a hidden scorer package.
 - `ghostlab compare` — diff two dataset runs for regressions.
 - `ghostlab apps-probe` / `apps-render` — probe/render MCP Apps `ui://` widgets.
 - `ghostlab doctor` — check the sandbox and both LLM backends (`--probe` for a live check).
@@ -593,6 +595,52 @@ ghostlab compare --base runs/<base>-summary --candidate runs/<cand>-summary \
 
 Diffs case-by-case on verdict, listing regressions first, then fixes, then
 other changes. Exits non-zero when there are regressions, so it can gate CI.
+
+### Benchmark a coding agent: `artifact-run` / `scorer-run`
+
+`run` evaluates a conversation. A benchmark task is the opposite shape: one
+message, a repository the agent may rewrite, and a verdict that depends only on
+the state it left behind. Two commands cover it, and neither one creates a user
+emulator.
+
+```bash
+ghostlab artifact-run \
+  --agent agents/candidate.json \
+  --workspace <materialized-base-repo> \
+  --prompt-file tasks/<task_id>/public/prompt.txt \
+  --export-workspace candidate-state.tar.zst \
+  --run-dir attempts/<attempt_id>
+
+ghostlab scorer-run \
+  --task tasks/<task_id>/public/task.json \
+  --scorer tasks/<task_id>/private/scorer/scorer.json \
+  --candidate attempts/<attempt_id>/candidate-state.tar.zst \
+  --trace attempts/<attempt_id>/events.jsonl \
+  --output attempts/<attempt_id>/score-report.json
+```
+
+The workspace is uploaded into an OpenShell sandbox, so the agent edits a
+throwaway copy. Before that sandbox is deleted, `--export-workspace` takes a
+canonical export: sorted paths with modes, sizes, and SHA-256 hashes in
+`status.json`, a `diff.patch`, an `untracked.json`, and a deterministic archive
+of exactly those files. Changed and untracked files are kept; `.git/` and the
+usual build and cache directories are not.
+
+`scorer-run` never reuses the agent's sandbox. The candidate is mounted
+read-only at `/candidate/repo`, hidden fixtures live outside it, and only
+`/output` and `/tmp` are writable. The agent's trace is redacted down to tool
+and timing evidence first, so the scorer cannot see who produced the candidate. The deterministic phase runs with no network
+and no provider credentials even though it executes candidate code; a hybrid
+scorer's residual judge gets provider access in a second sandbox that cannot
+execute anything. Ghostlab computes the total outside both sandboxes: weights
+must sum to `1.0`, a failed hard gate forces `0`, and unscored soft components
+are reported rather than renormalized away. Scorer crashes, timeouts, judge
+outages, and unusable candidate artifacts get their own statuses and are never
+turned into a zero.
+
+`ghostlab scorecard --attempts <dir>` then rolls attempts up with equal weight
+per rollout source, reporting pass rate, per-component means, seed spread,
+valid coverage, and the error counts it deliberately excluded from the score.
 
 ### MCP Apps: `apps-probe` / `apps-render`
 

@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import RunnerConfig
 from .sandbox import OpenShellSandbox, SandboxError
@@ -80,6 +81,40 @@ class AgentRunner:
 
     def run_turn(self, prompt: str) -> RunnerResult:
         raise NotImplementedError
+
+    @property
+    def sandbox_handle(self) -> "OpenShellSandbox | None":
+        """The sandbox this runner owns, when it owns one."""
+        return None
+
+    def export_artifact(self, remote_path: str, destination: Path) -> None:
+        """Copy one artifact out of the runner's sandbox before ``close``.
+
+        Exposed on the runner because a run's outputs only exist while the
+        sandbox does, and ``close()`` deletes it.
+        """
+        raise SandboxError(
+            "export_unsupported",
+            f"{type(self).__name__} has no sandbox to export from; "
+            "artifact export requires sandbox.backend: openshell",
+        )
+
+    def export_workspace(
+        self,
+        *,
+        destination: Path,
+        workdir: str = "",
+        excludes: "list[str] | None" = None,
+        retain: "list[str] | None" = None,
+        archive_name: str = "state.tar.zst",
+        timeout: int = 900,
+    ) -> dict:
+        """Canonically export the runner's mutable workspace before ``close``."""
+        raise SandboxError(
+            "export_unsupported",
+            f"{type(self).__name__} has no sandbox workspace to export; "
+            "workspace export requires sandbox.backend: openshell",
+        )
 
     def close(self) -> None:
         """Release runner-owned resources."""
@@ -311,6 +346,10 @@ class OpenShellProcessRunner(AgentRunner):
                 stderr=result.stderr.strip(),
             )
         except SandboxError as exc:
+            # A turn that ran out of time is a different outcome from a sandbox
+            # that could not be set up; the local path already says so with 124.
+            if exc.kind == "sandbox_timeout":
+                return RunnerResult(output="", exit_code=124, timed_out=True, stderr=str(exc))
             return RunnerResult(output="", exit_code=125, stderr=str(exc))
 
     def run_turn(self, prompt: str) -> RunnerResult:
@@ -318,6 +357,37 @@ class OpenShellProcessRunner(AgentRunner):
         if isinstance(prepared, RunnerResult):
             return prepared
         return self._run(*prepared)
+
+    @property
+    def sandbox_handle(self) -> "OpenShellSandbox | None":
+        return self.sandbox
+
+    def export_artifact(self, remote_path: str, destination: Path) -> None:
+        self.sandbox.create()
+        self.sandbox.download(remote_path, destination)
+
+    def export_workspace(
+        self,
+        *,
+        destination: Path,
+        workdir: str = "",
+        excludes: "list[str] | None" = None,
+        retain: "list[str] | None" = None,
+        archive_name: str = "state.tar.zst",
+        timeout: int = 900,
+    ) -> dict:
+        from .sandbox import export_workspace as _export
+
+        self.sandbox.create()
+        return _export(
+            self.sandbox,
+            workdir=workdir or str(self.config.sandbox.get("workdir") or "/sandbox"),
+            destination=destination,
+            excludes=excludes,
+            retain=retain,
+            archive_name=archive_name,
+            timeout=timeout,
+        )
 
     def close(self) -> None:
         self.sandbox.close()
@@ -403,22 +473,41 @@ class OpencodeProcessRunner(ProcessRunner):
     """
 
     def run_turn(self, prompt: str) -> RunnerResult:
-        result = super().run_turn(prompt)
-        from .tool_capture import parse_opencode_output
+        return _opencode_error_result(super().run_turn(prompt))
 
-        errors = parse_opencode_output(result.output).get("errors") or []
-        if errors and result.exit_code == 0:
-            detail = "; ".join(errors)[:500]
-            return RunnerResult(
-                output=result.output,
-                exit_code=1,
-                timed_out=result.timed_out,
-                stderr=(f"opencode error: {detail}\n{result.stderr}").strip(),
-            )
-        return result
+
+class OpenShellOpencodeProcessRunner(OpenShellProcessRunner):
+    """Opencode runner whose turns execute inside one OpenShell sandbox."""
+
+    def run_turn(self, prompt: str) -> RunnerResult:
+        return _opencode_error_result(super().run_turn(prompt))
+
+
+def _opencode_error_result(result: RunnerResult) -> RunnerResult:
+    from .tool_capture import parse_opencode_output
+
+    errors = parse_opencode_output(result.output).get("errors") or []
+    if errors and result.exit_code == 0:
+        detail = "; ".join(errors)[:500]
+        return RunnerResult(
+            output=result.output,
+            exit_code=1,
+            timed_out=result.timed_out,
+            stderr=(f"opencode error: {detail}\n{result.stderr}").strip(),
+        )
+    return result
 
 
 def create_runner(config: RunnerConfig, name: str) -> AgentRunner:
+    """Historical dispatch: an opencode runner is a host process.
+
+    The job flows build the OpenShell boundary around opencode themselves (the
+    runner command is already an SSH invocation into the sandbox), so promoting
+    `sandbox.backend: openshell` here would double-wrap every existing run and
+    dataset. Callers that need the runner itself to own the sandbox — and with
+    it the pre-close export hook — ask for that explicitly via
+    :func:`create_sandboxed_runner`.
+    """
     if config.kind == "mock":
         return MockRunner(name)
     if config.parser in ("opencode-json", "opencode-text"):
@@ -443,3 +532,29 @@ def create_runner(config: RunnerConfig, name: str) -> AgentRunner:
     if config.kind == "copilot-session":
         return CopilotSessionRunner(config)
     raise ValueError(f"Unsupported runner kind: {config.kind}")
+
+
+def create_sandboxed_runner(config: RunnerConfig, name: str) -> AgentRunner:
+    """A runner that owns its OpenShell sandbox, and therefore can export from it.
+
+    Opt-in on purpose. :func:`create_runner` keeps the dispatch every existing
+    job depends on; a caller that needs the runner to be the boundary — because
+    it must copy artifacts out before teardown — says so by calling this.
+    """
+    backend = str((config.sandbox or {}).get("backend", "local"))
+    if backend != "openshell":
+        raise ValueError(
+            "a sandboxed runner requires sandbox.backend: openshell, got "
+            f"{backend!r}; the agent must edit an uploaded copy, not the host"
+        )
+    if config.parser in ("opencode-json", "opencode-text"):
+        return OpenShellOpencodeProcessRunner(config, name)
+    if config.kind == "process":
+        if config.parser == "copilot-json":
+            return OpenShellCopilotProcessRunner(config, name)
+        return OpenShellProcessRunner(config, name)
+    if config.kind == "codex-session":
+        return OpenShellCodexSessionRunner(config, name)
+    if config.kind == "copilot-session":
+        return OpenShellCopilotSessionRunner(config, name)
+    raise ValueError(f"Unsupported sandboxed runner kind: {config.kind}")

@@ -792,10 +792,121 @@ def build_parser() -> argparse.ArgumentParser:
         "scorecard", help="Roll a dataset run up into one MCP validation report."
     )
     scorecard_parser.add_argument(
-        "--results", required=True, type=Path, help="Summary dir or results.json from run-dataset."
+        "--results", type=Path, default=None,
+        help="Summary dir or results.json from run-dataset.",
+    )
+    scorecard_parser.add_argument(
+        "--attempts", type=Path, action="append", default=None,
+        help="Benchmark attempt.json file, JSON array, or a directory to scan "
+             "(repeatable). Produces a source-normalized benchmark scorecard "
+             "instead of the MCP dataset report.",
+    )
+    scorecard_parser.add_argument(
+        "--token-budget", type=float, action="append", default=None,
+        help="Report the benchmark score conditional on this total-token budget "
+             "(repeatable, benchmark mode only).",
+    )
+    scorecard_parser.add_argument(
+        "--wall-time-budget-ms", type=float, action="append", default=None,
+        help="Report the benchmark score conditional on this wall-time budget in "
+             "milliseconds (repeatable, benchmark mode only).",
     )
     scorecard_parser.add_argument(
         "--output-dir", type=Path, default=None, help="Where to write scorecard.* (default: the summary dir)."
+    )
+
+    artifact_parser = sub.add_parser(
+        "artifact-run",
+        help="Run one configured agent once on a mutable workspace and export artifacts.",
+    )
+    artifact_parser.add_argument(
+        "--agent", required=True, type=Path, help="Agent definition JSON/YAML."
+    )
+    artifact_parser.add_argument(
+        "--workspace", type=Path, default=None,
+        help="Directory uploaded as the agent's mutable workspace (default: the "
+             "agent config's own `workspace`).",
+    )
+    artifact_parser.add_argument("--prompt", default="", help="The single user message.")
+    artifact_parser.add_argument(
+        "--prompt-file", type=Path, default=None, help="File holding the single user message."
+    )
+    artifact_parser.add_argument(
+        "--export", action="append", default=None, metavar="REMOTE[=NAME]",
+        help="Download a sandbox path into the run dir before teardown (repeatable).",
+    )
+    artifact_parser.add_argument(
+        "--export-workspace", default="", metavar="ARCHIVE",
+        help="Canonically export the agent's workspace as this archive name "
+             "(e.g. candidate-state.tar.zst).",
+    )
+    artifact_parser.add_argument(
+        "--workspace-exclude", action="append", default=None,
+        help="Additional directory name excluded from the workspace export, on "
+             "top of the defaults (repeatable).",
+    )
+    artifact_parser.add_argument(
+        "--workspace-retain", action="append", default=None,
+        help="Relative path kept in the export even when an exclusion covers it "
+             "(repeatable).",
+    )
+    artifact_parser.add_argument(
+        "--output-contract", type=Path, default=None,
+        help="JSON Schema the exported JSON output must satisfy.",
+    )
+    artifact_parser.add_argument(
+        "--contract-target", default="",
+        help="Which exported file the output contract applies to (default: the first --export).",
+    )
+    artifact_parser.add_argument(
+        "--run-dir", required=True, type=Path, help="Where to write artifact-run.json and exports."
+    )
+    artifact_parser.add_argument(
+        "--timeout", type=int, default=0, help="Override the runner's turn timeout in seconds."
+    )
+    artifact_parser.add_argument(
+        "--keep-sandbox", action="store_true", help="Leave the sandbox running for inspection."
+    )
+
+    scorer_parser = sub.add_parser(
+        "scorer-run",
+        help="Score one candidate workspace with a hidden scorer package.",
+    )
+    scorer_parser.add_argument(
+        "--task", required=True, type=Path, help="Published public/task.json."
+    )
+    scorer_parser.add_argument(
+        "--scorer", required=True, type=Path, help="Scorer package manifest (scorer.json)."
+    )
+    scorer_parser.add_argument(
+        "--candidate", required=True, type=Path,
+        help="Candidate workspace archive (or directory) exported by artifact-run.",
+    )
+    scorer_parser.add_argument(
+        "--trace", type=Path, default=None, help="Agent-under-test events.jsonl."
+    )
+    scorer_parser.add_argument(
+        "--resources", type=Path, default=None, help="Resource-usage JSON for the attempt."
+    )
+    scorer_parser.add_argument(
+        "--output", required=True, type=Path, help="Where to write score-report.json."
+    )
+    scorer_parser.add_argument(
+        "--run-dir", type=Path, default=None,
+        help="Directory for scorer logs and staging (default: the output's directory).",
+    )
+    scorer_parser.add_argument("--attempt-id", default="", help="Attempt identifier to record.")
+    scorer_parser.add_argument("--seed", type=int, default=0, help="Seed handed to the scorer.")
+    scorer_parser.add_argument(
+        "--repeat", type=int, default=1,
+        help="Run the deterministic phase this many times and report whether the "
+             "component values reproduced exactly (default: 1).",
+    )
+    scorer_parser.add_argument(
+        "--judge-model", default="", help="Override the judge agent's pinned model."
+    )
+    scorer_parser.add_argument(
+        "--keep-sandbox", action="store_true", help="Leave scorer sandboxes running for inspection."
     )
 
     apps_parser = sub.add_parser(
@@ -3624,6 +3735,11 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 def cmd_scorecard(args: argparse.Namespace) -> int:
     from .scorecard import build_scorecard, load_summary, write_scorecard_artifacts
 
+    if args.attempts:
+        return _cmd_benchmark_scorecard(args)
+    if args.results is None:
+        raise ConfigError("scorecard needs --results (dataset run) or --attempts (benchmark)")
+
     results_path = args.results
     summary_file = results_path / "results.json" if results_path.is_dir() else results_path
     if not summary_file.exists():
@@ -3650,6 +3766,140 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
     print(f"  wrote {md_path}")
     print(f"  wrote {json_path}")
     return 0
+
+
+def _cmd_benchmark_scorecard(args: argparse.Namespace) -> int:
+    """Source-normalized aggregation over benchmark attempt records."""
+    from .scorecard import (
+        build_benchmark_scorecard, load_attempts, write_benchmark_scorecard,
+    )
+
+    paths = [Path(path) for path in args.attempts]
+    for path in paths:
+        if not path.exists():
+            raise ConfigError(f"attempts path not found: {path}")
+    attempts = load_attempts(paths)
+    if not attempts:
+        raise ConfigError(f"no attempt records found in: {', '.join(str(p) for p in paths)}")
+    base_dir = paths[0] if paths[0].is_dir() else paths[0].parent
+    scorecard = build_benchmark_scorecard(
+        attempts,
+        base_dir,
+        token_budgets=list(args.token_budget or []),
+        wall_time_budgets_ms=list(args.wall_time_budget_ms or []),
+    )
+    out_dir = args.output_dir or base_dir
+    json_path, md_path = write_benchmark_scorecard(scorecard, out_dir)
+    print(f"Benchmark scorecard over {scorecard['attempts']} attempt(s)")
+    for agent_id, agent in scorecard["agents"].items():
+        score = agent["benchmark_score"]
+        coverage = agent["coverage"]
+        print(
+            f"  {agent_id}: score={'n/a' if score is None else f'{score:.3f}'}"
+            f" coverage={coverage['scored']}/{coverage['requested']}"
+            + (f" excluded={sum(agent['errors'].values())}" if agent["errors"] else "")
+        )
+    print(f"  wrote {md_path}")
+    print(f"  wrote {json_path}")
+    return 0
+
+
+def cmd_artifact_run(args: argparse.Namespace) -> int:
+    """One configured agent, one prompt, one mutable workspace, declared exports."""
+    from .artifact_run import STATUS_COMPLETED, ArtifactRunError, run_artifact
+    from .config import artifact_run_config
+
+    config = artifact_run_config(
+        agent=args.agent,
+        run_dir=args.run_dir,
+        prompt=args.prompt,
+        prompt_file=args.prompt_file,
+        workspace=args.workspace,
+        exports=list(args.export or []),
+        export_workspace=args.export_workspace,
+        output_contract=args.output_contract,
+        contract_target=args.contract_target,
+        timeout_seconds=args.timeout,
+        workspace_excludes=list(args.workspace_exclude or []),
+        workspace_retain=list(args.workspace_retain or []),
+        keep_sandbox=args.keep_sandbox,
+    )
+    try:
+        result = run_artifact(config)
+    except ArtifactRunError as exc:
+        raise ConfigError(str(exc)) from exc
+
+    manifest = result.manifest
+    label = "pass" if result.status == STATUS_COMPLETED else "fail"
+    print(tc.verdict(f"artifact-run {result.status}", label))
+    print(f"  agent={manifest['agent_id']} model={manifest['model'] or 'n/a'}")
+    print(
+        f"  workspace_input_sha256={manifest['workspace_input_sha256'][:12]}"
+        + (
+            f" workspace_output_sha256={manifest['workspace_output_sha256'][:12]}"
+            if manifest["workspace_output_sha256"]
+            else ""
+        )
+    )
+    for export in manifest["exports"]:
+        print(f"  exported {export['path']} ({export['sha256'][:12]})")
+    for warning in manifest.get("warnings", []):
+        print(tc.muted(f"  warning: {warning}"))
+    for error in manifest.get("contract_errors", [])[:5]:
+        print(f"  contract: {error}")
+    if manifest.get("export_error"):
+        print(f"  export error: {manifest['export_error']}")
+    if manifest.get("error"):
+        print(f"  error: {manifest['error']}")
+    print(f"  wrote {result.manifest_path}")
+    return 0 if result.status == STATUS_COMPLETED else 1
+
+
+def cmd_scorer_run(args: argparse.Namespace) -> int:
+    """Score one candidate workspace in fresh, isolated scorer sandboxes."""
+    from .scorers import STATUS_SCORED, ScorerRunConfig, run_scorer
+
+    output = Path(args.output)
+    config = ScorerRunConfig(
+        task=Path(args.task),
+        scorer=Path(args.scorer),
+        candidate=Path(args.candidate),
+        output=output,
+        run_dir=Path(args.run_dir) if args.run_dir else output.parent,
+        attempt_id=args.attempt_id,
+        seed=args.seed,
+        trace=Path(args.trace) if args.trace else None,
+        resources=Path(args.resources) if args.resources else None,
+        keep_sandbox=args.keep_sandbox,
+        judge_model=args.judge_model,
+        repeat=args.repeat,
+    )
+    report = run_scorer(config)
+    status = str(report.get("status"))
+    label = "pass" if status == STATUS_SCORED and report.get("passed") else (
+        "warn" if status == STATUS_SCORED else "fail"
+    )
+    score = report.get("score_total")
+    print(tc.verdict(f"scorer-run {status}", label))
+    print(
+        f"  score_total={'n/a' if score is None else f'{score:.3f}'}"
+        f" passed={report.get('passed')} valid={report.get('valid')}"
+    )
+    for component in report.get("components", []):
+        value = component.get("value")
+        print(
+            f"  - {component['id']}: "
+            + ("unscored" if value is None else f"{value:.3f}")
+            + f" (weight {component['weight']:.2f}"
+            + (", hard gate" if component.get("hard_gate") else "")
+            + ")"
+        )
+    for gate in report.get("hard_gate_failures", []):
+        print(f"  ! hard gate failed: {gate}")
+    for warning in report.get("warnings", [])[:5]:
+        print(tc.muted(f"  warning: {warning}"))
+    print(f"  wrote {args.output}")
+    return 0 if status == STATUS_SCORED else 1
 
 
 def cmd_critique(args: argparse.Namespace) -> int:
@@ -3903,6 +4153,8 @@ _HANDLERS.update(
         "critique": cmd_critique,
         "compare": cmd_compare,
         "scorecard": cmd_scorecard,
+        "artifact-run": cmd_artifact_run,
+        "scorer-run": cmd_scorer_run,
         "apps-probe": cmd_apps_probe,
         "apps-render": cmd_apps_render,
         "db": cmd_db,

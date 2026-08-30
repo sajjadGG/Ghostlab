@@ -517,6 +517,163 @@ ghostlab scorecard --results runs/<id>-summary
 
 Writes `scorecard.json` and `scorecard.md` into the summary directory.
 
+With `--attempts` the same command aggregates benchmark attempts instead, using
+the source-normalized macro-average described under
+[`scorer-run`](#scorer-run):
+
+```bash
+ghostlab scorecard --attempts benchmarks/demo/attempts --output-dir benchmarks/demo
+ghostlab scorecard --attempts attempts.json --token-budget 200000 --wall-time-budget-ms 900000
+```
+
+Each attempt record carries `task_id`, `source_id`, `agent_id`, `seed`,
+`status`, `score`, and either an inline `report` or a `score_report` path. Tasks
+are averaged within their source before sources are averaged, so a rollout that
+yielded three tasks does not get three times the weight. Attempts that produced
+no number — `scorer_error`, `scorer_timeout`, `judge_unavailable`,
+`invalid_candidate_artifact`, or a report whose unscored weight exceeded the
+20% limit — are reported as coverage loss and error counts, never as zeros.
+Writes `benchmark-scorecard.json` and `benchmark-scorecard.md`.
+
+## artifact-run
+
+Run one configured agent once on a mutable workspace, export declared
+artifacts, and record the full trace. Unlike [`run`](#run) there is no user
+emulator, no turn loop, and no message-based verdict: the result of an artifact
+run is what the agent left on disk.
+
+The workspace is uploaded into an OpenShell sandbox, so the agent edits a
+throwaway copy and the directory you pointed at is never modified. The agent
+config must declare `sandbox.backend: openshell`; `artifact-run` asks for a
+runner that owns its own sandbox (which is what makes the pre-close export
+possible), rather than the host-process runner that `run` and `run-dataset`
+use.
+
+```bash
+ghostlab artifact-run \
+  --agent agents/task-definer.json \
+  --workspace benchmarks/demo/sources/<source_id> \
+  --prompt-file prompts/task-definer-run.md \
+  --output-contract schemas/task-definitions.schema.json \
+  --export /sandbox/output/task-definitions.json=task-definitions.json \
+  --run-dir runs/task-definer
+```
+
+For an agent under test, export the repository it produced:
+
+```bash
+ghostlab artifact-run \
+  --agent agents/candidate.json \
+  --workspace <materialized-base-repo> \
+  --prompt-file tasks/<task_id>/public/prompt.txt \
+  --export-workspace candidate-state.tar.zst \
+  --run-dir attempts/<attempt_id>
+```
+
+`--export-workspace` produces a canonical, filtered export *before* the sandbox
+is torn down:
+
+| Artifact | Contents |
+| --- | --- |
+| `workspace-export/status.json` | sorted relative paths with mode, size, SHA-256, and the canonical `state_sha256` |
+| `workspace-export/diff.patch` | `git diff HEAD` when the workspace is a Git worktree |
+| `workspace-export/untracked.json` | untracked and changed paths from `git status --porcelain=v2` |
+| `<archive>` | deterministic archive of exactly the files in `status.json` |
+
+Changed and untracked files are included; `.git/`, `.venv/`, `node_modules/`,
+`target/`, `dist/`, `build/`, `__pycache__/` and `.pytest_cache/` are excluded.
+Add project-specific exclusions with `--workspace-exclude` (repeatable, on top
+of the defaults) and keep a normally excluded path with `--workspace-retain`. The exclusion set
+is part of `state_sha256`, so two exports taken under different rules are
+different states. The archive is written as `.tar.zst` when the sandbox image
+provides `zstd` and as `.tar.gz` otherwise, with the fallback recorded in the
+manifest warnings rather than hidden behind the requested name.
+
+`artifact-run.json` records the status, the agent-config/prompt/workspace
+hashes, the resolved runner, timing, and every export. The status is exact:
+
+| Status | Meaning |
+| --- | --- |
+| `completed` | the turn finished, exports succeeded, and any output contract passed |
+| `timed_out` | the runner hit its turn timeout |
+| `model_unavailable` | the agent CLI failed with a provider/model error |
+| `agent_error` | the agent CLI failed for another reason |
+| `export_failed` | the run finished but a declared export could not be produced |
+| `output_contract_failed` | the exported JSON did not satisfy `--output-contract` |
+| `sandbox_error` | the sandbox could not be created, or the turn failed inside the sandbox runtime |
+| `harness_error` | Ghostlab itself failed while recording or exporting the run |
+
+Exit code is 0 only for `completed`.
+
+## scorer-run
+
+Score one candidate workspace with a hidden scorer package and write a
+`retro-score-report-v1` report.
+
+```bash
+ghostlab scorer-run \
+  --task tasks/<task_id>/public/task.json \
+  --scorer tasks/<task_id>/private/scorer/scorer.json \
+  --candidate attempts/<attempt_id>/candidate-state.tar.zst \
+  --trace attempts/<attempt_id>/events.jsonl \
+  --output attempts/<attempt_id>/score-report.json
+```
+
+The scorer never reuses the sandbox that produced the candidate. A fresh
+sandbox mounts the candidate read-only at `/candidate/repo`, the scorer package
+at `/scorer`, hidden fixtures at `/fixtures`, and the scorer input at `/input`;
+only `/output` and `/tmp` are writable. It has no network policy and no
+providers, so a hostile candidate implementation has no credentials to steal
+even though its code executes.
+
+The scorer sees no candidate identity. `--trace` is redacted before it is
+staged: only `agent.tool_call` events survive, and only their `server`, `tool`,
+`status`, and `duration_ms` fields. Run lifecycle events, the agent id, the host
+workspace path, input/output hashes, tool-call arguments, and the model's own
+stderr are all dropped, because a scorer that can read them can be steered by
+who produced the candidate rather than by what the candidate did.
+
+Every path in `scorer.json` — the judge agent config, its prompt, its output
+schema — must resolve inside the scorer package, and a package containing a
+symlink that points outside it is rejected: the package hash is what the audit
+signs off on, so nothing the hash cannot cover is allowed into the mounts.
+Internal symlinks are hashed by target, so retargeting one changes the scorer's
+identity.
+
+A judge block is only meaningful in `mode: judge`, `hybrid`, or `agentic`, or
+alongside a `kind: judge` component. A `deterministic` manifest that still
+declares `judge.criteria` is rejected rather than quietly scheduling a judge
+phase against paths the loader never validated.
+
+For `mode: hybrid`, the deterministic sandbox is deleted as soon as its
+component report is downloaded, and a second sandbox scores the declared
+residual criteria. That one has provider access but cannot execute anything:
+its pinned agent config must declare `tools.bash: false`, `tools.webfetch:
+false`, and `permission.bash/edit/external_directory: deny`, and it never sees
+the fixtures or the scorer code.
+
+The total is computed by Ghostlab outside both sandboxes, not by the scorer:
+component weights must sum to `1.0`, any failed hard gate forces
+`score_total = 0`, and missing or `CANNOT_ASSESS` soft components are reported
+as unscored weight rather than renormalized away. A result with more than 20%
+of its weight unscored is marked `valid: false`.
+
+| Status | Meaning |
+| --- | --- |
+| `scored` | the scorer ran correctly; `score_total` is a real number, including `0` |
+| `invalid_candidate_artifact` | the candidate archive was missing, corrupt, or unsafe to extract |
+| `scorer_error` | the scorer crashed, produced no report, or reported something the manifest does not declare |
+| `scorer_timeout` | the scorer exceeded `runtime.timeout_seconds` |
+| `judge_unavailable` | the residual judge could not produce a usable verdict |
+
+Only `scored` carries a number. Harness and scorer failures are never converted
+to zero — they are excluded from aggregation and counted separately.
+
+`--repeat N` runs the deterministic phase N times in N fresh sandboxes and adds
+a `repeatability` block naming any component whose value did not reproduce
+exactly, plus the spread of the weighted totals. Ghostlab reports the fact; the
+publication gate that acts on it belongs to whatever builds the task.
+
 ## doctor
 
 Validate the agent, runner, and OpenShell setup. The default check resolves the
