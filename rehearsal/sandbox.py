@@ -41,7 +41,12 @@ class SandboxError(RuntimeError):
         super().__init__(f"{kind}: {detail}")
 
 
-def normalize_sandbox(raw: dict[str, Any] | None, base_dir: Path | None = None) -> dict[str, Any]:
+def normalize_sandbox(
+    raw: dict[str, Any] | None,
+    base_dir: Path | None = None,
+    *,
+    allow_roots: tuple[str, ...] = ("/sandbox",),
+) -> dict[str, Any]:
     config = {**DEFAULT_SANDBOX, **dict(raw or {})}
     backend = str(config.get("backend", "openshell"))
     if backend not in ("openshell", "local"):
@@ -66,8 +71,13 @@ def normalize_sandbox(raw: dict[str, Any] | None, base_dir: Path | None = None) 
         if not source.is_absolute() and base_dir is not None:
             source = base_dir / source
         target = str(item.get("target") or f"/sandbox/workspace/{source.name}")
-        if target != "/sandbox" and not target.startswith("/sandbox/"):
-            raise SandboxError("sandbox_config", "upload targets must be under /sandbox")
+        if not any(
+            target == root or target.startswith(f"{root.rstrip('/')}/") for root in allow_roots
+        ):
+            raise SandboxError(
+                "sandbox_config",
+                "upload targets must be under " + " or ".join(allow_roots),
+            )
         uploads.append({"source": str(source.resolve()), "target": target})
     config["uploads"] = uploads
     policy = config.get("policy")
@@ -331,6 +341,76 @@ class OpenShellSandbox:
 
 
 MCP_UPLOAD_ROOT = "/sandbox/mcp"
+
+# Where the canonical exporter and its output live inside a sandbox. Both sit
+# under /sandbox because that is the one root every Ghostlab policy grants the
+# sandboxed process write access to.
+EXPORT_TOOL_REMOTE = "/sandbox/.ghostlab/workspace_export.py"
+WORKSPACE_ARTIFACT_ROOT = "/sandbox/artifacts/workspace"
+
+
+def export_workspace(
+    sandbox: OpenShellSandbox,
+    *,
+    workdir: str,
+    destination: Path,
+    excludes: "list[str] | None" = None,
+    retain: "list[str] | None" = None,
+    archive_name: str = "state.tar.zst",
+    timeout: int = 900,
+) -> dict[str, Any]:
+    """Canonically export ``workdir`` from a live sandbox into ``destination``.
+
+    Runs :mod:`rehearsal.workspace_export` *inside* the sandbox — the same file
+    the host uses to fingerprint the uploaded workspace — then brings the four
+    artifacts back with the existing ``download``. Must be called before
+    :meth:`OpenShellSandbox.close`, which deletes the workload.
+    """
+    from . import workspace_export
+
+    if not sandbox.created:
+        raise SandboxError("sandbox_export_failed", "sandbox is not running")
+
+    tool = Path(workspace_export.__file__)
+    sandbox.upload_file(tool, EXPORT_TOOL_REMOTE)
+    command = [
+        "python3", EXPORT_TOOL_REMOTE,
+        "--root", workdir,
+        "--out", WORKSPACE_ARTIFACT_ROOT,
+        "--archive-name", archive_name,
+    ]
+    for name in excludes or list(workspace_export.DEFAULT_EXCLUDES):
+        command += ["--exclude", str(name)]
+    for name in retain or []:
+        command += ["--retain", str(name)]
+
+    result = sandbox.exec(command, input_text=None, env={}, timeout=timeout)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "workspace export failed").strip()[-2000:]
+        raise SandboxError("sandbox_export_failed", detail)
+
+    summary: dict[str, Any] = {}
+    for line in (result.stdout or "").splitlines():
+        if line.startswith(workspace_export.SUMMARY_PREFIX):
+            import json as _json
+
+            summary = _json.loads(line[len(workspace_export.SUMMARY_PREFIX):])
+    if not summary:
+        raise SandboxError(
+            "sandbox_export_failed",
+            "workspace exporter produced no summary; "
+            f"stdout tail: {(result.stdout or '').strip()[-500:]}",
+        )
+
+    destination.mkdir(parents=True, exist_ok=True)
+    downloaded: dict[str, str] = {}
+    for name in ("status.json", "diff.patch", "untracked.json", str(summary["archive"])):
+        local = destination / name
+        sandbox.download(f"{WORKSPACE_ARTIFACT_ROOT}/{name}", local)
+        if not local.exists():
+            raise SandboxError("sandbox_download_failed", f"{name} was not written to {local}")
+        downloaded[name] = str(local)
+    return {**summary, "files": downloaded, "archive_path": downloaded[str(summary["archive"])]}
 
 
 def _covered_by_uploads(path: Path, uploads: list[dict[str, Any]]) -> bool:

@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import unittest
 
-from rehearsal.scorecard import aggregate, render_scorecard_md
+from rehearsal.scorecard import (
+    aggregate,
+    aggregate_attempts,
+    build_benchmark_scorecard,
+    load_attempts,
+    render_benchmark_scorecard_md,
+    render_scorecard_md,
+)
 
 CASES = [
     {
@@ -106,6 +113,192 @@ class RenderTest(unittest.TestCase):
         self.assertIn("`kb_find` × 1", md)
         self.assertIn("Tool reliability", md)
         self.assertIn("(2×) Document id format", md)
+
+
+def attempt(
+    task_id: str,
+    source_id: str,
+    *,
+    agent: str = "a1",
+    seed: int = 0,
+    score: float | None = 1.0,
+    status: str = "scored",
+    passed: bool | None = None,
+    tokens: int = 100,
+    wall_time_ms: int = 1000,
+    components: list | None = None,
+    valid: bool | None = None,
+) -> dict:
+    report = {
+        "schema_version": "retro-score-report-v1",
+        "task_id": task_id,
+        "status": status,
+        "score_total": score,
+        "pass_threshold": 0.8,
+        "components": components or [],
+    }
+    if valid is not None:
+        report["valid"] = valid
+    record = {
+        "schema_version": "retro-benchmark-attempt-v1",
+        "attempt_id": f"{task_id}-{agent}-{seed}",
+        "task_id": task_id,
+        "source_id": source_id,
+        "agent_id": agent,
+        "seed": seed,
+        "status": status,
+        "score": score,
+        "tokens": {"input": tokens, "output": 0, "cached": 0},
+        "wall_time_ms": wall_time_ms,
+        "report": report,
+    }
+    if passed is not None:
+        record["passed"] = passed
+    return record
+
+
+class BenchmarkAggregationTest(unittest.TestCase):
+    """Section 16: source-normalized macro-average, with invalid runs excluded."""
+
+    def test_sources_are_weighted_equally_regardless_of_task_count(self) -> None:
+        # r1 yielded three tasks, r2 one. Without source normalization r1 would
+        # carry three quarters of the benchmark.
+        attempts = [
+            attempt("t1", "r1", score=0.0),
+            attempt("t2", "r1", score=0.0),
+            attempt("t3", "r1", score=0.0),
+            attempt("t4", "r2", score=1.0),
+        ]
+        agent = aggregate_attempts(attempts)["agents"]["a1"]
+        self.assertEqual(agent["benchmark_score"], 0.5)
+        self.assertEqual(agent["per_source"]["r1"]["tasks"], 3)
+        self.assertEqual(agent["per_source"]["r2"]["score"], 1.0)
+
+    def test_seeds_are_averaged_within_a_task_and_reported_as_spread(self) -> None:
+        attempts = [
+            attempt("t1", "r1", seed=0, score=1.0),
+            attempt("t1", "r1", seed=1, score=0.0),
+        ]
+        agent = aggregate_attempts(attempts)["agents"]["a1"]
+        self.assertEqual(agent["per_task"]["t1"]["score"], 0.5)
+        self.assertEqual(agent["per_task"]["t1"]["seeds"], 2)
+        self.assertEqual(agent["per_task"]["t1"]["seed_std"], 0.5)
+        self.assertEqual(agent["benchmark_score"], 0.5)
+
+    def test_scorer_and_harness_failures_never_become_zeros(self) -> None:
+        attempts = [
+            attempt("t1", "r1", score=1.0),
+            attempt("t2", "r2", score=None, status="scorer_error"),
+            attempt("t3", "r3", score=None, status="scorer_timeout"),
+            attempt("t4", "r4", score=None, status="judge_unavailable"),
+            attempt("t5", "r5", score=None, status="invalid_candidate_artifact"),
+        ]
+        agent = aggregate_attempts(attempts)["agents"]["a1"]
+        self.assertEqual(agent["benchmark_score"], 1.0)
+        self.assertEqual(agent["coverage"], {
+            "requested": 5, "scored": 1, "invalid": 4, "ratio": 0.2,
+        })
+        self.assertEqual(
+            agent["errors"],
+            {
+                "scorer_error": 1, "scorer_timeout": 1,
+                "judge_unavailable": 1, "invalid_candidate_artifact": 1,
+            },
+        )
+
+    def test_a_report_marked_invalid_is_excluded_and_accounted(self) -> None:
+        attempts = [
+            attempt("t1", "r1", score=0.9, valid=False),
+            attempt("t2", "r2", score=0.5),
+        ]
+        agent = aggregate_attempts(attempts)["agents"]["a1"]
+        self.assertEqual(agent["benchmark_score"], 0.5)
+        self.assertEqual(agent["errors"], {"invalid_unscored_weight": 1})
+        self.assertEqual(agent["coverage"]["scored"], 1)
+
+    def test_pass_rate_and_component_means_come_from_valid_attempts_only(self) -> None:
+        attempts = [
+            attempt(
+                "t1", "r1", score=1.0, passed=True,
+                components=[{"id": "behavior", "value": 1.0}],
+            ),
+            attempt(
+                "t2", "r2", score=0.4, passed=False,
+                components=[{"id": "behavior", "value": 0.4}],
+            ),
+            attempt("t3", "r3", score=None, status="scorer_error"),
+        ]
+        agent = aggregate_attempts(attempts)["agents"]["a1"]
+        self.assertEqual(agent["pass_rate"], 0.5)
+        self.assertEqual(agent["per_component"]["behavior"],
+                         {"mean": 0.7, "observations": 2})
+        self.assertEqual(agent["usage"]["tokens_per_scored_attempt"], 100.0)
+
+    def test_budgeted_score_zeroes_over_budget_attempts(self) -> None:
+        attempts = [
+            attempt("t1", "r1", score=1.0, tokens=50, wall_time_ms=100),
+            attempt("t2", "r2", score=1.0, tokens=5000, wall_time_ms=90_000),
+        ]
+        agent = aggregate_attempts(
+            attempts, token_budgets=[1000], wall_time_budgets_ms=[1000]
+        )["agents"]["a1"]
+        self.assertEqual(agent["benchmark_score"], 1.0)
+        self.assertEqual(
+            agent["budgeted_scores"],
+            [
+                {"budget": "tokens", "limit": 1000.0, "benchmark_score": 0.5},
+                {"budget": "wall_time_ms", "limit": 1000.0, "benchmark_score": 0.5},
+            ],
+        )
+
+    def test_agents_are_aggregated_independently(self) -> None:
+        attempts = [
+            attempt("t1", "r1", agent="a1", score=1.0),
+            attempt("t1", "r1", agent="a2", score=0.0),
+        ]
+        agents = aggregate_attempts(attempts)["agents"]
+        self.assertEqual(agents["a1"]["benchmark_score"], 1.0)
+        self.assertEqual(agents["a2"]["benchmark_score"], 0.0)
+
+    def test_report_is_resolved_from_disk_and_rendered(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "score-report.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "retro-score-report-v1",
+                        "task_id": "t1",
+                        "status": "scored",
+                        "score_total": 0.75,
+                        "passed": False,
+                        "valid": True,
+                        "pass_threshold": 0.8,
+                        "components": [{"id": "behavior", "value": 0.75}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            record = {
+                "attempt_id": "x", "task_id": "t1", "source_id": "r1",
+                "agent_id": "a1", "seed": 0, "status": "scored", "score": 0.75,
+                "score_report": "score-report.json",
+            }
+            (base / "attempt.json").write_text(json.dumps(record), encoding="utf-8")
+            attempts = load_attempts([base])
+            scorecard = build_benchmark_scorecard(attempts, base)
+
+        agent = scorecard["agents"]["a1"]
+        self.assertEqual(agent["benchmark_score"], 0.75)
+        self.assertEqual(agent["per_component"]["behavior"]["mean"], 0.75)
+        self.assertEqual(agent["pass_rate"], 0.0)
+        md = render_benchmark_scorecard_md(scorecard)
+        self.assertIn("# Benchmark scorecard", md)
+        self.assertIn("0.750", md)
+        self.assertIn("Valid coverage: 1/1", md)
 
 
 if __name__ == "__main__":

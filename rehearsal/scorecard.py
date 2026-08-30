@@ -264,3 +264,341 @@ def write_scorecard_artifacts(scorecard: dict[str, Any], out_dir: Path) -> tuple
     json_path.write_text(json.dumps(scorecard, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     md_path.write_text(render_scorecard_md(scorecard), encoding="utf-8")
     return json_path, md_path
+
+
+# --------------------------------------------------------------------------- #
+# Benchmark aggregation
+# --------------------------------------------------------------------------- #
+# Source-normalized aggregation over scored benchmark attempts.
+#
+# The MCP scorecard above rolls conversational verdicts up into server health.
+# This section answers a different question with different arithmetic: how well
+# did an agent do on a set of Git-backed benchmark tasks, where several tasks
+# may have been extracted from the same rollout.
+#
+# Two rules do the work:
+#
+# * a rollout that yielded three tasks does not get three times the weight, so
+#   tasks are averaged within their source before sources are averaged;
+# * an attempt that never produced a number is never counted as zero. Scorer
+#   errors, timeouts, judge outages, and invalid candidate artifacts are
+#   reported as coverage loss, because folding them into the mean would let a
+#   broken harness look like a bad agent.
+
+BENCHMARK_SCHEMA_VERSION = "ghostlab-benchmark-scorecard-v1"
+
+# Statuses a scorer can report; only the first one carries a number.
+SCORED_STATUS = "scored"
+
+
+def load_attempts(paths: "list[Path] | Path") -> list[dict[str, Any]]:
+    """Read attempt records from files, directories, or a JSON array file."""
+    if isinstance(paths, Path):
+        paths = [paths]
+    attempts: list[dict[str, Any]] = []
+    for path in paths:
+        path = Path(path)
+        if path.is_dir():
+            for candidate in sorted(path.rglob("attempt.json")):
+                attempts.append(json.loads(candidate.read_text(encoding="utf-8")))
+            continue
+        document = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(document, list):
+            attempts += [item for item in document if isinstance(item, dict)]
+        elif isinstance(document, dict):
+            attempts.append(document)
+    return attempts
+
+
+def _attach_report(attempt: dict[str, Any], base_dir: Path) -> dict[str, Any]:
+    """Resolve an attempt's score report so component detail is available."""
+    if isinstance(attempt.get("report"), dict):
+        return attempt
+    reference = attempt.get("score_report")
+    if not isinstance(reference, str) or not reference:
+        return attempt
+    path = Path(reference)
+    if not path.is_absolute():
+        path = base_dir / path
+    if not path.is_file():
+        return attempt
+    try:
+        return {**attempt, "report": json.loads(path.read_text(encoding="utf-8"))}
+    except (json.JSONDecodeError, OSError):
+        return attempt
+
+
+def _numeric(value: Any) -> "float | None":
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _report(attempt: dict[str, Any]) -> dict[str, Any]:
+    """The attached score report, or an empty one when it was not resolved."""
+    report = attempt.get("report")
+    return report if isinstance(report, dict) else {}
+
+
+def _is_valid(attempt: dict[str, Any]) -> bool:
+    report = _report(attempt)
+    status = str(attempt.get("status") or report.get("status") or "")
+    if status != SCORED_STATUS:
+        return False
+    if report.get("valid") is False or attempt.get("valid") is False:
+        return False
+    score = _numeric(attempt.get("score"))
+    if score is None:
+        score = _numeric(report.get("score_total"))
+    return score is not None and 0.0 <= score <= 1.0
+
+
+def _score_of(attempt: dict[str, Any]) -> float:
+    report = _report(attempt)
+    score = _numeric(attempt.get("score"))
+    if score is None:
+        score = _numeric(report.get("score_total"))
+    return float(score or 0.0)
+
+
+def _passed(attempt: dict[str, Any]) -> bool:
+    report = _report(attempt)
+    for holder in (attempt, report):
+        if isinstance(holder.get("passed"), bool):
+            return bool(holder["passed"])
+    threshold = _numeric(report.get("pass_threshold"))
+    return threshold is not None and _score_of(attempt) + 1e-9 >= threshold
+
+
+def _mean(values: "list[float]") -> "float | None":
+    return round(sum(values) / len(values), 6) if values else None
+
+
+def _stdev(values: "list[float]") -> "float | None":
+    if len(values) < 2:
+        return 0.0 if values else None
+    mean = sum(values) / len(values)
+    return round((sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5, 6)
+
+
+def _usage(attempt: dict[str, Any]) -> dict[str, float]:
+    tokens = dict(attempt.get("tokens") or {})
+    total = sum(
+        float(tokens.get(key) or 0.0) for key in ("input", "output", "cached")
+    )
+    return {
+        "tokens": total,
+        "wall_time_ms": float(attempt.get("wall_time_ms") or 0.0),
+        "cost_usd": float(attempt.get("cost_usd") or 0.0),
+    }
+
+
+def _source_normalized(per_task: dict[str, dict[str, Any]]) -> "tuple[float | None, dict]":
+    """Macro-average task means within each source, then across sources."""
+    sources: dict[str, list[float]] = {}
+    for entry in per_task.values():
+        if entry["score"] is None:
+            continue
+        sources.setdefault(entry["source_id"], []).append(float(entry["score"]))
+    per_source = {
+        source_id: {"score": _mean(scores), "tasks": len(scores)}
+        for source_id, scores in sorted(sources.items())
+    }
+    means = [entry["score"] for entry in per_source.values() if entry["score"] is not None]
+    return _mean(means), per_source
+
+
+def aggregate_attempts(
+    attempts: list[dict[str, Any]],
+    *,
+    token_budgets: "list[float] | None" = None,
+    wall_time_budgets_ms: "list[float] | None" = None,
+) -> dict[str, Any]:
+    """Aggregate benchmark attempts per agent (pure)."""
+    by_agent: dict[str, list[dict[str, Any]]] = {}
+    for attempt in attempts:
+        by_agent.setdefault(str(attempt.get("agent_id") or "unknown"), []).append(attempt)
+
+    agents: dict[str, Any] = {}
+    for agent_id, rows in sorted(by_agent.items()):
+        valid = [row for row in rows if _is_valid(row)]
+        invalid = [row for row in rows if not _is_valid(row)]
+
+        seeds: dict[str, list[float]] = {}
+        task_meta: dict[str, dict[str, Any]] = {}
+        components: dict[str, list[float]] = {}
+        passes: list[bool] = []
+        for row in valid:
+            task_id = str(row.get("task_id") or "unknown")
+            seeds.setdefault(task_id, []).append(_score_of(row))
+            task_meta.setdefault(
+                task_id,
+                {"source_id": str(row.get("source_id") or task_id), "attempts": 0},
+            )
+            task_meta[task_id]["attempts"] += 1
+            passes.append(_passed(row))
+            for component in _report(row).get("components", []) or []:
+                value = _numeric(component.get("value"))
+                if value is not None:
+                    components.setdefault(str(component.get("id")), []).append(value)
+
+        per_task = {
+            task_id: {
+                "score": _mean(values),
+                "seed_std": _stdev(values),
+                "seeds": len(values),
+                "source_id": task_meta[task_id]["source_id"],
+            }
+            for task_id, values in sorted(seeds.items())
+        }
+        benchmark_score, per_source = _source_normalized(per_task)
+
+        errors: dict[str, int] = {}
+        for row in invalid:
+            status = str(row.get("status") or _report(row).get("status") or "unknown")
+            if status == SCORED_STATUS:
+                status = "invalid_unscored_weight"
+            errors[status] = errors.get(status, 0) + 1
+
+        usages = [_usage(row) for row in valid]
+        agents[agent_id] = {
+            "benchmark_score": benchmark_score,
+            "pass_rate": round(sum(1 for value in passes if value) / len(passes), 6)
+            if passes
+            else None,
+            "per_source": per_source,
+            "per_task": per_task,
+            "per_component": {
+                name: {"mean": _mean(values), "observations": len(values)}
+                for name, values in sorted(components.items())
+            },
+            "seed_std_mean": _mean(
+                [entry["seed_std"] for entry in per_task.values() if entry["seed_std"] is not None]
+            ),
+            "coverage": {
+                "requested": len(rows),
+                "scored": len(valid),
+                "invalid": len(invalid),
+                "ratio": round(len(valid) / len(rows), 6) if rows else None,
+            },
+            # Never folded into benchmark_score: a broken scorer is not a bad agent.
+            "errors": errors,
+            "usage": {
+                "tokens_per_scored_attempt": _mean([usage["tokens"] for usage in usages]),
+                "wall_time_ms_per_scored_attempt": _mean(
+                    [usage["wall_time_ms"] for usage in usages]
+                ),
+                "cost_usd_per_scored_attempt": _mean([usage["cost_usd"] for usage in usages]),
+            },
+            "budgeted_scores": _budgeted_scores(
+                valid, token_budgets or [], wall_time_budgets_ms or []
+            ),
+        }
+    return {
+        "schema_version": BENCHMARK_SCHEMA_VERSION,
+        "attempts": len(attempts),
+        "agents": agents,
+    }
+
+
+def _budgeted_scores(
+    valid: list[dict[str, Any]],
+    token_budgets: "list[float]",
+    wall_time_budgets_ms: "list[float]",
+) -> list[dict[str, Any]]:
+    """Score under a fixed budget: over-budget attempts score zero, not excluded.
+
+    Dropping them would reward an agent for spending more, which is exactly the
+    behavior the budgeted view exists to expose.
+    """
+    rows: list[dict[str, Any]] = []
+    for kind, key, budgets in (
+        ("tokens", "tokens", token_budgets),
+        ("wall_time_ms", "wall_time_ms", wall_time_budgets_ms),
+    ):
+        for budget in budgets:
+            per_task: dict[str, dict[str, Any]] = {}
+            grouped: dict[str, list[float]] = {}
+            for attempt in valid:
+                task_id = str(attempt.get("task_id") or "unknown")
+                usage = _usage(attempt)[key]
+                grouped.setdefault(task_id, []).append(
+                    _score_of(attempt) if usage <= float(budget) else 0.0
+                )
+                per_task.setdefault(
+                    task_id,
+                    {"source_id": str(attempt.get("source_id") or task_id), "score": None},
+                )
+            for task_id, values in grouped.items():
+                per_task[task_id]["score"] = _mean(values)
+            score, _sources = _source_normalized(per_task)
+            rows.append({"budget": kind, "limit": float(budget), "benchmark_score": score})
+    return rows
+
+
+def build_benchmark_scorecard(
+    attempts: list[dict[str, Any]],
+    base_dir: Path,
+    *,
+    token_budgets: "list[float] | None" = None,
+    wall_time_budgets_ms: "list[float] | None" = None,
+) -> dict[str, Any]:
+    resolved = [_attach_report(attempt, base_dir) for attempt in attempts]
+    return aggregate_attempts(
+        resolved,
+        token_budgets=token_budgets,
+        wall_time_budgets_ms=wall_time_budgets_ms,
+    )
+
+
+def render_benchmark_scorecard_md(scorecard: dict[str, Any]) -> str:
+    lines = ["# Benchmark scorecard", "", f"- Attempts: {scorecard.get('attempts', 0)}", ""]
+    for agent_id, agent in scorecard.get("agents", {}).items():
+        coverage = agent["coverage"]
+        lines += [
+            f"## {agent_id}",
+            "",
+            "- Benchmark score (source-normalized): "
+            + ("n/a" if agent["benchmark_score"] is None else f"{agent['benchmark_score']:.3f}"),
+            f"- Pass rate: {_fmt_pct(agent['pass_rate'])}",
+            f"- Valid coverage: {coverage['scored']}/{coverage['requested']} "
+            f"({_fmt_pct(coverage['ratio'])})",
+            "- Mean seed std: "
+            + ("n/a" if agent["seed_std_mean"] is None else f"{agent['seed_std_mean']:.3f}"),
+            "",
+        ]
+        if agent["errors"]:
+            lines += [
+                "Excluded from the score (never counted as zero): "
+                + ", ".join(f"{name}={count}" for name, count in sorted(agent["errors"].items())),
+                "",
+            ]
+        if agent["per_component"]:
+            lines += ["| component | mean | observations |", "| --- | --- | --- |"]
+            for name, entry in agent["per_component"].items():
+                mean = "n/a" if entry["mean"] is None else f"{entry['mean']:.3f}"
+                lines.append(f"| `{name}` | {mean} | {entry['observations']} |")
+            lines.append("")
+        if agent["per_source"]:
+            lines += ["| source | mean | tasks |", "| --- | --- | --- |"]
+            for source_id, entry in agent["per_source"].items():
+                mean = "n/a" if entry["score"] is None else f"{entry['score']:.3f}"
+                lines.append(f"| `{source_id}` | {mean} | {entry['tasks']} |")
+            lines.append("")
+        for row in agent["budgeted_scores"]:
+            score = "n/a" if row["benchmark_score"] is None else f"{row['benchmark_score']:.3f}"
+            lines.append(f"- Score at {row['budget']} <= {row['limit']:g}: {score}")
+        if agent["budgeted_scores"]:
+            lines.append("")
+    return "\n".join(lines)
+
+
+def write_benchmark_scorecard(scorecard: dict[str, Any], out_dir: Path) -> tuple[Path, Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "benchmark-scorecard.json"
+    md_path = out_dir / "benchmark-scorecard.md"
+    json_path.write_text(
+        json.dumps(scorecard, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    md_path.write_text(render_benchmark_scorecard_md(scorecard), encoding="utf-8")
+    return json_path, md_path
