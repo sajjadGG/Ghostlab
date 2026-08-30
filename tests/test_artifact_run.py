@@ -6,6 +6,7 @@ and the manifest all execute for real.
 """
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import tarfile
@@ -32,6 +33,20 @@ from rehearsal.config import ConfigError, artifact_run_config, parse_export
 from rehearsal.runners import AgentRunner, OpenShellProcessRunner, create_runner
 from rehearsal.sandbox import SandboxError
 from rehearsal.workspace_export import workspace_state_hash
+
+
+def archive_members(path: Path) -> list[str]:
+    if path.name.endswith(".tar.zst"):
+        completed = subprocess.run(
+            ["zstd", "-q", "-d", "-c", str(path)],
+            capture_output=True,
+            check=True,
+        )
+        with tarfile.open(fileobj=io.BytesIO(completed.stdout), mode="r:") as handle:
+            return handle.getnames()
+    with tarfile.open(path, mode="r:*") as handle:
+        return handle.getnames()
+
 
 WRITE_SCRIPT = """\
 import json, os, pathlib, sys
@@ -195,8 +210,7 @@ class ArtifactRunTest(ArtifactRunTestCase):
 
         archive = self.run_dir / str(result.manifest["workspace_export"]["archive"])
         self.assertTrue(archive.exists())
-        with tarfile.open(archive) as handle:
-            members = handle.getnames()
+        members = archive_members(archive)
         self.assertIn("feature.py", members)
         self.assertFalse([name for name in members if name.startswith(".git/")])
         self.assertEqual(
