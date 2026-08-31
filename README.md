@@ -608,6 +608,9 @@ ghostlab artifact-run \
   --agent agents/candidate.json \
   --workspace <materialized-base-repo> \
   --prompt-file tasks/<task_id>/public/prompt.txt \
+  --sandbox-image 'project@sha256:<digest>' \
+  --setup-command '["python3","-m","venv",".venv"]' \
+  --optional-export /sandbox/output/notes.json=notes.json \
   --export-workspace candidate-state.tar.zst \
   --run-dir attempts/<attempt_id>
 
@@ -624,19 +627,34 @@ throwaway copy. Before that sandbox is deleted, `--export-workspace` takes a
 canonical export: sorted paths with modes, sizes, and SHA-256 hashes in
 `status.json`, a `diff.patch`, an `untracked.json`, and a deterministic archive
 of exactly those files. Changed and untracked files are kept; `.git/` and the
-usual build and cache directories are not.
+usual build and cache directories are not. The post-run workspace hash is
+recorded even without an archive. Required `--export` paths fail the run when
+absent; `--optional-export` paths are downloaded only when present.
+`--sandbox-image` replaces the agent definition's image with the task's pinned
+project environment, and repeatable `--setup-command` values are JSON argument
+arrays executed in that same sandbox before the agent turn. Artifact runs
+require a root-owned `/usr/bin/python3` with the standard library; Ghostlab
+validates that trusted exporter runtime before it sends the prompt and verifies
+the downloaded archive against `status.json` before accepting the candidate
+state.
 
 `scorer-run` never reuses the agent's sandbox. The candidate is mounted
-read-only at `/candidate/repo`, hidden fixtures live outside it, and only
-`/output` and `/tmp` are writable. The agent's trace is redacted down to tool
-and timing evidence first, so the scorer cannot see who produced the candidate. The deterministic phase runs with no network
-and no provider credentials even though it executes candidate code; a hybrid
-scorer's residual judge gets provider access in a second sandbox that cannot
-execute anything. Ghostlab computes the total outside both sandboxes: weights
-must sum to `1.0`, a failed hard gate forces `0`, and unscored soft components
-are reported rather than renormalized away. Scorer crashes, timeouts, judge
-outages, and unusable candidate artifacts get their own statuses and are never
-turned into a zero.
+read-only at the path supplied by `repo_path`, hidden fixtures live at
+`GHOSTLAB_FIXTURES_ROOT`, and only `GHOSTLAB_OUTPUT_ROOT` and `/tmp` are
+writable. OpenShell 0.0.80 requires these roots below `/sandbox`; scorers must
+use the score input and `GHOSTLAB_*_ROOT` variables rather than hard-code the
+logical manifest paths. A fail-closed Landlock launcher applies this boundary
+to the scorer process. A scorer that executes candidate code must invoke it
+through `GHOSTLAB_SECURE_EXEC` (or an equivalently restrictive nested sandbox)
+without granting fixture, input, scorer, or report access. The agent's trace is
+redacted down to tool and timing evidence first, so the scorer cannot see who
+produced the candidate. The deterministic phase runs with no network and no
+provider credentials; a hybrid scorer's residual judge gets provider access
+in a second sandbox that cannot execute anything. Ghostlab computes the total
+outside both sandboxes: weights must sum to `1.0`, a failed hard gate forces
+`0`, and unscored soft components are reported rather than renormalized away.
+Scorer crashes, timeouts, judge outages, and unusable candidate artifacts get
+their own statuses and are never turned into a zero.
 
 `ghostlab scorecard --attempts <dir>` then rolls attempts up with equal weight
 per rollout source, reporting pass rate, per-component means, seed spread,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -10,7 +11,12 @@ from unittest.mock import patch
 from rehearsal.config import RunnerConfig, TargetConfig
 from rehearsal.runners import OpenShellProcessRunner, create_runner
 from rehearsal.sandbox import (
-    OpenShellSandbox, SandboxError, normalize_sandbox, sandbox_stdio_target,
+    WORKSPACE_RUNTIME_SUMMARY_PREFIX,
+    OpenShellSandbox,
+    SandboxError,
+    normalize_sandbox,
+    sandbox_stdio_target,
+    verify_workspace_export_runtime,
 )
 from rehearsal.session_provenance import (
     CODEX_ORIGINATOR_ENV,
@@ -28,6 +34,20 @@ class FakeCommands:
         if command[1] == "logs":
             stdout = "action=deny dst_host=example.com"
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+
+class LocalRuntimeProbe:
+    def __init__(self) -> None:
+        self.config = {}
+
+    def exec(self, command, *, input_text, **kwargs):
+        return subprocess.run(
+            ["/usr/bin/python3", *command[1:]],
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
 
 class OpenShellSandboxTest(unittest.TestCase):
@@ -118,6 +138,151 @@ class OpenShellSandboxTest(unittest.TestCase):
             sandbox.create()
         self.assertEqual(ctx.exception.kind, "sandbox_gateway_unavailable")
         self.assertTrue(any(command[1:3] == ["sandbox", "delete"] for command in calls))
+
+    def test_post_create_upload_disables_gitignore_filtering(self) -> None:
+        fake = FakeCommands()
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "ignored.txt"
+            source.write_text("secret", encoding="utf-8")
+            sandbox = OpenShellSandbox({"bin": "openshell"}, run=fake)
+            sandbox.created = True
+            sandbox.upload_file(source, "/sandbox/private/renamed.txt", mode="600")
+
+        upload = next(call for call, _ in fake.calls if call[1:3] == ["sandbox", "upload"])
+        self.assertIn("--no-git-ignore", upload)
+        self.assertIn("/sandbox/private/renamed.txt", upload)
+        commands = [call for call, _ in fake.calls if call[1:3] == ["sandbox", "exec"]]
+        self.assertTrue(any("/bin/mkdir" in call for call in commands))
+        self.assertTrue(any("/usr/bin/test" in call for call in commands))
+        self.assertTrue(any("chmod" in " ".join(call) for call in commands))
+
+    def test_post_create_upload_surfaces_missing_destination(self) -> None:
+        def missing_destination(command, **kwargs):
+            if command[1:3] == ["sandbox", "exec"] and "/usr/bin/test" in command:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="denied")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.txt"
+            source.write_text("value", encoding="utf-8")
+            sandbox = OpenShellSandbox({"bin": "openshell"}, run=missing_destination)
+            sandbox.created = True
+            with self.assertRaises(SandboxError) as ctx:
+                sandbox.upload_file(source, "/sandbox/private/renamed.txt")
+        self.assertEqual(ctx.exception.kind, "sandbox_upload_failed")
+
+    def test_workspace_runtime_rejects_writable_files_and_policy(self) -> None:
+        class RuntimeProbe:
+            def __init__(self, config, result):
+                self.config = config
+                self.result = result
+
+            def exec(self, command, **kwargs):
+                return self.result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            writable_path = Path(tmp) / "python3"
+            writable_path.write_text("not trusted", encoding="utf-8")
+
+            with self.assertRaises(SandboxError) as ctx:
+                verify_workspace_export_runtime(
+                    LocalRuntimeProbe(), python=str(writable_path)
+                )
+            self.assertEqual(ctx.exception.kind, "sandbox_runtime_untrusted")
+            self.assertIn(str(writable_path), ctx.exception.detail)
+
+            policy = Path(tmp) / "writable-runtime.yaml"
+            policy.write_text(
+                "version: 1\n"
+                "filesystem_policy:\n"
+                "  include_workdir: true\n"
+                "  read_only: [/lib]\n"
+                "  read_write: [/sandbox, /usr]\n",
+                encoding="utf-8",
+            )
+            reported = WORKSPACE_RUNTIME_SUMMARY_PREFIX + json.dumps(
+                {"paths": ["/usr/bin/python3", "/usr/lib/python3.11"], "uid": 998}
+            )
+            insecure_policy = RuntimeProbe(
+                {"policy": str(policy)},
+                subprocess.CompletedProcess([], 0, stdout=reported, stderr=""),
+            )
+            with self.assertRaises(SandboxError) as policy_ctx:
+                verify_workspace_export_runtime(insecure_policy)
+        self.assertEqual(policy_ctx.exception.kind, "sandbox_runtime_untrusted")
+        self.assertIn("read-only", policy_ctx.exception.detail)
+
+    def test_workspace_runtime_inventory_covers_all_exporter_dependencies(self) -> None:
+        payload = verify_workspace_export_runtime(LocalRuntimeProbe())
+        module_names = {Path(path).name.split(".", 1)[0] for path in payload["module_paths"]}
+
+        for dependency in ("argparse", "subprocess", "threading", "typing"):
+            self.assertIn(dependency, module_names)
+        for module_path in payload["module_paths"]:
+            self.assertTrue(
+                any(
+                    module_path == root or module_path.startswith(root.rstrip("/") + "/")
+                    for root in payload["module_roots"]
+                ),
+                module_path,
+            )
+
+    def test_workspace_runtime_policy_rejects_writable_dependency_root(self) -> None:
+        class RuntimeProbe:
+            def __init__(self, policy: Path) -> None:
+                self.config = {"policy": str(policy)}
+
+            def exec(self, command, **kwargs):
+                payload = {
+                    "module_paths": ["/opt/python/argparse.py"],
+                    "module_roots": ["/opt/python"],
+                    "paths": [
+                        "/usr/bin/python3",
+                        "/opt/python",
+                        "/opt/python/argparse.py",
+                    ],
+                    "uid": 998,
+                    "zstd": "",
+                }
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=WORKSPACE_RUNTIME_SUMMARY_PREFIX + json.dumps(payload),
+                    stderr="",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = Path(tmp) / "writable-dependency.yaml"
+            policy.write_text(
+                "version: 1\n"
+                "filesystem_policy:\n"
+                "  include_workdir: true\n"
+                "  read_only: [/usr]\n"
+                "  read_write: [/sandbox, /opt/python]\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(SandboxError) as ctx:
+                verify_workspace_export_runtime(RuntimeProbe(policy))
+
+        self.assertEqual(ctx.exception.kind, "sandbox_runtime_untrusted")
+        self.assertIn("/opt/python", ctx.exception.detail)
+
+    def test_workspace_runtime_rejects_writable_zstd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            binary_dir = Path(tmp) / "bin"
+            binary_dir.mkdir()
+            zstd = binary_dir / "zstd"
+            zstd.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            zstd.chmod(0o755)
+
+            with self.assertRaises(SandboxError) as ctx:
+                verify_workspace_export_runtime(
+                    LocalRuntimeProbe(),
+                    search_path=str(binary_dir),
+                )
+
+        self.assertEqual(ctx.exception.kind, "sandbox_runtime_untrusted")
+        self.assertIn("zstd", ctx.exception.detail)
 
     def test_stdio_target_command_is_rewritten_into_uploaded_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

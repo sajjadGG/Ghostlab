@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import stat
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .config import (
     ARTIFACT_RUN_SCHEMA_VERSION,
@@ -32,7 +35,13 @@ from .config import (
 )
 from .logging import JsonlLogger
 from .runners import AgentRunner, RunnerResult, create_sandboxed_runner
-from .sandbox import WORKSPACE_ARTIFACT_ROOT, SandboxError, normalize_sandbox
+from .sandbox import (
+    WORKSPACE_ARTIFACT_ROOT,
+    WORKSPACE_EXPORT_PYTHON,
+    SandboxError,
+    normalize_sandbox,
+    verify_workspace_export_runtime,
+)
 from .types import Event, utc_now
 
 # Terminal states. Every one of them is distinguishable because a benchmark
@@ -72,6 +81,15 @@ _MODEL_OUTAGE_SIGNALS = (
 SANDBOX_EXIT_CODE = 125
 
 WORKSPACE_UPLOAD_TARGET = "/sandbox"
+_MAX_PRIOR_MANIFEST_BYTES = 16 * 1024 * 1024
+_RUN_METADATA = (
+    "artifact-run.json",
+    "events.jsonl",
+    "stdout.txt",
+    "stderr.txt",
+    "prompt.txt",
+    "workspace-export",
+)
 
 
 class ArtifactRunError(RuntimeError):
@@ -95,11 +113,39 @@ def sha256_bytes(data: bytes) -> str:
 
 
 def sha256_path(path: Path) -> str:
+    path = Path(path)
+    if path.is_dir():
+        entries: list[dict[str, Any]] = []
+        for item in sorted(path.rglob("*")):
+            relative = item.relative_to(path).as_posix()
+            if item.is_symlink():
+                entries.append(
+                    {"path": relative, "kind": "symlink", "target": item.readlink().as_posix()}
+                )
+            elif item.is_file():
+                entries.append(
+                    {"path": relative, "kind": "file", "sha256": sha256_path(item)}
+                )
+        return sha256_bytes(
+            json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
     digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
+    with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def path_bytes(path: Path) -> int:
+    if path.is_symlink():
+        return 0
+    if path.is_dir():
+        return sum(
+            item.stat().st_size
+            for item in path.rglob("*")
+            if not item.is_symlink() and item.is_file()
+        )
+    return path.stat().st_size
 
 
 def _classify(result: RunnerResult) -> str:
@@ -125,7 +171,11 @@ def _model_of(agent: dict[str, Any], runner: RunnerConfig) -> str:
 
 
 def _parse_calls(result: RunnerResult, parser: str) -> list[dict[str, Any]]:
-    from .tool_capture import parse_codex_output, parse_copilot_output, parse_opencode_output
+    from .tool_capture import (
+        parse_codex_output,
+        parse_copilot_output,
+        parse_opencode_output,
+    )
 
     try:
         if parser == "codex-json":
@@ -170,6 +220,8 @@ def build_runner_config(
         raise ArtifactRunError(f"Workspace directory not found: {workspace}")
 
     sandbox = dict(sandbox_overrides or {})
+    if config.sandbox_image:
+        sandbox["image"] = config.sandbox_image
     agent_workspace = str(Path(str(agent["workspace"])).resolve()) if agent.get("workspace") else ""
     uploads = [
         dict(item)
@@ -197,9 +249,235 @@ def build_runner_config(
     return runner, workspace, workdir
 
 
-def _write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+def _workspace_archive_candidates(requested: str) -> tuple[str, ...]:
+    if not requested:
+        return ()
+    candidates = [requested]
+    if requested.endswith(".tar.zst"):
+        candidates.append(requested[: -len(".tar.zst")] + ".tar.gz")
+    elif requested.endswith(".tgz"):
+        candidates.append(requested[: -len(".tgz")] + ".tar.gz")
+    elif not requested.endswith((".tar.gz", ".tar")):
+        candidates.append(requested + ".tar.gz")
+    return tuple(dict.fromkeys(candidates))
+
+
+def _run_output_path(run_dir: Path, relative: str | Path) -> Path:
+    relative_path = Path(relative)
+    if (
+        relative_path.is_absolute()
+        or relative_path == Path(".")
+        or ".." in relative_path.parts
+        or not relative_path.parts
+    ):
+        raise ArtifactRunError(f"unsafe run output path: {relative_path}")
+    return run_dir.joinpath(*relative_path.parts)
+
+
+def _previous_manifest_outputs(run_dir: Path) -> tuple[str, ...]:
+    path = _run_output_path(run_dir, "artifact-run.json")
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return ()
+    if not stat.S_ISREG(info.st_mode):
+        raise ArtifactRunError(
+            f"unsafe previous artifact-run.json: expected a regular file, found {path}"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ArtifactRunError(
+                    "unsafe previous artifact-run.json: file changed while opening"
+                )
+            raw = handle.read(_MAX_PRIOR_MANIFEST_BYTES + 1)
+    except OSError as exc:
+        raise ArtifactRunError(
+            f"cannot safely read previous artifact-run.json: {exc}"
+        ) from exc
+    if len(raw) > _MAX_PRIOR_MANIFEST_BYTES:
+        raise ArtifactRunError(
+            "previous artifact-run.json is too large to validate safely"
+        )
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ArtifactRunError(
+            f"previous artifact-run.json is invalid: {exc}"
+        ) from exc
+    if not isinstance(document, dict):
+        raise ArtifactRunError("previous artifact-run.json must contain an object")
+
+    outputs: list[str] = []
+
+    def add(value: Any, source: str) -> None:
+        if not isinstance(value, str) or not value:
+            raise ArtifactRunError(
+                f"unsafe prior manifest path in {source}: expected a non-empty string"
+            )
+        try:
+            _run_output_path(run_dir, value)
+        except ArtifactRunError as exc:
+            raise ArtifactRunError(
+                f"unsafe prior manifest path in {source}: {value!r}"
+            ) from exc
+        outputs.append(value)
+
+    def add_archive(value: Any, source: str) -> None:
+        if not isinstance(value, str) or Path(value).name != value:
+            raise ArtifactRunError(
+                f"unsafe prior manifest archive name in {source}: {value!r}"
+            )
+        add(value, source)
+
+    exports = document.get("exports", [])
+    if not isinstance(exports, list):
+        raise ArtifactRunError("previous artifact-run.json exports must be a list")
+    for index, exported in enumerate(exports):
+        if not isinstance(exported, dict) or "path" not in exported:
+            raise ArtifactRunError(
+                f"previous artifact-run.json exports[{index}] has no path"
+            )
+        add(exported["path"], f"exports[{index}].path")
+
+    configured = document.get("configured_exports", [])
+    if not isinstance(configured, list):
+        raise ArtifactRunError(
+            "previous artifact-run.json configured_exports must be a list"
+        )
+    for index, configured_path in enumerate(configured):
+        add(configured_path, f"configured_exports[{index}]")
+
+    archives = document.get("workspace_archive_candidates", [])
+    if not isinstance(archives, list):
+        raise ArtifactRunError(
+            "previous artifact-run.json workspace_archive_candidates must be a list"
+        )
+    for index, archive in enumerate(archives):
+        add_archive(archive, f"workspace_archive_candidates[{index}]")
+
+    workspace_export = document.get("workspace_export")
+    if workspace_export is not None:
+        if not isinstance(workspace_export, dict):
+            raise ArtifactRunError(
+                "previous artifact-run.json workspace_export must be an object"
+            )
+        if "archive" in workspace_export:
+            add_archive(workspace_export["archive"], "workspace_export.archive")
+    return tuple(dict.fromkeys(outputs))
+
+
+def _remove_run_output(run_dir: Path, relative: str | Path) -> None:
+    """Remove an output without traversing a stale symlink below ``run_dir``."""
+    relative_path = Path(relative)
+    target = _run_output_path(run_dir, relative_path)
+    current = run_dir
+    for part in relative_path.parts:
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            return
+        if current != target and stat.S_ISDIR(info.st_mode):
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            shutil.rmtree(current)
+        else:
+            current.unlink()
+        return
+
+
+def _safe_run_output(
+    run_dir: Path,
+    relative: str | Path,
+    *,
+    create_parents: bool = False,
+) -> Path:
+    """Return a run output only when none of its components is a symlink."""
+    relative_path = Path(relative)
+    target = _run_output_path(run_dir, relative_path)
+    current = run_dir
+    for part in relative_path.parts[:-1]:
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            if not create_parents:
+                raise ArtifactRunError(f"run output parent does not exist: {current}")
+            current.mkdir()
+            info = current.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise ArtifactRunError(f"run output path has an unsafe component: {current}")
+    try:
+        info = target.lstat()
+    except FileNotFoundError:
+        return target
+    if stat.S_ISLNK(info.st_mode):
+        raise ArtifactRunError(f"run output path is a symlink: {target}")
+    return target
+
+
+def _write_text(run_dir: Path, relative: str | Path, text: str) -> None:
+    path = _safe_run_output(run_dir, relative, create_parents=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _copy_regular_run_output(
+    run_dir: Path,
+    source_relative: str | Path,
+    destination_relative: str | Path,
+) -> Path:
+    source = _safe_run_output(run_dir, source_relative)
+    destination = _safe_run_output(run_dir, destination_relative, create_parents=True)
+    source_info = source.lstat()
+    if not stat.S_ISREG(source_info.st_mode):
+        raise ArtifactRunError(f"workspace archive is not a regular file: {source}")
+    _remove_run_output(run_dir, destination_relative)
+    destination = _safe_run_output(run_dir, destination_relative, create_parents=True)
+    source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    destination_flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_descriptor = os.open(source, source_flags)
+        try:
+            destination_descriptor = os.open(destination, destination_flags, 0o600)
+        except Exception:
+            os.close(source_descriptor)
+            raise
+        with (
+            os.fdopen(source_descriptor, "rb") as source_handle,
+            os.fdopen(destination_descriptor, "wb") as destination_handle,
+        ):
+            shutil.copyfileobj(source_handle, destination_handle)
+    except Exception:
+        _remove_run_output(run_dir, destination_relative)
+        raise
+    return destination
+
+
+def _cleanup_run_outputs(config: ArtifactRunConfig, run_dir: Path) -> None:
+    previous = _previous_manifest_outputs(run_dir)
+    names = [
+        *(name for name in _RUN_METADATA if name != "artifact-run.json"),
+        *(local for _remote, local in config.exports),
+        *(local for _remote, local in config.optional_exports),
+        *_workspace_archive_candidates(config.export_workspace),
+        *previous,
+        "artifact-run.json",
+    ]
+    unique = tuple(
+        name for name in dict.fromkeys(names) if name != "artifact-run.json"
+    ) + ("artifact-run.json",)
+    for name in unique:
+        _run_output_path(run_dir, name)
+    for name in unique:
+        _remove_run_output(run_dir, name)
 
 
 def _collect_exports(
@@ -207,17 +485,35 @@ def _collect_exports(
 ) -> list[dict[str, Any]]:
     """Download declared artifacts before the sandbox is torn down."""
     exports: list[dict[str, Any]] = []
-    for remote, local in config.exports:
-        destination = run_dir / local
-        runner.export_artifact(remote, destination)
+    requested = [
+        *((remote, local, True) for remote, local in config.exports),
+        *((remote, local, False) for remote, local in config.optional_exports),
+    ]
+    for remote, local, required in requested:
+        _remove_run_output(run_dir, local)
+        destination = _safe_run_output(run_dir, local, create_parents=True)
+        try:
+            runner.export_artifact(remote, destination)
+        except SandboxError as exc:
+            detail = exc.detail.lower()
+            if not required and (
+                "no such file" in detail or "failed to resolve sandbox source path" in detail
+            ):
+                continue
+            raise
+        destination = _safe_run_output(run_dir, local)
         if not destination.exists():
-            raise SandboxError("sandbox_download_failed", f"{remote} did not produce {destination}")
+            if required:
+                raise SandboxError(
+                    "sandbox_download_failed", f"{remote} did not produce {destination}"
+                )
+            continue
         exports.append(
             {
                 "path": local,
                 "source": remote,
                 "sha256": sha256_path(destination),
-                "bytes": destination.stat().st_size,
+                "bytes": path_bytes(destination),
             }
         )
     return exports
@@ -231,7 +527,10 @@ def _validate_contract(
     target = config.contract_export()
     if not target:
         return False, ["--output-contract has no --export to validate"], None
-    path = run_dir / target
+    try:
+        path = _safe_run_output(run_dir, target)
+    except ArtifactRunError as exc:
+        return False, [str(exc)], None
     if not path.is_file():
         return False, [f"declared output {target} was not exported"], None
     try:
@@ -259,8 +558,8 @@ def _finish_run(
     retain: list[str],
 ) -> str:
     """Record the turn, export before teardown, and check the output contract."""
-    _write_text(run_dir / "stdout.txt", result.output)
-    _write_text(run_dir / "stderr.txt", result.stderr)
+    _write_text(run_dir, "stdout.txt", result.output)
+    _write_text(run_dir, "stderr.txt", result.stderr)
 
     tool_calls = _parse_calls(result, runner_config.parser)
     for call in tool_calls:
@@ -281,8 +580,11 @@ def _finish_run(
     export_error = ""
     try:
         if config.export_workspace:
+            workspace_export_dir = _safe_run_output(
+                run_dir, "workspace-export", create_parents=True
+            )
             summary = runner.export_workspace(
-                destination=run_dir / "workspace-export",
+                destination=workspace_export_dir,
                 workdir=str(runner_config.sandbox.get("workdir") or "/sandbox"),
                 excludes=excludes,
                 retain=retain,
@@ -290,13 +592,28 @@ def _finish_run(
                 timeout=max(runner_config.timeout_seconds, 300),
             )
             manifest["workspace_output_sha256"] = str(summary.get("state_sha256") or "")
+            archive_name = str(summary["archive"])
+            candidates = _workspace_archive_candidates(config.export_workspace)
+            if archive_name not in candidates or Path(archive_name).name != archive_name:
+                raise SandboxError(
+                    "sandbox_export_failed",
+                    f"workspace exporter returned unexpected archive name {archive_name!r}",
+                )
             archive = Path(str(summary["archive_path"]))
-            final = run_dir / archive.name
-            if archive.resolve() != final.resolve():
-                shutil.copy2(archive, final)
-            if archive.name != config.export_workspace:
+            expected_archive = workspace_export_dir / archive_name
+            if archive.absolute() != expected_archive.absolute():
+                raise SandboxError(
+                    "sandbox_export_failed",
+                    f"workspace exporter returned archive outside run directory: {archive}",
+                )
+            final = _copy_regular_run_output(
+                run_dir,
+                Path("workspace-export") / archive_name,
+                archive_name,
+            )
+            if archive_name != config.export_workspace:
                 manifest["warnings"].append(
-                    f"workspace archive written as {archive.name}: "
+                    f"workspace archive written as {archive_name}: "
                     f"{config.export_workspace} was requested but the sandbox has no zstd"
                 )
             manifest["workspace_export"] = {
@@ -317,8 +634,25 @@ def _finish_run(
                     "bytes": final.stat().st_size,
                 }
             )
+        else:
+            from .sandbox import fingerprint_workspace
+
+            handle = runner.sandbox_handle
+            if handle is None:
+                raise SandboxError(
+                    "sandbox_export_failed",
+                    "artifact-run runner exposes no live sandbox for workspace fingerprinting",
+                )
+            summary = fingerprint_workspace(
+                handle,
+                workdir=str(runner_config.sandbox.get("workdir") or "/sandbox"),
+                excludes=excludes,
+                retain=retain,
+                timeout=max(runner_config.timeout_seconds, 300),
+            )
+            manifest["workspace_output_sha256"] = str(summary.get("state_sha256") or "")
         manifest["exports"] += _collect_exports(runner, config, run_dir)
-    except (SandboxError, OSError, KeyError, ValueError) as exc:
+    except (ArtifactRunError, SandboxError, OSError, KeyError, ValueError) as exc:
         export_error = f"{type(exc).__name__}: {exc}"
         manifest["export_error"] = export_error
         events.write(Event.create("artifact_run.export_failed", error=export_error))
@@ -350,6 +684,7 @@ def run_artifact(
 
     run_dir = Path(config.run_dir).expanduser().resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    _cleanup_run_outputs(config, run_dir)
 
     agent, sandbox_overrides = load_agent_definition(config.agent_path)
     runner_config, workspace, _workdir = build_runner_config(agent, sandbox_overrides, config)
@@ -384,12 +719,24 @@ def run_artifact(
             "user_emulator": False,
         },
         "model": _model_of(agent, runner_config),
+        "setup_commands": [list(command) for command in config.setup_commands],
+        "setup_results": [],
+        "workspace_export_python": WORKSPACE_EXPORT_PYTHON,
         "started_at": utc_now(),
         "finished_at": "",
         "exit_code": None,
         "timed_out": False,
         "duration_ms": 0,
         "exports": [],
+        "configured_exports": list(
+            dict.fromkeys(
+                local
+                for _remote, local in (*config.exports, *config.optional_exports)
+            )
+        ),
+        "workspace_archive_candidates": list(
+            _workspace_archive_candidates(config.export_workspace)
+        ),
         "events_path": "events.jsonl",
         "warnings": [],
     }
@@ -398,13 +745,17 @@ def run_artifact(
     def publish(status: str) -> ArtifactRunResult:
         manifest["status"] = status
         manifest["finished_at"] = manifest["finished_at"] or utc_now()
-        _write_text(manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+        _write_text(
+            run_dir,
+            "artifact-run.json",
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        )
         return ArtifactRunResult(
             status=status, manifest=manifest, manifest_path=manifest_path, run_dir=run_dir
         )
 
-    _write_text(run_dir / "prompt.txt", config.prompt)
-    events = JsonlLogger(run_dir / "events.jsonl")
+    _write_text(run_dir, "prompt.txt", config.prompt)
+    events = JsonlLogger(_safe_run_output(run_dir, "events.jsonl", create_parents=True))
     events.write(
         Event.create(
             "artifact_run.started",
@@ -426,6 +777,84 @@ def run_artifact(
         manifest["error"] = str(exc)
         events.write(Event.create("artifact_run.failed", error=str(exc)))
         return publish(STATUS_SANDBOX_ERROR)
+
+    handle = runner.sandbox_handle
+
+    def close_after_setup_failure() -> None:
+        try:
+            runner.close()
+        except SandboxError as exc:
+            manifest["warnings"].append(
+                f"sandbox close failed after setup error: {exc.kind}: {exc.detail}"
+            )
+
+    if handle is None:
+        manifest["error"] = "artifact-run runner exposes no sandbox for workspace export"
+        manifest["exit_code"] = SANDBOX_EXIT_CODE
+        events.write(Event.create("artifact_run.failed", error=manifest["error"]))
+        close_after_setup_failure()
+        return publish(STATUS_HARNESS_ERROR)
+
+    def check_exporter_runtime() -> ArtifactRunResult | None:
+        try:
+            verify_workspace_export_runtime(
+                handle,
+                python=WORKSPACE_EXPORT_PYTHON,
+                timeout=30,
+            )
+        except SandboxError as exc:
+            manifest["error"] = (
+                f"workspace exporter runtime trust check failed: {exc.kind}: {exc.detail}"
+            )
+            if exc.kind != "sandbox_runtime_untrusted":
+                manifest["exit_code"] = SANDBOX_EXIT_CODE
+            events.write(Event.create("artifact_run.failed", error=manifest["error"]))
+            close_after_setup_failure()
+            status = (
+                STATUS_HARNESS_ERROR
+                if exc.kind == "sandbox_runtime_untrusted"
+                else STATUS_SANDBOX_ERROR
+            )
+            return publish(status)
+        return None
+
+    if config.setup_commands:
+        runtime_failure = check_exporter_runtime()
+        if runtime_failure is not None:
+            return runtime_failure
+
+    for command in config.setup_commands:
+        setup_started = time.monotonic()
+        try:
+            setup_result = handle.exec(
+                list(command),
+                input_text=None,
+                env=runner_config.env,
+                timeout=runner_config.timeout_seconds,
+            )
+        except SandboxError as exc:
+            manifest["error"] = f"setup failed: {exc.kind}: {exc.detail}"
+            events.write(Event.create("artifact_run.failed", error=manifest["error"]))
+            close_after_setup_failure()
+            return publish(STATUS_SANDBOX_ERROR)
+        setup_record = {
+            "argv": list(command),
+            "exit_code": setup_result.returncode,
+            "duration_ms": int((time.monotonic() - setup_started) * 1000),
+        }
+        manifest["setup_results"].append(setup_record)
+        events.write(Event.create("artifact_run.setup", **setup_record))
+        if setup_result.returncode != 0:
+            detail = (setup_result.stderr or setup_result.stdout or "").strip()[-2000:]
+            manifest["error"] = (
+                f"setup command exited {setup_result.returncode}: {detail or list(command)!r}"
+            )
+            close_after_setup_failure()
+            return publish(STATUS_HARNESS_ERROR)
+
+    runtime_failure = check_exporter_runtime()
+    if runtime_failure is not None:
+        return runtime_failure
 
     started = time.monotonic()
     events.write(Event.create("agent.prompt", chars=len(config.prompt)))

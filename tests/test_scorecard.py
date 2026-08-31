@@ -135,10 +135,10 @@ def attempt(
         "status": status,
         "score_total": score,
         "pass_threshold": 0.8,
+        "unscored_weight": 0.0,
+        "valid": status == "scored" if valid is None else valid,
         "components": components or [],
     }
-    if valid is not None:
-        report["valid"] = valid
     record = {
         "schema_version": "retro-benchmark-attempt-v1",
         "attempt_id": f"{task_id}-{agent}-{seed}",
@@ -216,6 +216,35 @@ class BenchmarkAggregationTest(unittest.TestCase):
         self.assertEqual(agent["errors"], {"invalid_unscored_weight": 1})
         self.assertEqual(agent["coverage"]["scored"], 1)
 
+    def test_strict_report_with_excess_unscored_weight_is_excluded(self) -> None:
+        row = attempt("t1", "r1", score=0.7)
+        row["report"].pop("valid", None)
+        row["report"]["components"] = [
+            {
+                "id": "measured",
+                "value": 1.0,
+                "weight": 0.7,
+                "hard_gate": False,
+                "gate_passed": None,
+                "evidence": [],
+            },
+            {
+                "id": "missing",
+                "value": None,
+                "weight": 0.3,
+                "hard_gate": False,
+                "gate_passed": None,
+                "evidence": [],
+            },
+        ]
+
+        scorecard = aggregate_attempts([row])
+
+        agent = scorecard["agents"]["a1"]
+        self.assertEqual(agent["coverage"]["scored"], 0)
+        self.assertEqual(agent["coverage"]["invalid"], 1)
+        self.assertEqual(agent["errors"], {"invalid_unscored_weight": 1})
+
     def test_pass_rate_and_component_means_come_from_valid_attempts_only(self) -> None:
         attempts = [
             attempt(
@@ -233,6 +262,14 @@ class BenchmarkAggregationTest(unittest.TestCase):
         self.assertEqual(agent["per_component"]["behavior"],
                          {"mean": 0.7, "observations": 2})
         self.assertEqual(agent["usage"]["tokens_per_scored_attempt"], 100.0)
+
+    def test_report_pass_threshold_is_used_when_attempt_omits_passed(self) -> None:
+        row = attempt("t1", "r1", score=0.75)
+        row["report"]["pass_threshold"] = 0.7
+
+        agent = aggregate_attempts([row])["agents"]["a1"]
+
+        self.assertEqual(agent["pass_rate"], 1.0)
 
     def test_budgeted_score_zeroes_over_budget_attempts(self) -> None:
         attempts = [
@@ -277,6 +314,7 @@ class BenchmarkAggregationTest(unittest.TestCase):
                         "passed": False,
                         "valid": True,
                         "pass_threshold": 0.8,
+                        "unscored_weight": 0.0,
                         "components": [{"id": "behavior", "value": 0.75}],
                     }
                 ),

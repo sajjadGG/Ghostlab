@@ -201,12 +201,12 @@ def render_scorecard_md(scorecard: dict[str, Any]) -> str:
         f"- Cases: {totals['cases']}",
         f"- Pass rate: {_fmt_pct(scorecard.get('pass_rate'))}"
         + (
-            f"  (" + ", ".join(f"{k}={v}" for k, v in sorted(totals["by_verdict"].items())) + ")"
+            "  (" + ", ".join(f"{k}={v}" for k, v in sorted(totals["by_verdict"].items())) + ")"
             if totals["by_verdict"]
             else ""
         ),
         f"- Avg tool coverage: {_fmt_pct(scorecard.get('avg_coverage'))}",
-        f"- Avg tool-ergonomics score: "
+        "- Avg tool-ergonomics score: "
         + ("n/a" if scorecard.get("avg_tool_ergonomics") is None else f"{scorecard['avg_tool_ergonomics']}/5"),
         f"- Tool calls: {eff['total_calls']} total, {eff['redundant_calls']} redundant, "
         f"{eff['avg_calls_per_case']} avg/case",
@@ -291,7 +291,7 @@ BENCHMARK_SCHEMA_VERSION = "ghostlab-benchmark-scorecard-v1"
 SCORED_STATUS = "scored"
 
 
-def load_attempts(paths: "list[Path] | Path") -> list[dict[str, Any]]:
+def load_attempts(paths: list[Path] | Path) -> list[dict[str, Any]]:
     """Read attempt records from files, directories, or a JSON array file."""
     if isinstance(paths, Path):
         paths = [paths]
@@ -328,7 +328,7 @@ def _attach_report(attempt: dict[str, Any], base_dir: Path) -> dict[str, Any]:
         return attempt
 
 
-def _numeric(value: Any) -> "float | None":
+def _numeric(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
@@ -347,6 +347,19 @@ def _is_valid(attempt: dict[str, Any]) -> bool:
         return False
     if report.get("valid") is False or attempt.get("valid") is False:
         return False
+    components = report.get("components")
+    if not isinstance(components, list):
+        components = attempt.get("components")
+    if isinstance(components, list):
+        unscored_weight = sum(
+            float(component.get("weight"))
+            for component in components
+            if isinstance(component, dict)
+            and component.get("value") is None
+            and _numeric(component.get("weight")) is not None
+        )
+        if unscored_weight > 0.20 + 1e-9:
+            return False
     score = _numeric(attempt.get("score"))
     if score is None:
         score = _numeric(report.get("score_total"))
@@ -370,11 +383,11 @@ def _passed(attempt: dict[str, Any]) -> bool:
     return threshold is not None and _score_of(attempt) + 1e-9 >= threshold
 
 
-def _mean(values: "list[float]") -> "float | None":
+def _mean(values: list[float]) -> float | None:
     return round(sum(values) / len(values), 6) if values else None
 
 
-def _stdev(values: "list[float]") -> "float | None":
+def _stdev(values: list[float]) -> float | None:
     if len(values) < 2:
         return 0.0 if values else None
     mean = sum(values) / len(values)
@@ -393,7 +406,7 @@ def _usage(attempt: dict[str, Any]) -> dict[str, float]:
     }
 
 
-def _source_normalized(per_task: dict[str, dict[str, Any]]) -> "tuple[float | None, dict]":
+def _source_normalized(per_task: dict[str, dict[str, Any]]) -> tuple[float | None, dict]:
     """Macro-average task means within each source, then across sources."""
     sources: dict[str, list[float]] = {}
     for entry in per_task.values():
@@ -411,8 +424,8 @@ def _source_normalized(per_task: dict[str, dict[str, Any]]) -> "tuple[float | No
 def aggregate_attempts(
     attempts: list[dict[str, Any]],
     *,
-    token_budgets: "list[float] | None" = None,
-    wall_time_budgets_ms: "list[float] | None" = None,
+    token_budgets: list[float] | None = None,
+    wall_time_budgets_ms: list[float] | None = None,
 ) -> dict[str, Any]:
     """Aggregate benchmark attempts per agent (pure)."""
     by_agent: dict[str, list[dict[str, Any]]] = {}
@@ -503,8 +516,8 @@ def aggregate_attempts(
 
 def _budgeted_scores(
     valid: list[dict[str, Any]],
-    token_budgets: "list[float]",
-    wall_time_budgets_ms: "list[float]",
+    token_budgets: list[float],
+    wall_time_budgets_ms: list[float],
 ) -> list[dict[str, Any]]:
     """Score under a fixed budget: over-budget attempts score zero, not excluded.
 
@@ -540,8 +553,8 @@ def build_benchmark_scorecard(
     attempts: list[dict[str, Any]],
     base_dir: Path,
     *,
-    token_budgets: "list[float] | None" = None,
-    wall_time_budgets_ms: "list[float] | None" = None,
+    token_budgets: list[float] | None = None,
+    wall_time_budgets_ms: list[float] | None = None,
 ) -> dict[str, Any]:
     resolved = [_attach_report(attempt, base_dir) for attempt in attempts]
     return aggregate_attempts(
