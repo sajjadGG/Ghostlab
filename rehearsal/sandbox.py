@@ -395,7 +395,7 @@ MCP_UPLOAD_ROOT = "/sandbox/mcp"
 
 WORKSPACE_ARTIFACT_ROOT = "/sandbox/artifacts/workspace"
 WORKSPACE_EXPORT_PYTHON = "/usr/bin/python3"
-WORKSPACE_EXPORT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+WORKSPACE_EXPORT_PATH = "/usr/bin:/bin"
 WORKSPACE_RUNTIME_SUMMARY_PREFIX = "GHOSTLAB_WORKSPACE_RUNTIME "
 
 _WORKSPACE_RUNTIME_CHECK = r"""
