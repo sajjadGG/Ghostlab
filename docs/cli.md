@@ -556,8 +556,13 @@ ghostlab artifact-run \
   --prompt-file prompts/task-definer-run.md \
   --output-contract schemas/task-definitions.schema.json \
   --export /sandbox/output/task-definitions.json=task-definitions.json \
+  --optional-export /sandbox/output/diagnostics.json=diagnostics.json \
   --run-dir runs/task-definer
 ```
+
+`--export` is required and fails the run when its remote path is absent.
+`--optional-export` downloads and records a path when present without failing
+the run when it is absent.
 
 For an agent under test, export the repository it produced:
 
@@ -566,9 +571,18 @@ ghostlab artifact-run \
   --agent agents/candidate.json \
   --workspace <materialized-base-repo> \
   --prompt-file tasks/<task_id>/public/prompt.txt \
+  --sandbox-image 'project@sha256:<digest>' \
+  --setup-command '["python3","-m","venv",".venv"]' \
   --export-workspace candidate-state.tar.zst \
   --run-dir attempts/<attempt_id>
 ```
+
+`--sandbox-image` overrides the agent definition's image so a benchmark can run
+inside its validated, digest-pinned project environment. Each repeatable
+`--setup-command` is a JSON argument array executed in that sandbox before the
+single agent turn; no shell reparsing is performed. The image must provide a
+root-owned `/usr/bin/python3` and its standard library. Ghostlab checks this
+trusted workspace-export runtime before the agent receives its prompt.
 
 `--export-workspace` produces a canonical, filtered export *before* the sandbox
 is torn down:
@@ -580,6 +594,11 @@ is torn down:
 | `workspace-export/untracked.json` | untracked and changed paths from `git status --porcelain=v2` |
 | `<archive>` | deterministic archive of exactly the files in `status.json` |
 
+After download, Ghostlab independently checks the archive hash, every member's
+type, mode, size, and content hash, and the canonical state hash against
+`status.json`. An inconsistent export is a harness failure rather than a
+candidate result.
+
 Changed and untracked files are included; `.git/`, `.venv/`, `node_modules/`,
 `target/`, `dist/`, `build/`, `__pycache__/` and `.pytest_cache/` are excluded.
 Add project-specific exclusions with `--workspace-exclude` (repeatable, on top
@@ -590,7 +609,9 @@ provides `zstd` and as `.tar.gz` otherwise, with the fallback recorded in the
 manifest warnings rather than hidden behind the requested name.
 
 `artifact-run.json` records the status, the agent-config/prompt/workspace
-hashes, the resolved runner, timing, and every export. The status is exact:
+hashes, the resolved runner, timing, and every export. The post-run workspace
+hash is always recorded, even when `--export-workspace` is omitted. The status
+is exact:
 
 | Status | Meaning |
 | --- | --- |
@@ -620,11 +641,18 @@ ghostlab scorer-run \
 ```
 
 The scorer never reuses the sandbox that produced the candidate. A fresh
-sandbox mounts the candidate read-only at `/candidate/repo`, the scorer package
-at `/scorer`, hidden fixtures at `/fixtures`, and the scorer input at `/input`;
-only `/output` and `/tmp` are writable. It has no network policy and no
-providers, so a hostile candidate implementation has no credentials to steal
-even though its code executes.
+sandbox exposes the candidate, scorer, fixtures, input, and output through the
+paths in `score-input.json` and the `GHOSTLAB_*_ROOT` environment variables.
+OpenShell 0.0.80 requires their physical paths below `/sandbox`; manifest
+entrypoint paths are translated for compatibility, but scorer code must not
+hard-code `/candidate`, `/scorer`, `/fixtures`, `/input`, or `/output`. A
+fail-closed Landlock launcher makes the candidate, scorer, fixture, and input
+roots content-read-only and leaves only the output and temporary roots
+writable. A scorer that executes candidate code must launch it through
+`GHOSTLAB_SECURE_EXEC`, or an equivalent nested sandbox, without granting
+fixture, input, scorer, or output access. The deterministic sandbox has no
+network policy and no providers, so a hostile candidate implementation has no
+credentials to steal.
 
 The scorer sees no candidate identity. `--trace` is redacted before it is
 staged: only `agent.tool_call` events survive, and only their `server`, `tool`,

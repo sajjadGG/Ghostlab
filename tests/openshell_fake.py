@@ -16,8 +16,9 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 # Absolute roots the scorer and artifact-run contracts pin. Anything starting
 # with one of these is a sandbox path and gets rewritten into the fake root.
@@ -96,6 +97,8 @@ class FakeOpenShell:
                 archived.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(live), str(archived))
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if verb == ["policy", "set"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         if argv[1:2] == ["logs"]:
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -162,6 +165,8 @@ class FakeOpenShell:
     def _upload(self, argv: list[str]):
         name, source, destination = argv[3], argv[4], argv[5]
         target = self.inside(name, destination)
+        if target.is_dir():
+            target = target / Path(source).name
         target.parent.mkdir(parents=True, exist_ok=True)
         if Path(source).is_dir():
             shutil.copytree(source, target, symlinks=True, dirs_exist_ok=True)

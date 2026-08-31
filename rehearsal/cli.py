@@ -8,7 +8,14 @@ from pathlib import Path
 
 from . import __version__
 from . import termcolor as tc
-from .config import ConfigError, RunnerConfig, load_persona, load_runner, load_scenario, load_target
+from .config import (
+    ConfigError,
+    RunnerConfig,
+    load_persona,
+    load_runner,
+    load_scenario,
+    load_target,
+)
 from .inspect import inspect_target, write_inspect_artifacts
 from .orchestrator import run_scenario
 from .types import utc_now
@@ -16,7 +23,7 @@ from .types import utc_now
 # Command -> handler registry; populated after the cmd_* definitions below.
 # `KNOWN_COMMANDS` is derived from it so the two can never drift apart, and a
 # test asserts the registry matches the subparsers declared in build_parser().
-_HANDLERS: "dict[str, object]" = {}
+_HANDLERS: dict[str, object] = {}
 
 
 # Agent CLIs echo the prompt back on failure, so a raw backend error can be
@@ -836,6 +843,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Download a sandbox path into the run dir before teardown (repeatable).",
     )
     artifact_parser.add_argument(
+        "--optional-export",
+        action="append",
+        default=None,
+        metavar="REMOTE[=NAME]",
+        help="Download a sandbox path when present without failing when absent (repeatable).",
+    )
+    artifact_parser.add_argument(
         "--export-workspace", default="", metavar="ARCHIVE",
         help="Canonically export the agent's workspace as this archive name "
              "(e.g. candidate-state.tar.zst).",
@@ -863,6 +877,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     artifact_parser.add_argument(
         "--timeout", type=int, default=0, help="Override the runner's turn timeout in seconds."
+    )
+    artifact_parser.add_argument(
+        "--sandbox-image",
+        default="",
+        help="Override the agent config's sandbox image (for a pinned task environment).",
+    )
+    artifact_parser.add_argument(
+        "--setup-command",
+        action="append",
+        default=None,
+        metavar="JSON_ARRAY",
+        help="Run an argv JSON array in the sandbox before the agent turn (repeatable).",
     )
     artifact_parser.add_argument(
         "--keep-sandbox", action="store_true", help="Leave the sandbox running for inspection."
@@ -1133,7 +1159,11 @@ def _print_create_summary(name: str, spec, source: str = "") -> None:
 def cmd_create(args: argparse.Namespace) -> int:
     from .config import load_target
     from .jobs import (
-        create_job, default_job_spec, default_skill_job_spec, slugify, target_from_url,
+        create_job,
+        default_job_spec,
+        default_skill_job_spec,
+        slugify,
+        target_from_url,
     )
 
     interactive = not args.yes
@@ -1214,7 +1244,7 @@ def cmd_create(args: argparse.Namespace) -> int:
 
             hinted_agent, _hinted_sandbox = load_agent_definition(args.agent)
             declared_backend_hint = str(
-                ((hinted_agent.get("runtime") or {}).get("backend") or "")
+                (hinted_agent.get("runtime") or {}).get("backend") or ""
             )
         except (ConfigError, OSError, ValueError):
             # The normal load below reports the actionable validation error.
@@ -1820,7 +1850,7 @@ def cmd_create(args: argparse.Namespace) -> int:
     print(tc.heading(f"Evaluation ready · jobs/{slug}"))
     print(f"  rerun       ghostlab test --job {slug}")
     print(f"  review      ghostlab review --job {slug}")
-    print(f"  dashboard   ghostlab ui")
+    print("  dashboard   ghostlab ui")
     return 0
 
 
@@ -1845,7 +1875,7 @@ def _resume_job_pipeline(args: argparse.Namespace, name: str, ask_yn) -> int:
         print(tc.muted("  discover: reused completed artifacts"))
     else:
         if _discover_new_job(slug) != 0:
-            print(tc.muted(f"  resume stopped; fix target/auth then rerun with --resume"))
+            print(tc.muted("  resume stopped; fix target/auth then rerun with --resume"))
             return 1
 
     _create_stage(3, "Configure agent", "Reuse or resolve the AUT runner.")
@@ -1958,7 +1988,6 @@ def _configure_aut_host(spec_path: Path, ask_yn, backend: str = "") -> None:
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
-    from dataclasses import asdict
 
     from .setup_runtime import SetupError, SetupRuntime
 
@@ -2511,7 +2540,7 @@ class _SandboxedOpencodeProject:
     of the run, then puts the original back.
     """
 
-    def __init__(self, path: Path, original: str, sandbox: "object") -> None:
+    def __init__(self, path: Path, original: str, sandbox: object) -> None:
         self.path = path
         self.original = original
         self.sandbox = sandbox
@@ -2531,7 +2560,7 @@ class _SandboxedAgent:
     left exactly as the user configured it.
     """
 
-    def __init__(self, runner_path: Path, original: str, handle: "object") -> None:
+    def __init__(self, runner_path: Path, original: str, handle: object) -> None:
         self.runner_path = runner_path
         self.original = original
         self.handle = handle
@@ -2670,11 +2699,13 @@ def cmd_lab(args: argparse.Namespace) -> int:
         materialize_job_runners,
     )
     from .lab import (
-        TOTAL_STEPS, build_agent_interactively, confirm_profile, review_scenarios,
+        TOTAL_STEPS,
+        build_agent_interactively,
+        confirm_profile,
+        review_scenarios,
         sandbox_settings,
     )
     from .llm_backend import LlmBackendError, backend_label, create_backend
-    from .spec import save_spec
 
     prompter = Prompter()
     print(tc.heading("Ghostlab · configure an agent evaluation"))
@@ -2823,6 +2854,7 @@ def cmd_lab(args: argparse.Namespace) -> int:
 
 def cmd_test(args: argparse.Namespace) -> int:
     from dataclasses import replace
+
     from .hosts import build_hosts
     from .plan import load_test_plan
     from .setup_runtime import SetupError, SetupRuntime
@@ -2877,7 +2909,7 @@ def cmd_test(args: argparse.Namespace) -> int:
 
     backend = None
     if args.judge:
-        from .llm_backend import LlmBackendError, backend_label, create_backend
+        from .llm_backend import LlmBackendError, create_backend
 
         try:
             from .sandbox import normalize_sandbox
@@ -2903,8 +2935,8 @@ def cmd_test(args: argparse.Namespace) -> int:
             source=f"{args.spec}:test.user_runner",
         )
     elif t.get("user_runtime"):
-        from .jobs import build_user_runner
         from .config import runner_from_dict
+        from .jobs import build_user_runner
 
         user_runner_config = runner_from_dict(
             build_user_runner(spec, args.spec, runtime=dict(t["user_runtime"])),
@@ -3256,7 +3288,11 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 def cmd_profile(args: argparse.Namespace) -> int:
     from .llm_backend import LlmBackendError, backend_label, create_backend
-    from .profile import build_capability_profile, profile_prompt, write_profile_artifacts
+    from .profile import (
+        build_capability_profile,
+        profile_prompt,
+        write_profile_artifacts,
+    )
 
     inspect_path = args.inspect
     if not inspect_path.exists():
@@ -3305,8 +3341,8 @@ def cmd_profile(args: argparse.Namespace) -> int:
 
 
 def cmd_generate_scenarios(args: argparse.Namespace) -> int:
-    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .generate import generate_scenarios, write_scenarios
+    from .llm_backend import LlmBackendError, backend_label, create_backend
 
     if not args.profile.exists():
         raise ConfigError(f"capabilities.json not found: {args.profile}")
@@ -3360,8 +3396,8 @@ def cmd_generate_personas(args: argparse.Namespace) -> int:
 
 
 def cmd_generate_dataset(args: argparse.Namespace) -> int:
-    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .dataset import build_dataset, write_dataset
+    from .llm_backend import LlmBackendError, backend_label, create_backend
 
     if not args.profile.exists():
         raise ConfigError(f"capabilities.json not found: {args.profile}")
@@ -3663,9 +3699,7 @@ def _check_llm_backends(args: argparse.Namespace) -> bool:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    import subprocess
 
-    from .codex_backend import CodexError, resolve_codex_bin
 
     ok = True
     print("Ghostlab doctor")
@@ -3692,8 +3726,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
-    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .evaluate import evaluate_run, write_verdict_artifacts
+    from .llm_backend import LlmBackendError, backend_label, create_backend
 
     if not (args.run / "events.jsonl").exists():
         raise ConfigError(f"No events.jsonl in {args.run}")
@@ -3771,7 +3805,9 @@ def cmd_scorecard(args: argparse.Namespace) -> int:
 def _cmd_benchmark_scorecard(args: argparse.Namespace) -> int:
     """Source-normalized aggregation over benchmark attempt records."""
     from .scorecard import (
-        build_benchmark_scorecard, load_attempts, write_benchmark_scorecard,
+        build_benchmark_scorecard,
+        load_attempts,
+        write_benchmark_scorecard,
     )
 
     paths = [Path(path) for path in args.attempts]
@@ -3816,10 +3852,13 @@ def cmd_artifact_run(args: argparse.Namespace) -> int:
         prompt_file=args.prompt_file,
         workspace=args.workspace,
         exports=list(args.export or []),
+        optional_exports=list(args.optional_export or []),
         export_workspace=args.export_workspace,
         output_contract=args.output_contract,
         contract_target=args.contract_target,
         timeout_seconds=args.timeout,
+        sandbox_image=args.sandbox_image,
+        setup_commands=list(args.setup_command or []),
         workspace_excludes=list(args.workspace_exclude or []),
         workspace_retain=list(args.workspace_retain or []),
         keep_sandbox=args.keep_sandbox,
@@ -3903,8 +3942,8 @@ def cmd_scorer_run(args: argparse.Namespace) -> int:
 
 
 def cmd_critique(args: argparse.Namespace) -> int:
-    from .llm_backend import LlmBackendError, backend_label, create_backend
     from .critique import critique_run, write_critique_artifacts
+    from .llm_backend import LlmBackendError, backend_label, create_backend
 
     if not (args.run / "events.jsonl").exists():
         raise ConfigError(f"No events.jsonl in {args.run}")

@@ -400,10 +400,13 @@ class ArtifactRunConfig:
     workspace: Path | None = None
     # (remote sandbox path, run-dir relative name)
     exports: tuple[tuple[str, str], ...] = ()
+    optional_exports: tuple[tuple[str, str], ...] = ()
     export_workspace: str = ""
     output_contract: Path | None = None
     contract_target: str = ""
     timeout_seconds: int = 0
+    sandbox_image: str = ""
+    setup_commands: tuple[tuple[str, ...], ...] = ()
     workspace_excludes: tuple[str, ...] = ()
     workspace_retain: tuple[str, ...] = ()
     keep_sandbox: bool = False
@@ -424,9 +427,73 @@ def parse_export(value: str) -> tuple[str, str]:
         raise ConfigError(f"--export source must be an absolute sandbox path: {value!r}")
     if not separator or not local:
         local = Path(remote).name
-    if Path(local).is_absolute() or ".." in Path(local).parts:
+    if (
+        not local
+        or Path(local) == Path(".")
+        or Path(local).is_absolute()
+        or ".." in Path(local).parts
+    ):
         raise ConfigError(f"--export destination must be a name inside the run dir: {value!r}")
     return remote, local
+
+
+def parse_command(value: str) -> tuple[str, ...]:
+    """Parse one JSON argument array without invoking a shell."""
+    try:
+        command = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"--setup-command must be a JSON array: {exc}") from exc
+    if (
+        not isinstance(command, list)
+        or not command
+        or any(not isinstance(part, str) or not part for part in command)
+    ):
+        raise ConfigError("--setup-command must be a non-empty JSON array of strings")
+    return tuple(command)
+
+
+def _validate_export_destinations(
+    required: tuple[tuple[str, str], ...],
+    optional: tuple[tuple[str, str], ...],
+    workspace_archive: str,
+) -> None:
+    reserved = {
+        "artifact-run.json",
+        "events.jsonl",
+        "stdout.txt",
+        "stderr.txt",
+        "prompt.txt",
+        "workspace-export",
+    }
+    destinations = [local for _remote, local in (*required, *optional)]
+    if workspace_archive:
+        archive = Path(workspace_archive)
+        if archive.is_absolute() or ".." in archive.parts or archive.name != workspace_archive:
+            raise ConfigError("--export-workspace must be a filename inside the run dir")
+        if any(
+            workspace_archive == suffix
+            for suffix in (".tar.zst", ".tar.gz", ".tgz", ".tar")
+        ):
+            raise ConfigError("--export-workspace must include a filename before its archive suffix")
+        destinations.append(workspace_archive)
+        if workspace_archive.endswith(".tar.zst"):
+            destinations.append(
+                workspace_archive[: -len(".tar.zst")] + ".tar.gz"
+            )
+        elif workspace_archive.endswith(".tgz"):
+            destinations.append(workspace_archive[: -len(".tgz")] + ".tar.gz")
+        elif not workspace_archive.endswith((".tar.gz", ".tar")):
+            destinations.append(workspace_archive + ".tar.gz")
+    paths = [Path(item) for item in destinations]
+    for index, path in enumerate(paths):
+        if path.parts and path.parts[0] in reserved:
+            raise ConfigError(f"export destination {path.as_posix()!r} is reserved")
+        for other in paths[index + 1 :]:
+            if path == other or path in other.parents or other in path.parents:
+                raise ConfigError(
+                    "export destinations overlap: "
+                    f"{path.as_posix()!r} and {other.as_posix()!r}"
+                )
 
 
 def artifact_run_config(
@@ -436,13 +503,16 @@ def artifact_run_config(
     prompt: str = "",
     prompt_file: Path | None = None,
     workspace: Path | None = None,
-    exports: "list[str] | None" = None,
+    exports: list[str] | None = None,
+    optional_exports: list[str] | None = None,
     export_workspace: str = "",
     output_contract: Path | None = None,
     contract_target: str = "",
     timeout_seconds: int = 0,
-    workspace_excludes: "list[str] | None" = None,
-    workspace_retain: "list[str] | None" = None,
+    sandbox_image: str = "",
+    setup_commands: list[str] | None = None,
+    workspace_excludes: list[str] | None = None,
+    workspace_retain: list[str] | None = None,
     keep_sandbox: bool = False,
 ) -> ArtifactRunConfig:
     if prompt_file is not None:
@@ -458,8 +528,21 @@ def artifact_run_config(
     if output_contract is not None and not Path(output_contract).is_file():
         raise ConfigError(f"Output contract not found: {output_contract}")
     parsed = tuple(parse_export(item) for item in (exports or []))
+    parsed_optional = tuple(parse_export(item) for item in (optional_exports or []))
     if output_contract is not None and not parsed and not contract_target:
         raise ConfigError("--output-contract needs an --export to validate")
+    if contract_target and output_contract is None:
+        raise ConfigError("--contract-target requires --output-contract")
+    _validate_export_destinations(parsed, parsed_optional, str(export_workspace or ""))
+    if contract_target:
+        contract_path = Path(contract_target)
+        if (
+            contract_path.is_absolute()
+            or contract_path == Path(".")
+            or ".." in contract_path.parts
+            or contract_target not in {local for _remote, local in (*parsed, *parsed_optional)}
+        ):
+            raise ConfigError("--contract-target must name a declared export inside the run dir")
     return ArtifactRunConfig(
         agent_path=Path(agent).expanduser(),
         run_dir=Path(run_dir).expanduser(),
@@ -467,10 +550,13 @@ def artifact_run_config(
         prompt_source=prompt_source,
         workspace=Path(workspace).expanduser() if workspace else None,
         exports=parsed,
+        optional_exports=parsed_optional,
         export_workspace=str(export_workspace or ""),
         output_contract=Path(output_contract).expanduser() if output_contract else None,
         contract_target=str(contract_target or ""),
         timeout_seconds=int(timeout_seconds or 0),
+        sandbox_image=str(sandbox_image or ""),
+        setup_commands=tuple(parse_command(item) for item in (setup_commands or [])),
         workspace_excludes=tuple(str(item) for item in (workspace_excludes or [])),
         workspace_retain=tuple(str(item) for item in (workspace_retain or [])),
         keep_sandbox=bool(keep_sandbox),
@@ -524,7 +610,7 @@ class ScorerConfig:
     def component_ids(self) -> tuple[str, ...]:
         return tuple(component.id for component in self.components)
 
-    def component(self, component_id: str) -> "ScorerComponent | None":
+    def component(self, component_id: str) -> ScorerComponent | None:
         for component in self.components:
             if component.id == component_id:
                 return component

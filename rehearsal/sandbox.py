@@ -7,18 +7,19 @@ normalization only.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 from .session_provenance import CODEX_ORIGINATOR_ENV
-
 
 DEFAULT_SANDBOX: dict[str, Any] = {
     "backend": "openshell",
@@ -95,7 +96,7 @@ def normalize_sandbox(
 RunFn = Callable[..., subprocess.CompletedProcess[str]]
 
 
-def _default_run(command: list[str], **kwargs: Any) -> "subprocess.CompletedProcess[str]":
+def _default_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
     """Late-bound indirection to ``subprocess.run``.
 
     Binding the dataclass default directly to ``subprocess.run`` would capture
@@ -111,10 +112,10 @@ class OpenShellSandbox:
     role: str = "agent"
     # None => resolved to `_default_run` at call time, so helpers that build
     # their own sandboxes stay interceptable.
-    run: "RunFn | None" = None
+    run: RunFn | None = None
     name: str = field(init=False)
     created: bool = field(default=False, init=False)
-    _ssh_config: "Path | None" = field(default=None, init=False)
+    _ssh_config: Path | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         prefix = re.sub(r"[^a-z0-9-]+", "-", str(self.config.get("name") or "ghostlab").lower())
@@ -183,7 +184,8 @@ class OpenShellSandbox:
         if policy:
             if not Path(str(policy)).exists():
                 raise SandboxError("sandbox_policy_missing", str(policy))
-            command += ["--policy", str(policy)]
+            if not self.config.get("policy_after_upload"):
+                command += ["--policy", str(policy)]
         uploads = list(self.config.get("uploads", []) or [])
         for upload in uploads:
             source = Path(upload["source"])
@@ -207,6 +209,24 @@ class OpenShellSandbox:
                 pass
             raise
         self.created = True
+        if policy and self.config.get("policy_after_upload"):
+            try:
+                self._call(
+                    [
+                        self.binary,
+                        "policy",
+                        "set",
+                        self.name,
+                        "--policy",
+                        str(policy),
+                        "--wait",
+                    ],
+                    timeout=90,
+                    check=True,
+                )
+            except SandboxError:
+                self.close()
+                raise
 
     def allowed_env(self, requested: dict[str, str]) -> dict[str, str]:
         allow = set(self.config.get("env_allowlist", []))
@@ -260,7 +280,7 @@ class OpenShellSandbox:
 
     def ssh_command(
         self, command: list[str], *, env: dict[str, str], workdir: str = "",
-        base_env: "dict[str, str] | None" = None,
+        base_env: dict[str, str] | None = None,
     ) -> list[str]:
         """Build an `ssh` invocation that runs ``command`` inside this sandbox.
 
@@ -302,15 +322,46 @@ class OpenShellSandbox:
         source = Path(source).expanduser()
         if not source.exists():
             raise SandboxError("sandbox_upload_missing", str(source))
+        remote = Path(destination)
+        remote_parent = remote.parent.as_posix()
+        prepared = self.exec(
+            ["/bin/mkdir", "-p", remote_parent],
+            input_text=None,
+            env={},
+            timeout=30,
+        )
+        if prepared.returncode != 0:
+            detail = (prepared.stderr or prepared.stdout or "mkdir failed").strip()
+            raise SandboxError("sandbox_upload_failed", detail)
         self._call(
-            [self.binary, "sandbox", "upload", self.name, str(source), destination],
+            [
+                self.binary,
+                "sandbox",
+                "upload",
+                self.name,
+                str(source),
+                destination,
+                "--no-git-ignore",
+            ],
             timeout=120, check=True,
         )
+        verified = self.exec(
+            ["/usr/bin/test", "-f", destination],
+            input_text=None,
+            env={},
+            timeout=30,
+        )
+        if verified.returncode != 0:
+            detail = (verified.stderr or verified.stdout or "uploaded file is missing").strip()
+            raise SandboxError("sandbox_upload_failed", detail)
         if mode:
-            self.exec(
+            changed = self.exec(
                 ["/bin/sh", "-c", f"chmod {mode} {shlex_quote(destination)}"],
                 input_text=None, env={}, timeout=30,
             )
+            if changed.returncode != 0:
+                detail = (changed.stderr or changed.stdout or "chmod failed").strip()
+                raise SandboxError("sandbox_upload_failed", detail)
 
     def download(self, source: str, destination: Path) -> None:
         """Copy one sandbox artifact back to the host workspace."""
@@ -342,11 +393,319 @@ class OpenShellSandbox:
 
 MCP_UPLOAD_ROOT = "/sandbox/mcp"
 
-# Where the canonical exporter and its output live inside a sandbox. Both sit
-# under /sandbox because that is the one root every Ghostlab policy grants the
-# sandboxed process write access to.
-EXPORT_TOOL_REMOTE = "/sandbox/.ghostlab/workspace_export.py"
 WORKSPACE_ARTIFACT_ROOT = "/sandbox/artifacts/workspace"
+WORKSPACE_EXPORT_PYTHON = "/usr/bin/python3"
+WORKSPACE_EXPORT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+WORKSPACE_RUNTIME_SUMMARY_PREFIX = "GHOSTLAB_WORKSPACE_RUNTIME "
+
+_WORKSPACE_RUNTIME_CHECK = r"""
+import argparse
+import collections.abc
+import gzip
+import hashlib
+import json
+import os
+import pathlib
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import threading
+import typing
+
+prefix = "GHOSTLAB_WORKSPACE_RUNTIME "
+errors = []
+resources = {os.path.realpath(sys.executable)}
+declared = sys.argv[1]
+if os.path.isabs(declared):
+    resources.add(declared)
+    resources.add(os.path.realpath(declared))
+library_roots = set()
+for entry in sys.path:
+    if not entry or not os.path.isabs(entry):
+        continue
+    candidate = os.path.realpath(entry)
+    while not os.path.exists(candidate) and os.path.dirname(candidate) != candidate:
+        candidate = os.path.dirname(candidate)
+    library_roots.add(candidate)
+    resources.add(candidate)
+path_roots = set()
+for entry in os.environ.get("PATH", "").split(os.pathsep):
+    if not entry or not os.path.isabs(entry):
+        errors.append(f"workspace exporter PATH entry is not absolute: {entry!r}")
+        continue
+    candidate = os.path.realpath(entry)
+    while not os.path.exists(candidate) and os.path.dirname(candidate) != candidate:
+        candidate = os.path.dirname(candidate)
+    path_roots.add(candidate)
+    resources.add(candidate)
+zstd = shutil.which("zstd")
+zstd_paths = set()
+if zstd:
+    if not os.path.isabs(zstd):
+        errors.append(f"zstd did not resolve to an absolute path: {zstd!r}")
+    else:
+        zstd_paths.update((zstd, os.path.realpath(zstd)))
+        resources.update(zstd_paths)
+module_paths = set()
+for module in tuple(sys.modules.values()):
+    module_path = getattr(module, "__file__", None)
+    if module_path and os.path.isabs(str(module_path)):
+        module_paths.add(os.path.realpath(str(module_path)))
+resources.update(module_paths)
+
+checked = set(resources)
+checked.update(os.path.dirname(path) for path in (declared, os.path.realpath(sys.executable)))
+checked.update(os.path.dirname(path) for path in zstd_paths)
+for resource in module_paths:
+    candidate = os.path.dirname(resource)
+    while candidate not in checked and candidate != os.path.dirname(candidate):
+        checked.add(candidate)
+        if candidate in library_roots:
+            break
+        candidate = os.path.dirname(candidate)
+for candidate in sorted(checked):
+    try:
+        info = os.stat(candidate)
+    except OSError as exc:
+        errors.append(f"{candidate}: cannot stat ({exc})")
+        continue
+    if info.st_uid != 0:
+        errors.append(f"{candidate}: uid {info.st_uid}, expected root (0)")
+    if info.st_mode & 0o022:
+        errors.append(f"{candidate}: group/world writable mode {info.st_mode & 0o777:o}")
+    if os.access(candidate, os.W_OK):
+        errors.append(f"{candidate}: writable by sandbox uid {os.geteuid()}")
+if errors:
+    print("workspace exporter runtime is untrusted: " + "; ".join(errors), file=sys.stderr)
+    raise SystemExit(1)
+print(prefix + json.dumps({
+    "module_paths": sorted(module_paths),
+    "module_roots": sorted(library_roots),
+    "path_roots": sorted(path_roots),
+    "paths": sorted(resources),
+    "uid": os.geteuid(),
+    "zstd": os.path.realpath(zstd) if zstd else "",
+}))
+"""
+
+
+def _workspace_python_command(
+    python: str,
+    arguments: list[str],
+    *,
+    search_path: str = WORKSPACE_EXPORT_PATH,
+) -> list[str]:
+    bootstrap = (
+        "import os,sys;"
+        f"os.environ['PATH']={search_path!r};"
+        "exec(compile(sys.stdin.read(),'<ghostlab-workspace-export>','exec'))"
+    )
+    return [python, "-I", "-S", "-c", bootstrap, *arguments]
+
+
+def _load_sandbox_policy(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SandboxError(
+            "sandbox_runtime_untrusted",
+            f"cannot read sandbox policy {path}: {exc}",
+        ) from exc
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            import yaml  # type: ignore[import-untyped]
+        except ImportError:
+            from .spec import parse_yaml
+
+            loader = parse_yaml
+        else:
+            loader = yaml.safe_load
+        try:
+            document = loader(text)
+        except Exception as exc:
+            raise SandboxError(
+                "sandbox_runtime_untrusted",
+                f"cannot verify filesystem protections in sandbox policy {path}: {exc}",
+            ) from exc
+    if not isinstance(document, dict):
+        raise SandboxError(
+            "sandbox_runtime_untrusted",
+            f"sandbox policy {path} is not a mapping",
+        )
+    return document
+
+
+def _policy_paths(value: Any, *, field_name: str, policy: Path) -> list[PurePosixPath]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise SandboxError(
+            "sandbox_runtime_untrusted",
+            f"sandbox policy {policy} must define filesystem_policy.{field_name} "
+            "as a list of absolute paths",
+        )
+    paths = [PurePosixPath(item) for item in value]
+    if any(not path.is_absolute() or ".." in path.parts for path in paths):
+        raise SandboxError(
+            "sandbox_runtime_untrusted",
+            f"sandbox policy {policy} has an invalid filesystem_policy.{field_name} path",
+        )
+    return paths
+
+
+def _contains_posix(root: PurePosixPath, path: PurePosixPath) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def validate_workspace_export_policy(
+    config: dict[str, Any],
+    protected_paths: tuple[str, ...] = ("/usr",),
+) -> None:
+    """Reject an explicit policy that lets the agent rewrite the export runtime.
+
+    OpenShell's built-in filesystem policy already mounts ``/usr`` and ``/lib``
+    read-only. An explicit policy replaces that default, so it must retain
+    read-only coverage for the interpreter and standard-library paths.
+    """
+    configured = config.get("policy")
+    if not configured:
+        return
+    policy = Path(str(configured))
+    document = _load_sandbox_policy(policy)
+    filesystem = document.get("filesystem_policy")
+    if not isinstance(filesystem, dict):
+        raise SandboxError(
+            "sandbox_runtime_untrusted",
+            f"sandbox policy {policy} has no verifiable filesystem_policy",
+        )
+    read_only = _policy_paths(
+        filesystem.get("read_only"), field_name="read_only", policy=policy
+    )
+    read_write = _policy_paths(
+        filesystem.get("read_write"), field_name="read_write", policy=policy
+    )
+    for raw_path in protected_paths:
+        path = PurePosixPath(raw_path)
+        if not path.is_absolute() or not any(_contains_posix(root, path) for root in read_only):
+            raise SandboxError(
+                "sandbox_runtime_untrusted",
+                f"sandbox policy {policy} does not keep {raw_path} read-only",
+            )
+        if any(
+            _contains_posix(root, path) or _contains_posix(path, root)
+            for root in read_write
+        ):
+            raise SandboxError(
+                "sandbox_runtime_untrusted",
+                f"sandbox policy {policy} grants write access overlapping {raw_path}",
+            )
+
+
+def verify_workspace_export_runtime(
+    sandbox: OpenShellSandbox,
+    *,
+    python: str = WORKSPACE_EXPORT_PYTHON,
+    search_path: str = WORKSPACE_EXPORT_PATH,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Prove the isolated exporter cannot be replaced by setup or agent code."""
+    result = sandbox.exec(
+        _workspace_python_command(python, [python], search_path=search_path),
+        input_text=_WORKSPACE_RUNTIME_CHECK,
+        env={},
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+        raise SandboxError("sandbox_runtime_untrusted", detail[-2000:])
+    payload: dict[str, Any] | None = None
+    for line in (result.stdout or "").splitlines():
+        if not line.startswith(WORKSPACE_RUNTIME_SUMMARY_PREFIX):
+            continue
+        try:
+            candidate = json.loads(line[len(WORKSPACE_RUNTIME_SUMMARY_PREFIX) :])
+        except json.JSONDecodeError as exc:
+            raise SandboxError(
+                "sandbox_runtime_untrusted",
+                f"workspace runtime check returned invalid JSON: {exc}",
+            ) from exc
+        if isinstance(candidate, dict):
+            payload = candidate
+    if payload is None:
+        raise SandboxError(
+            "sandbox_runtime_untrusted",
+            "workspace runtime check produced no verifiable path inventory",
+        )
+    paths = payload.get("paths")
+    if (
+        not isinstance(paths, list)
+        or not paths
+        or any(not isinstance(path, str) for path in paths)
+    ):
+        raise SandboxError(
+            "sandbox_runtime_untrusted",
+            "workspace runtime check produced no verifiable path inventory",
+        )
+    validate_workspace_export_policy(sandbox.config, tuple(paths))
+    return payload
+
+
+def _workspace_export_source() -> str:
+    from . import workspace_export
+
+    return Path(workspace_export.__file__).read_text(encoding="utf-8")
+
+
+def fingerprint_workspace(
+    sandbox: OpenShellSandbox,
+    *,
+    workdir: str,
+    excludes: list[str] | None = None,
+    retain: list[str] | None = None,
+    timeout: int = 900,
+) -> dict[str, Any]:
+    """Compute the canonical workspace state inside a live sandbox."""
+    from . import workspace_export
+
+    if not sandbox.created:
+        raise SandboxError("sandbox_export_failed", "sandbox is not running")
+    command = _workspace_python_command(
+        WORKSPACE_EXPORT_PYTHON,
+        [
+            "--root",
+            workdir,
+            "--hash-only",
+        ],
+    )
+    for name in excludes or list(workspace_export.DEFAULT_EXCLUDES):
+        command += ["--exclude", str(name)]
+    for name in retain or []:
+        command += ["--retain", str(name)]
+    result = sandbox.exec(
+        command,
+        input_text=_workspace_export_source(),
+        env={},
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "workspace fingerprint failed").strip()[-2000:]
+        raise SandboxError("sandbox_export_failed", detail)
+    for line in (result.stdout or "").splitlines():
+        if line.startswith(workspace_export.SUMMARY_PREFIX):
+            import json as _json
+
+            return _json.loads(line[len(workspace_export.SUMMARY_PREFIX) :])
+    raise SandboxError(
+        "sandbox_export_failed",
+        "workspace fingerprint produced no summary; "
+        f"stdout tail: {(result.stdout or '').strip()[-500:]}",
+    )
 
 
 def export_workspace(
@@ -354,8 +713,8 @@ def export_workspace(
     *,
     workdir: str,
     destination: Path,
-    excludes: "list[str] | None" = None,
-    retain: "list[str] | None" = None,
+    excludes: list[str] | None = None,
+    retain: list[str] | None = None,
     archive_name: str = "state.tar.zst",
     timeout: int = 900,
 ) -> dict[str, Any]:
@@ -370,21 +729,31 @@ def export_workspace(
 
     if not sandbox.created:
         raise SandboxError("sandbox_export_failed", "sandbox is not running")
+    if archive_name.endswith(".tar.zst") and not shutil.which("zstd"):
+        archive_name = archive_name[: -len(".tar.zst")] + ".tar.gz"
 
-    tool = Path(workspace_export.__file__)
-    sandbox.upload_file(tool, EXPORT_TOOL_REMOTE)
-    command = [
-        "python3", EXPORT_TOOL_REMOTE,
-        "--root", workdir,
-        "--out", WORKSPACE_ARTIFACT_ROOT,
-        "--archive-name", archive_name,
-    ]
+    command = _workspace_python_command(
+        WORKSPACE_EXPORT_PYTHON,
+        [
+            "--root",
+            workdir,
+            "--out",
+            WORKSPACE_ARTIFACT_ROOT,
+            "--archive-name",
+            archive_name,
+        ],
+    )
     for name in excludes or list(workspace_export.DEFAULT_EXCLUDES):
         command += ["--exclude", str(name)]
     for name in retain or []:
         command += ["--retain", str(name)]
 
-    result = sandbox.exec(command, input_text=None, env={}, timeout=timeout)
+    result = sandbox.exec(
+        command,
+        input_text=_workspace_export_source(),
+        env={},
+        timeout=timeout,
+    )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "workspace export failed").strip()[-2000:]
         raise SandboxError("sandbox_export_failed", detail)
@@ -410,6 +779,15 @@ def export_workspace(
         if not local.exists():
             raise SandboxError("sandbox_download_failed", f"{name} was not written to {local}")
         downloaded[name] = str(local)
+    verified = workspace_export.verify_export(
+        Path(downloaded["status.json"]),
+        Path(downloaded[str(summary["archive"])]),
+    )
+    if workspace_export.summary(verified) != summary:
+        raise SandboxError(
+            "sandbox_export_failed",
+            "workspace exporter summary does not match downloaded artifacts",
+        )
     return {**summary, "files": downloaded, "archive_path": downloaded[str(summary["archive"])]}
 
 
