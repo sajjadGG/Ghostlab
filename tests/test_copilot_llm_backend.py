@@ -9,7 +9,9 @@ from unittest.mock import patch
 from rehearsal.copilot_llm_backend import (
     CopilotLlmBackend,
     CopilotLlmError,
+    CopilotUsage,
     collect_text,
+    collect_usage,
     extract_json,
     resolve_copilot_llm_bin,
 )
@@ -160,6 +162,70 @@ class GenerateTest(unittest.TestCase):
         with patch("subprocess.run", return_value=_completed(stdout=_msg("ok"))) as run:
             self.backend.generate_text("hi")
         self.assertIsNotNone(run.call_args.kwargs.get("cwd"))
+
+
+class CollectUsageTest(unittest.TestCase):
+    def test_reads_the_usage_checkpoint(self) -> None:
+        stream = json.dumps({
+            "type": "session.usage_checkpoint",
+            "data": {"totalNanoAiu": 9845375000, "totalPremiumRequests": 15},
+        })
+        usage = collect_usage(stream)
+        self.assertTrue(usage.reported)
+        self.assertEqual(usage.nano_aiu, 9845375000)
+        self.assertEqual(usage.premium_requests, 15.0)
+        self.assertAlmostEqual(usage.aiu, 9.845375)
+
+    def test_captures_the_answering_model(self) -> None:
+        stream = json.dumps({
+            "type": "assistant.message",
+            "data": {"content": "hi", "model": "claude-opus-5"},
+        })
+        self.assertEqual(collect_usage(stream).model, "claude-opus-5")
+
+    def test_absent_checkpoint_is_reported_as_unreported(self) -> None:
+        usage = collect_usage(_msg("hi"))
+        self.assertFalse(usage.reported)
+        self.assertEqual(usage.nano_aiu, 0)
+        self.assertEqual(usage.aiu, 0.0)
+
+    def test_last_checkpoint_wins(self) -> None:
+        stream = "\n".join([
+            json.dumps({"type": "session.usage_checkpoint",
+                        "data": {"totalNanoAiu": 1, "totalPremiumRequests": 0}}),
+            json.dumps({"type": "session.usage_checkpoint",
+                        "data": {"totalNanoAiu": 500, "totalPremiumRequests": 2}}),
+        ])
+        self.assertEqual(collect_usage(stream).nano_aiu, 500)
+
+    def test_ignores_noise(self) -> None:
+        self.assertFalse(collect_usage("banner\n{bad json\n").reported)
+
+
+class GenerateWithUsageTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.backend = CopilotLlmBackend(bin_path="/bin/copilot", model="gpt-5.4-mini")
+
+    def test_returns_reply_and_usage(self) -> None:
+        stream = "\n".join([
+            _msg("391"),
+            json.dumps({"type": "session.usage_checkpoint",
+                        "data": {"totalNanoAiu": 387000000, "totalPremiumRequests": 0.33}}),
+        ])
+        with patch("subprocess.run", return_value=_completed(stdout=stream)):
+            reply, usage = self.backend.generate_text_with_usage("hi")
+        self.assertEqual(reply, "391")
+        self.assertAlmostEqual(usage.premium_requests, 0.33)
+        self.assertTrue(usage.reported)
+
+    def test_generate_text_still_returns_a_plain_string(self) -> None:
+        with patch("subprocess.run", return_value=_completed(stdout=_msg("391"))):
+            self.assertEqual(self.backend.generate_text("hi"), "391")
+
+    def test_usage_is_optional(self) -> None:
+        with patch("subprocess.run", return_value=_completed(stdout=_msg("391"))):
+            _, usage = self.backend.generate_text_with_usage("hi")
+        self.assertEqual(usage, CopilotUsage())
 
 
 class ResolveBinTest(unittest.TestCase):

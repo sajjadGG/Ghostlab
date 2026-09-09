@@ -28,7 +28,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -134,6 +134,65 @@ def extract_json(text: str) -> Any:
     raise CopilotLlmError(f"copilot output was not valid JSON:\n{candidate[:2000]}")
 
 
+@dataclass(frozen=True)
+class CopilotUsage:
+    """What one Copilot call consumed, as reported by the CLI itself.
+
+    Copilot bills in AI units (``nanoAiu``) and in premium requests, and the two
+    are not proportional across models — a frontier model can cost ~25x the AI
+    units of a small one but ~45x the premium requests. Callers doing
+    accuracy-vs-cost analysis need the CLI's own numbers rather than a token
+    estimate, so they are surfaced instead of discarded.
+
+    Every field is best-effort: the CLI omits the checkpoint event on some paths,
+    in which case the values stay at zero and ``reported`` is False.
+    """
+
+    nano_aiu: int = 0
+    premium_requests: float = 0.0
+    model: str = ""
+    reported: bool = False
+
+    @property
+    def aiu(self) -> float:
+        """AI units consumed (``nano_aiu`` scaled to whole units)."""
+        return self.nano_aiu / 1e9
+
+
+def collect_usage(stream_text: str) -> CopilotUsage:
+    """Read the final ``session.usage_checkpoint`` from a Copilot event stream.
+
+    Each backend call is its own Copilot session, so the last checkpoint's
+    cumulative totals are that call's cost.
+    """
+    usage = CopilotUsage()
+    for line in stream_text.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = event.get("type")
+        data = event.get("data") or {}
+        if kind == "session.usage_checkpoint":
+            usage = CopilotUsage(
+                nano_aiu=int(data.get("totalNanoAiu") or 0),
+                premium_requests=float(data.get("totalPremiumRequests") or 0.0),
+                model=usage.model,
+                reported=True,
+            )
+        elif kind == "assistant.message" and data.get("model"):
+            usage = CopilotUsage(
+                nano_aiu=usage.nano_aiu,
+                premium_requests=usage.premium_requests,
+                model=str(data.get("model")),
+                reported=usage.reported,
+            )
+    return usage
+
+
 def _schema_prompt(prompt: str, schema: dict[str, Any]) -> str:
     """Embed the output contract in the prompt, since copilot has no schema flag."""
     return (
@@ -189,6 +248,15 @@ class CopilotLlmBackend:
 
     def generate_text(self, prompt: str) -> str:
         """Run copilot once and return the assistant's reply as plain text."""
+        return self.generate_text_with_usage(prompt)[0]
+
+    def generate_text_with_usage(self, prompt: str) -> tuple[str, CopilotUsage]:
+        """Run copilot once and return ``(reply, usage)``.
+
+        The usage half is what makes cost-aware callers possible — budgeting a
+        sweep, or plotting accuracy against spend — without re-deriving prices
+        from token counts the CLI never exposes.
+        """
         command = [*self.build_command(), prompt]
         # A scratch cwd keeps copilot from reading the caller's repo or writing
         # session state into it.
@@ -224,7 +292,7 @@ class CopilotLlmBackend:
                 "copilot produced no assistant message"
                 + (f":\n{detail[-1000:]}" if detail else "")
             )
-        return reply
+        return reply, collect_usage(stream)
 
     def generate_json(self, prompt: str, schema: dict[str, Any]) -> Any:
         """Run copilot and return the parsed JSON value it replied with."""
