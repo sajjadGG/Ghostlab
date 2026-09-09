@@ -50,17 +50,28 @@ def _backend_error_summary(exc: Exception, max_lines: int = 3) -> str:
     return (summary or text.strip() or "unknown backend error")[:600]
 
 
+def _aut_backend_for_llm(llm_backend: str) -> str:
+    """Default the agent-under-test runner to the CLI already chosen for generation.
+
+    A user who picked opencode or copilot for generation has that CLI installed
+    and authenticated; codex may not be, so mirroring the choice avoids a
+    surprising failure on an unrelated binary.
+    """
+    return llm_backend if llm_backend in ("opencode", "copilot") else "codex"
+
+
 def _add_llm_backend_arg(parser: argparse.ArgumentParser) -> None:
     """Choose which agent CLI performs generation/judging for this command."""
     parser.add_argument(
         "--llm-backend",
-        choices=["codex", "opencode"],
+        choices=["codex", "copilot", "opencode"],
         default="",
-        help="LLM CLI used for generation/judging. 'opencode' sources models "
-             "from GitHub Copilot and other providers you have authenticated "
-             "(pick one with --model, e.g. github-copilot/claude-sonnet-4.5). "
-             "Default: the job's generation.backend, else $GHOSTLAB_LLM_BACKEND, "
-             "else codex.",
+        help="LLM CLI used for generation/judging. 'copilot' uses the GitHub "
+             "Copilot CLI directly (pick a model with --model, e.g. "
+             "claude-sonnet-5). 'opencode' sources models from GitHub Copilot "
+             "and other providers you have authenticated (e.g. "
+             "github-copilot/claude-sonnet-4.5). Default: the job's "
+             "generation.backend, else $GHOSTLAB_LLM_BACKEND, else codex.",
     )
 
 
@@ -1541,7 +1552,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         args.aut_backend
         or declared_runtime.get("backend")
         or inferred_backend
-        or ("opencode" if getattr(args, "llm_backend", "") == "opencode" else "codex")
+        or _aut_backend_for_llm(getattr(args, "llm_backend", ""))
     )
     if backend == "copilot" and not args.generation_model:
         spec.generation = {**(spec.generation or {}), "model": ""}
