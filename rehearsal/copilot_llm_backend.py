@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -193,6 +194,14 @@ def collect_usage(stream_text: str) -> CopilotUsage:
     return usage
 
 
+def _checked_session_id(session_id: str) -> str:
+    """Copilot session ids are UUIDs; reject anything else before spawning."""
+    try:
+        return str(uuid.UUID(session_id))
+    except ValueError as exc:
+        raise CopilotLlmError(f"copilot session id must be a UUID: {session_id!r}") from exc
+
+
 def _schema_prompt(prompt: str, schema: dict[str, Any]) -> str:
     """Embed the output contract in the prompt, since copilot has no schema flag."""
     return (
@@ -220,10 +229,12 @@ class CopilotLlmBackend:
     def _model(self) -> str:
         return self.model or DEFAULT_COPILOT_MODEL
 
-    def build_command(self) -> list[str]:
+    def build_command(self, session_id: str = "") -> list[str]:
         """The sealed, non-interactive Copilot invocation used for generation.
 
         ``--prompt`` is last so callers append the prompt text as the final arg.
+        ``session_id`` names the conversation: a new UUID starts one, and a UUID
+        used before resumes it with its earlier turns in context.
         """
         command = [
             self._bin(),
@@ -243,21 +254,31 @@ class CopilotLlmBackend:
         model = self._model()
         if model:
             command.extend(["--model", model])
+        if session_id:
+            command.extend(["--session-id", _checked_session_id(session_id)])
         command.append("--prompt")
         return command
 
-    def generate_text(self, prompt: str) -> str:
+    def generate_text(self, prompt: str, *, session_id: str = "") -> str:
         """Run copilot once and return the assistant's reply as plain text."""
-        return self.generate_text_with_usage(prompt)[0]
+        return self.generate_text_with_usage(prompt, session_id=session_id)[0]
 
-    def generate_text_with_usage(self, prompt: str) -> tuple[str, CopilotUsage]:
+    def generate_text_with_usage(
+        self, prompt: str, *, session_id: str = ""
+    ) -> tuple[str, CopilotUsage]:
         """Run copilot once and return ``(reply, usage)``.
 
         The usage half is what makes cost-aware callers possible — budgeting a
         sweep, or plotting accuracy against spend — without re-deriving prices
         from token counts the CLI never exposes.
+
+        Pass the same ``session_id`` on consecutive calls to hold a multi-turn
+        conversation: the second call sees the first call's prompt and reply as
+        real prior turns, not as text pasted into a new prompt. Copilot keeps
+        session state in its own config directory, so resuming works even though
+        every call runs in a fresh scratch directory.
         """
-        command = [*self.build_command(), prompt]
+        command = [*self.build_command(session_id), prompt]
         # A scratch cwd keeps copilot from reading the caller's repo or writing
         # session state into it.
         with tempfile.TemporaryDirectory() as tmp:
