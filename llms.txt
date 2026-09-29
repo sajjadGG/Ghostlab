@@ -27,6 +27,7 @@ Streamlit UI, and an MCP Apps render layer.
 - [sandbox.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/sandbox.py): NVIDIA OpenShell lifecycle, upload/env policy, execution, logs, artifact download, and cleanup.
 - [mcp_client.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/mcp_client.py): minimal stdlib MCP client (stdio + streamable-HTTP/SSE), `tools/list`, `resources/read`, `tools/call`.
 - [inspect.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/inspect.py) + [profile.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/profile.py): understand a target MCP and build a capability profile.
+- [llm_backend.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/llm_backend.py): picks the generation/judging backend — `codex`, `copilot`, or `opencode` — behind one `generate_json(prompt, schema)` surface.
 - [generate.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/generate.py), [personas.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/personas.py), [dataset.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/dataset.py): scenario / persona / dataset generation (codex-backed).
 - [orchestrator.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/orchestrator.py) + [runners.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/runners.py): the dual-agent turn loop and agent-host adapters.
 - [tool_capture.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/tool_capture.py): structured MCP tool-call capture from agent output.

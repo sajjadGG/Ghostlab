@@ -2,10 +2,11 @@
 
 Ghostlab shells out to a coding-agent CLI rather than calling a model API
 directly, so "which backend" is a real choice a user has to make: codex needs a
-working ChatGPT/Codex plan, while opencode can source models from GitHub
-Copilot, Azure, and others the user has already authenticated.
+working ChatGPT/Codex plan, copilot uses the GitHub Copilot subscription
+directly, and opencode can source models from GitHub Copilot, Azure, and others
+the user has already authenticated.
 
-Both backends expose the same ``generate_json(prompt, schema)`` surface, so the
+Every backend exposes the same ``generate_json(prompt, schema)`` surface, so the
 generation stages stay backend-agnostic.
 """
 from __future__ import annotations
@@ -13,16 +14,16 @@ from __future__ import annotations
 import os
 from typing import Any
 
-BACKENDS = ("codex", "opencode")
+BACKENDS = ("codex", "copilot", "opencode")
 DEFAULT_BACKEND = "codex"
 
 
 class LlmBackendError(RuntimeError):
     """Base for every backend failure, so callers can stay backend-agnostic.
 
-    ``CodexError`` and ``OpencodeError`` both derive from this; catch this type
-    to handle "the generation backend could not produce usable output" without
-    caring which CLI was configured.
+    ``CodexError``, ``CopilotLlmError``, and ``OpencodeError`` all derive from
+    this; catch this type to handle "the generation backend could not produce
+    usable output" without caring which CLI was configured.
     """
 
 
@@ -47,9 +48,10 @@ def resolve_backend_kind(explicit: str = "", spec_value: str = "") -> str:
 def backend_error_types() -> tuple[type[Exception], ...]:
     """Every failure type a caller must catch to be backend-agnostic."""
     from .codex_backend import CodexError
+    from .copilot_llm_backend import CopilotLlmError
     from .opencode_backend import OpencodeError
 
-    return (CodexError, OpencodeError)
+    return (CodexError, CopilotLlmError, OpencodeError)
 
 
 def create_backend(
@@ -63,6 +65,13 @@ def create_backend(
 ) -> Any:
     """Build the configured backend. Both share ``generate_json(prompt, schema)``."""
     resolved = resolve_backend_kind(kind, spec_value)
+    if resolved == "copilot":
+        from .copilot_llm_backend import CopilotLlmBackend
+
+        return CopilotLlmBackend(
+            bin_path=bin_path, model=model, timeout_seconds=timeout_seconds,
+            sandbox=sandbox,
+        )
     if resolved == "opencode":
         from .opencode_backend import OpencodeBackend
 
@@ -77,14 +86,25 @@ def create_backend(
     )
 
 
+_BACKEND_KINDS = {
+    "CodexBackend": "codex",
+    "CopilotLlmBackend": "copilot",
+    "OpencodeBackend": "opencode",
+}
+
+
 def backend_label(backend: Any) -> str:
     """Human-readable '<kind> (<binary>) [model]' for progress output."""
-    kind = "opencode" if type(backend).__name__ == "OpencodeBackend" else "codex"
+    kind = _BACKEND_KINDS.get(type(backend).__name__, "codex")
     try:
         binary = backend._bin()
     except Exception:  # noqa: BLE001 - label must never break a run
         binary = kind
-    model = getattr(backend, "model", "") or (
-        getattr(backend, "_model", lambda: "")() if kind == "opencode" else ""
-    )
+    model = getattr(backend, "model", "")
+    if not model and kind != "codex":
+        # opencode and copilot resolve an implicit default when model is unset.
+        try:
+            model = backend._model()
+        except Exception:  # noqa: BLE001 - label must never break a run
+            model = ""
     return f"{kind} ({binary})" + (f" model={model}" if model else "")

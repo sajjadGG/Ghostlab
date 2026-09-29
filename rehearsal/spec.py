@@ -56,9 +56,10 @@ _TOP_LEVEL_KEYS = (
 DEFAULT_GENERATION = {
     "personas": 2,
     "scenarios_per_persona": 2,
-    # Which LLM CLI drives generation/judging: "codex" or "opencode".
-    # opencode sources models from GitHub Copilot and other providers the user
-    # has authenticated, so it is the fallback when codex is unavailable.
+    # Which LLM CLI drives generation/judging: "codex", "copilot", or
+    # "opencode". copilot uses the GitHub Copilot CLI directly; opencode sources
+    # models from GitHub Copilot and other providers the user has authenticated.
+    # Both are fallbacks when codex is unavailable.
     "backend": "",
     "model": "",
     "codex_bin": "",
