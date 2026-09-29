@@ -277,3 +277,39 @@ class RegistrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionTest(unittest.TestCase):
+    """Multi-turn conversations via Copilot's --session-id."""
+
+    SID = "0f8fad5b-d9cb-469f-a165-70867728950e"
+
+    def setUp(self) -> None:
+        self.backend = CopilotLlmBackend(bin_path="/bin/copilot", model="gpt-5.4-mini")
+
+    def test_no_session_flag_by_default(self) -> None:
+        self.assertNotIn("--session-id", self.backend.build_command())
+
+    def test_session_flag_precedes_prompt(self) -> None:
+        command = self.backend.build_command(self.SID)
+        at = command.index("--session-id")
+        self.assertEqual(command[at + 1], self.SID)
+        self.assertEqual(command[-1], "--prompt")
+
+    def test_generate_passes_session_and_keeps_prompt_last(self) -> None:
+        with patch("subprocess.run", return_value=_completed(stdout=_msg("ok"))) as run:
+            self.backend.generate_text_with_usage("turn two", session_id=self.SID)
+        args = run.call_args.args[0]
+        self.assertIn(self.SID, args)
+        self.assertEqual(args[-2:], ["--prompt", "turn two"])
+
+    def test_generate_text_forwards_session(self) -> None:
+        with patch("subprocess.run", return_value=_completed(stdout=_msg("ok"))) as run:
+            self.backend.generate_text("hi", session_id=self.SID)
+        self.assertIn("--session-id", run.call_args.args[0])
+
+    def test_rejects_non_uuid_session(self) -> None:
+        with patch("subprocess.run") as run:
+            with self.assertRaises(CopilotLlmError):
+                self.backend.generate_text("hi", session_id="not-a-uuid")
+        run.assert_not_called()
