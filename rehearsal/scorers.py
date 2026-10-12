@@ -1680,7 +1680,7 @@ def run_deterministic_phase(
                     "GHOSTLAB_FIXTURES_ROOT": FIXTURES_ROOT,
                     "GHOSTLAB_INPUT_ROOT": INPUT_ROOT,
                     "GHOSTLAB_OUTPUT_ROOT": OUTPUT_ROOT,
-                    "GHOSTLAB_SECURE_EXEC": SECURE_EXEC_LAUNCHER,
+                    "GHOSTLAB_SECURE_EXEC": PHYSICAL_SECURE_EXEC_LAUNCHER,
                 },
                 timeout=manifest.timeout_seconds(),
             )

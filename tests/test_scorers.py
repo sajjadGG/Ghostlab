@@ -35,8 +35,8 @@ from rehearsal.scorers import (
     PHYSICAL_INPUT_ROOT,
     PHYSICAL_OUTPUT_ROOT,
     PHYSICAL_SCORER_ROOT,
+    PHYSICAL_SECURE_EXEC_LAUNCHER,
     SCORER_ROOT,
-    SECURE_EXEC_LAUNCHER,
     STATUS_INVALID_CANDIDATE,
     STATUS_JUDGE_UNAVAILABLE,
     STATUS_SCORED,
@@ -1480,7 +1480,7 @@ class ScorerIsolationTest(ScorerTestCase):
             and "ghostlab-scorer-wrapper.py" in " ".join(call)
         )
         self.assertIn(
-            f"GHOSTLAB_SECURE_EXEC={SECURE_EXEC_LAUNCHER}",
+            f"GHOSTLAB_SECURE_EXEC={PHYSICAL_SECURE_EXEC_LAUNCHER}",
             outer_exec,
         )
 
