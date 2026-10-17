@@ -118,19 +118,12 @@ and declared asset, including conflicts and cross-capability workflows.
 
 ### 2. One Runtime Path For Run And Evaluate
 
-`ghostlab exec` resolves an agent definition into a sandboxed invocation for
-every harness, while the job pipeline still materializes its own per-harness
-runner files and only puts the *whole* agent in the sandbox for OpenCode. The
-next step is to route the evaluation pipeline's agent-under-test and
-`artifact-run` through the same resolver, so a definition that runs under
-`exec` is exactly what gets evaluated and benchmarked. Two concrete gaps found
-while building `exec`:
-
-- `artifact-run` still requires a raw `runner.command` and does not attach the
-  definition's MCPs and skills.
-- The job pipeline's OpenShell Copilot runners always pass `--session-id` and
-  `--no-remote`, which the Copilot CLI in OpenShell's `base` image (1.0.16)
-  rejects; `exec` already omits them inside the sandbox.
+`ghostlab exec`, `artifact-run`, and the Claude Code agent-under-test now share
+one resolver (`agent_exec.agent_runner_config`). The Codex, OpenCode, and
+Copilot job builders still predate it and produce equivalent but separately
+maintained commands; folding them in — and putting the whole agent CLI inside
+the sandbox for every harness in the job pipeline, as OpenCode already is —
+would leave one translation per harness.
 
 ### 3. Portable Sandbox Profiles
 
@@ -183,7 +176,7 @@ provider rotation, sharding, and a stable machine-readable summary contract.
 
 ## Near-Term Priority Order
 
-1. Route the evaluation pipeline and `artifact-run` through the `exec` resolver.
+1. Fold the remaining Codex, OpenCode, and Copilot job builders into the `exec` resolver.
 2. Publish and validate the composed-agent schema and dry-run output.
 3. Merge discovery across all configured MCPs and skills.
 4. Add OpenShell version-compatibility integration tests and reusable policies.

@@ -39,6 +39,15 @@ release gate. Arrow-key choices and a checkbox suite picker replace ambiguous
 text prompts. It previews the effective configuration and prints stable `[1/5]`
 through `[5/5]` progress. `--yes` keeps the non-interactive automation path.
 
+### Claude Code as the agent under test
+
+`--aut-backend claude` (or `runtime.backend: claude` in an agent file) runs the
+evaluated agent in Claude Code. Its runner is built by the same resolver as
+[`exec`](#exec): the job's MCPs go in through `--mcp-config` with
+`--strict-mcp-config`, their tools are pre-approved, and replies and tool calls
+are parsed from `stream-json`. The user emulator stays on Codex, OpenCode, or
+Copilot.
+
 ### GitHub Copilot and VS Code custom agents
 
 Use `--aut-backend copilot` and/or `--user-backend copilot` to drive a role
@@ -582,6 +591,14 @@ Run one configured agent once on a mutable workspace, export declared
 artifacts, and record the full trace. Unlike [`run`](#run) there is no user
 emulator, no turn loop, and no message-based verdict: the result of an artifact
 run is what the agent left on disk.
+
+The agent is either a raw `runner.command` or a declarative `runtime.backend`
+(`claude`, `codex`, `copilot`, `opencode`). A declarative agent is resolved
+exactly as [`exec`](#exec) resolves it: its MCPs are attached in the harness's
+own format, stdio MCP programs are uploaded beside the workspace, and its
+instructions and skills are put in front of the task (`prompt.txt` holds what
+the agent received; `prompt_sha256` hashes the task alone, and
+`agent_prompt_sha256` the composed prompt). A raw runner command is used verbatim.
 
 The workspace is uploaded into an OpenShell sandbox, so the agent edits a
 throwaway copy and the directory you pointed at is never modified. The agent

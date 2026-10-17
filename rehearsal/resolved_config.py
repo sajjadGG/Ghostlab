@@ -52,13 +52,20 @@ def _describe_runner(
         or str(runner.get("parser") or "").startswith("opencode")
         or (command and Path(command[0]).name == "opencode")
     )
-    planned = not runner and runtime.get("backend") in ("codex", "opencode", "copilot")
+    is_claude = bool(
+        runtime.get("backend") == "claude"
+        or runner.get("parser") == "claude-json"
+        or (command and Path(command[0]).name == "claude")
+    )
+    planned = not runner and runtime.get("backend") in ("codex", "opencode", "copilot", "claude")
     if is_codex:
         backend = "codex"
     elif is_copilot:
         backend = "copilot"
     elif is_opencode:
         backend = "opencode"
+    elif is_claude:
+        backend = "claude"
     else:
         backend = "custom" if command else "not configured"
     explicit_model = _option(command, "-m", "--model") or str(runtime.get("model") or "")
@@ -69,6 +76,9 @@ def _describe_runner(
     elif backend == "opencode":
         fallback_model = "OpenCode default (not declared)"
         fallback_source = "OpenCode configuration"
+    elif backend == "claude":
+        fallback_model = "Claude Code default (not declared)"
+        fallback_source = "Claude Code configuration"
     else:
         fallback_model = default_model
         fallback_source = default_model_source
@@ -77,7 +87,7 @@ def _describe_runner(
         "copilot-session"
         if backend == "copilot"
         else "process"
-        if backend in ("codex", "opencode")
+        if backend in ("codex", "opencode", "claude")
         else "not configured"
     )
     default_prompt_mode = "append-arg" if backend == "copilot" else "stdin"
@@ -85,6 +95,7 @@ def _describe_runner(
         "codex": "codex-json",
         "opencode": "opencode-json",
         "copilot": "copilot-json",
+        "claude": "claude-json",
     }.get(backend, "text")
     return {
         "source": source if runner else "runtime (pending materialization)" if planned else "not configured",

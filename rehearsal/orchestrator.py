@@ -20,6 +20,7 @@ from .report import write_markdown_report
 from .runners import create_runner, redact_host_noise
 from .tool_capture import (
     annotate_tool_failures,
+    parse_claude_output,
     parse_codex_output,
     parse_copilot_output,
     parse_opencode_output,
@@ -350,6 +351,11 @@ def run_scenario(
                  .get("inputs", {}) or {}).get("mcps", []) or []
             ]
             parsed = parse_opencode_output(aut_result.output, servers=servers)
+            aut_message = parsed["message"] or redact_host_noise(aut_result.output)
+            tool_calls = parsed["tool_calls"]
+            builtin_calls = parsed["builtin_calls"]
+        elif aut_runner_config.parser == "claude-json":
+            parsed = parse_claude_output(aut_result.output)
             aut_message = parsed["message"] or redact_host_noise(aut_result.output)
             tool_calls = parsed["tool_calls"]
             builtin_calls = parsed["builtin_calls"]

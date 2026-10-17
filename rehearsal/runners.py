@@ -238,6 +238,35 @@ def _copilot_session_command(command: list[str], session_id: str) -> list[str]:
     return command
 
 
+def _copilot_sandbox_command(command: list[str], *, resume: bool) -> list[str]:
+    """Adapt a Copilot command to the CLI shipped in an OpenShell image.
+
+    OpenShell's `base` image pins Copilot CLI 1.0.16, which predates
+    `--session-id` and `--no-remote`. Each role owns its own sandbox, so the
+    most recent session there is always this runner's, and `--continue` —
+    supported by old and new releases alike — resumes it.
+    """
+    cleaned: list[str] = []
+    skip = False
+    for part in command:
+        if skip:
+            skip = False
+            continue
+        if part == "--session-id":
+            skip = True
+            continue
+        if part.startswith("--session-id=") or part == "--no-remote":
+            continue
+        cleaned.append(part)
+    if resume and "--continue" not in cleaned:
+        insert_at = next(
+            (index for index, part in enumerate(cleaned) if part in ("-p", "--prompt")),
+            len(cleaned),
+        )
+        cleaned.insert(insert_at, "--continue")
+    return cleaned
+
+
 def _copilot_command_env(command: list[str]) -> list[str]:
     """Expand secret placeholders only when Copilot is about to execute."""
     return [os.path.expandvars(part) for part in command]
@@ -326,6 +355,20 @@ def _prompt_command(
     return command, input_text
 
 
+def _sandbox_prompt_command(
+    command: list[str], prompt_mode: str, prompt: str
+) -> tuple[list[str], str | None] | RunnerResult:
+    """Like :func:`_prompt_command`, for `openshell sandbox exec`.
+
+    OpenShell rejects any argument containing a newline, so a multi-line
+    prompt cannot ride on argv. An `append-arg` prompt is fed on stdin instead
+    and re-attached as the final argument inside the sandbox.
+    """
+    if prompt_mode == "append-arg":
+        return ["/bin/sh", "-c", 'exec "$@" "$(cat)"', "sh", *command], prompt
+    return _prompt_command(command, prompt_mode, prompt)
+
+
 class OpenShellProcessRunner(AgentRunner):
     """Run every agent turn inside one policy-enforced OpenShell sandbox."""
 
@@ -353,7 +396,7 @@ class OpenShellProcessRunner(AgentRunner):
             return RunnerResult(output="", exit_code=125, stderr=str(exc))
 
     def run_turn(self, prompt: str) -> RunnerResult:
-        prepared = _prompt_command(list(self.config.command), self.config.prompt_mode, prompt)
+        prepared = _sandbox_prompt_command(list(self.config.command), self.config.prompt_mode, prompt)
         if isinstance(prepared, RunnerResult):
             return prepared
         return self._run(*prepared)
@@ -412,7 +455,7 @@ class OpenShellCodexSessionRunner(OpenShellProcessRunner):
         return command
 
     def run_turn(self, prompt: str) -> RunnerResult:
-        prepared = _prompt_command(self._command_for_turn(), self.config.prompt_mode, prompt)
+        prepared = _sandbox_prompt_command(self._command_for_turn(), self.config.prompt_mode, prompt)
         if isinstance(prepared, RunnerResult):
             return prepared
         result = self._run(*prepared)
@@ -432,19 +475,23 @@ class OpenShellCopilotSessionRunner(OpenShellProcessRunner):
             raise ValueError("copilot-session command must contain '--prompt'")
         self.session_id = _copilot_session_id(config.command)
         self.thread_id = self.session_id
+        self.turns = 0
 
     def _command_for_turn(self) -> list[str]:
         return _copilot_command_env(
-            _copilot_session_command(list(self.config.command), self.session_id)
+            _copilot_sandbox_command(list(self.config.command), resume=self.turns > 0)
         )
 
     def run_turn(self, prompt: str) -> RunnerResult:
-        prepared = _prompt_command(
+        prepared = _sandbox_prompt_command(
             self._command_for_turn(), self.config.prompt_mode, prompt
         )
         if isinstance(prepared, RunnerResult):
             return prepared
-        return _copilot_error_result(self._run(*prepared))
+        result = _copilot_error_result(self._run(*prepared))
+        if result.exit_code == 0:
+            self.turns += 1
+        return result
 
 
 class OpenShellCopilotProcessRunner(OpenShellProcessRunner):
@@ -452,12 +499,9 @@ class OpenShellCopilotProcessRunner(OpenShellProcessRunner):
 
     def run_turn(self, prompt: str) -> RunnerResult:
         command = _copilot_command_env(
-            _copilot_session_command(
-                list(self.config.command),
-                new_copilot_session_id(),
-            )
+            _copilot_sandbox_command(list(self.config.command), resume=False)
         )
-        prepared = _prompt_command(command, self.config.prompt_mode, prompt)
+        prepared = _sandbox_prompt_command(command, self.config.prompt_mode, prompt)
         if isinstance(prepared, RunnerResult):
             return prepared
         return _copilot_error_result(self._run(*prepared))

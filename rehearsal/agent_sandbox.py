@@ -136,6 +136,31 @@ def ensure_agent_policy(
     return config
 
 
+def remote_path_for(uploads: list[dict[str, Any]], host_path: Any) -> str:
+    """Where ``host_path`` lands inside the sandbox, given its upload list.
+
+    OpenShell places an upload of ``source`` at ``target/<source name>``.
+    Paths outside every upload (and relative ones) are returned unchanged.
+    """
+    text = str(host_path)
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        return text
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return text
+    for upload in uploads:
+        source = Path(str(upload["source"])).resolve()
+        try:
+            relative = resolved.relative_to(source)
+        except ValueError:
+            continue
+        root = Path(str(upload["target"])) / source.name
+        return str(root / relative) if str(relative) != "." else str(root)
+    return text
+
+
 @dataclass
 class AgentSandbox:
     """A live sandbox holding a configured agent, its MCPs, and its workspace."""
@@ -148,23 +173,7 @@ class AgentSandbox:
 
     def remote_path(self, host_path: Any) -> str:
         """Map a host path to where it was uploaded inside the sandbox."""
-        text = str(host_path)
-        candidate = Path(text).expanduser()
-        if not candidate.is_absolute():
-            return text
-        try:
-            resolved = candidate.resolve()
-        except OSError:
-            return text
-        for upload in self.uploads:
-            source = Path(str(upload["source"])).resolve()
-            try:
-                relative = resolved.relative_to(source)
-            except ValueError:
-                continue
-            root = Path(str(upload["target"])) / source.name
-            return str(root / relative) if str(relative) != "." else str(root)
-        return text
+        return remote_path_for(self.uploads, host_path)
 
     def command(
         self, argv: list[str], *, workdir: str = "", env: "dict[str, str] | None" = None
