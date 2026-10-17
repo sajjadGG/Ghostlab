@@ -139,7 +139,9 @@ stdio MCP server, a skill, and a workspace.
 ## From running to evaluating
 
 The file `ghostlab exec` runs is the same agent definition the evaluation
-pipeline takes. When you want to know how *well* the agent does its job rather
+pipeline takes, and the same resolver turns it into a harness command there:
+`artifact-run` accepts a `runtime.backend` agent with its MCPs and skills, and
+`ghostlab create --aut-backend claude` evaluates the agent in Claude Code. When you want to know how *well* the agent does its job rather
 than just getting one answer, hand it to the [Configured Agent Lab](configured-agent-lab.md)
 or `ghostlab create --agent agent.json`, which generate realistic scenarios
 from it, drive it with a simulated user, and judge the outcomes.

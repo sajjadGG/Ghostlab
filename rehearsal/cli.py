@@ -225,7 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Low-level runner JSON for the user emulator.",
     )
     create_parser.add_argument(
-        "--aut-backend", choices=["codex", "opencode", "copilot"], default=None,
+        "--aut-backend", choices=["codex", "opencode", "copilot", "claude"], default=None,
         help="Agent-under-test runner backend (default: declared runtime, else codex).",
     )
     create_parser.add_argument(
@@ -1645,6 +1645,8 @@ def cmd_create(args: argparse.Namespace) -> int:
                 *list(runtime.get("extra_args") or []),
                 *args.aut_copilot_arg,
             ]
+    elif backend == "claude":
+        runtime["kind"] = "process"
     elif backend == "opencode":
         runtime["kind"] = "process"
         if args.aut_agent:
@@ -1705,7 +1707,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         runtime["kind"] = args.runner_kind or existing_runner.get("kind", "process")
         runtime["timeout_seconds"] = args.runner_timeout or existing_runner.get("timeout_seconds", 600)
         command = existing_runner.get("command") or []
-        if command and backend not in ("codex", "opencode", "copilot"):
+        if command and backend not in ("codex", "opencode", "copilot", "claude"):
             runtime["backend"] = "custom"
     spec.agent = {**(spec.agent or {}), "runtime": runtime}
     if existing_runner and backend == "codex":

@@ -460,6 +460,30 @@ def build_copilot_aut_runner(
     )
 
 
+def build_resolved_aut_runner(
+    spec: GhostlabSpec, *, backend: str, runtime: dict | None = None
+) -> dict:
+    """An agent-under-test built by the same resolver as ``ghostlab exec``.
+
+    Used for harnesses without a dedicated job builder (Claude Code), so the
+    definition a job evaluates is exactly the one ``exec`` runs.
+    """
+    from .agent_exec import agent_runner_config
+
+    agent = dict(spec.agent or {})
+    agent["runtime"] = {**dict(agent.get("runtime") or {}), **dict(runtime or {}),
+                        "backend": backend}
+    agent["inputs"] = {**dict(agent.get("inputs") or {}), "mcps": _agent_mcps(spec)}
+    sandbox = dict(spec.sandbox or {})
+    workdir = str(sandbox.get("workdir") or "/sandbox") \
+        if str(sandbox.get("backend") or "openshell") == "openshell" else "."
+    return _runner_payload(agent_runner_config(
+        agent, backend, sandbox=sandbox, workdir=workdir,
+        model=str(agent["runtime"].get("model") or ""),
+        timeout_seconds=int(agent["runtime"].get("timeout_seconds") or 600),
+    ))
+
+
 def build_copilot_user_runner(
     spec: GhostlabSpec, *, runtime: dict | None = None
 ) -> dict:
@@ -565,7 +589,9 @@ def materialize_job_runners(spec_path: Path) -> dict[str, Path]:
     if not has_aut:
         if not runner:
             backend = str(runtime.get("backend") or "")
-            if backend == "copilot":
+            if backend == "claude":
+                runner = build_resolved_aut_runner(spec, backend=backend)
+            elif backend == "copilot":
                 runner = build_copilot_aut_runner(spec, runtime=runtime)
             elif backend == "opencode":
                 runner = build_opencode_aut_runner(
@@ -606,7 +632,9 @@ def refresh_job_runners(spec: GhostlabSpec, spec_path: Path) -> dict[str, Path]:
     """Rebuild both materialized runners after a runtime edit."""
     runtime = dict((spec.agent or {}).get("runtime") or {})
     backend = str(runtime.get("backend") or "")
-    if backend == "copilot":
+    if backend == "claude":
+        aut_runner = build_resolved_aut_runner(spec, backend=backend)
+    elif backend == "copilot":
         aut_runner = build_copilot_aut_runner(spec, runtime=runtime)
     elif backend == "opencode":
         aut_runner = build_opencode_aut_runner(

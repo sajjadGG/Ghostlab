@@ -173,6 +173,7 @@ def _model_of(agent: dict[str, Any], runner: RunnerConfig) -> str:
 
 def _parse_calls(result: RunnerResult, parser: str) -> list[dict[str, Any]]:
     from .tool_capture import (
+        parse_claude_output,
         parse_codex_output,
         parse_copilot_output,
         parse_opencode_output,
@@ -183,6 +184,9 @@ def _parse_calls(result: RunnerResult, parser: str) -> list[dict[str, Any]]:
             return list(parse_codex_output(result.output).get("tool_calls") or [])
         if parser.startswith("opencode"):
             parsed = parse_opencode_output(result.output)
+            return list(parsed.get("tool_calls") or []) + list(parsed.get("builtin_calls") or [])
+        if parser == "claude-json":
+            parsed = parse_claude_output(result.output)
             return list(parsed.get("tool_calls") or []) + list(parsed.get("builtin_calls") or [])
         if parser == "copilot-json":
             parsed = parse_copilot_output(result.output)
@@ -202,13 +206,13 @@ def build_runner_config(
     Returns ``(runner config, host workspace, sandbox workdir)``.
     """
     runner_data = dict(agent.get("runner") or {})
-    if not runner_data.get("command"):
+    runtime_backend = str((agent.get("runtime") or {}).get("backend") or "")
+    if not runner_data.get("command") and not runtime_backend:
         raise ArtifactRunError(
-            f"Agent config {config.agent_path} declares no runner command. "
-            "artifact-run drives the agent's own runner; add a `runner` block "
-            "with the command that starts it."
+            f"Agent config {config.agent_path} names no harness. Set "
+            "runtime.backend (claude, codex, copilot, opencode) or add a `runner` "
+            "block with the command that starts it."
         )
-    runner = runner_from_dict(runner_data, source=str(config.agent_path))
 
     workspace = config.workspace or (Path(str(agent["workspace"])) if agent.get("workspace") else None)
     if workspace is None:
@@ -242,11 +246,26 @@ def build_runner_config(
     sandbox["keep"] = bool(config.keep_sandbox or sandbox.get("keep"))
     normalized = normalize_sandbox(sandbox, config.agent_path.parent)
 
-    runner = replace(
-        runner,
-        sandbox=normalized,
-        timeout_seconds=int(config.timeout_seconds or runner.timeout_seconds),
-    )
+    if runner_data.get("command"):
+        runner = runner_from_dict(runner_data, source=str(config.agent_path))
+        runner = replace(
+            runner,
+            sandbox=normalized,
+            timeout_seconds=int(config.timeout_seconds or runner.timeout_seconds),
+        )
+        return runner, workspace, workdir
+
+    # A declarative runtime goes through the same resolver as `ghostlab exec`,
+    # so the definition's MCPs travel with it in the harness's own format.
+    from .agent_exec import ExecError, agent_runner_config, resolve_backend
+
+    try:
+        runner = agent_runner_config(
+            agent, resolve_backend(agent), sandbox=normalized, workdir=workdir,
+            timeout_seconds=int(config.timeout_seconds or 0),
+        )
+    except (ExecError, ValueError) as exc:
+        raise ArtifactRunError(str(exc)) from exc
     return runner, workspace, workdir
 
 
@@ -689,6 +708,13 @@ def run_artifact(
 
     agent, sandbox_overrides = load_agent_definition(config.agent_path)
     runner_config, workspace, _workdir = build_runner_config(agent, sandbox_overrides, config)
+    # A declarative runtime carries its instructions and skills in the prompt
+    # (OpenCode loads them natively); a raw runner command is used verbatim.
+    agent_prompt = config.prompt
+    if not (agent.get("runner") or {}).get("command"):
+        from .agent_exec import compose_prompt, resolve_backend
+
+        agent_prompt = compose_prompt(agent, config.prompt, resolve_backend(agent))
 
     # Project-specific exclusions extend the canonical set rather than replacing
     # it; `--workspace-retain` is how a task keeps a normally excluded artifact.
@@ -705,6 +731,7 @@ def run_artifact(
         "workspace_output_sha256": "",
         "prompt_source": config.prompt_source,
         "prompt_sha256": sha256_bytes(config.prompt.encode("utf-8")),
+        "agent_prompt_sha256": sha256_bytes(agent_prompt.encode("utf-8")),
         "runner": {
             "kind": runner_config.kind,
             "command": list(runner_config.command),
@@ -755,7 +782,7 @@ def run_artifact(
             status=status, manifest=manifest, manifest_path=manifest_path, run_dir=run_dir
         )
 
-    _write_text(run_dir, "prompt.txt", config.prompt)
+    _write_text(run_dir, "prompt.txt", agent_prompt)
     events = JsonlLogger(_safe_run_output(run_dir, "events.jsonl", create_parents=True))
     events.write(
         Event.create(
@@ -858,9 +885,9 @@ def run_artifact(
         return runtime_failure
 
     started = time.monotonic()
-    events.write(Event.create("agent.prompt", chars=len(config.prompt)))
+    events.write(Event.create("agent.prompt", chars=len(agent_prompt)))
     try:
-        result = runner.run_turn(config.prompt)
+        result = runner.run_turn(agent_prompt)
     except SandboxError as exc:
         manifest["error"] = f"{exc.kind}: {exc.detail}"
         events.write(Event.create("artifact_run.failed", error=manifest["error"]))

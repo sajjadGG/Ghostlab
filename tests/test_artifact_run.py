@@ -1080,7 +1080,65 @@ class ArtifactRunConfigTest(ArtifactRunTestCase):
         self.agent_path.write_text(json.dumps({"id": "x"}), encoding="utf-8")
         with self.assertRaises(ArtifactRunError) as ctx:
             self.run_with_fake()
-        self.assertIn("runner command", str(ctx.exception))
+        self.assertIn("names no harness", str(ctx.exception))
+
+    def test_runtime_backend_agent_resolves_with_its_mcps_and_skills(self) -> None:
+        from rehearsal.artifact_run import build_runner_config
+        from rehearsal.agents import load_agent_definition
+        from rehearsal.config import artifact_run_config
+
+        server = self.tmp / "tools" / "server.js"
+        server.parent.mkdir()
+        server.write_text("// mcp", encoding="utf-8")
+        skill = self.tmp / "skills" / "notes" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("Write terse notes.", encoding="utf-8")
+        self.agent_path.write_text(json.dumps({
+            "id": "declared",
+            "runtime": {"backend": "claude", "model": "sonnet"},
+            "inputs": {
+                "mcps": [{"id": "tools", "transport": "stdio",
+                          "connection": {"command": "node", "args": [str(server)]}}],
+                "skills": [str(skill.parent)],
+            },
+            "sandbox": {"backend": "openshell", "bin": "openshell"},
+        }), encoding="utf-8")
+        config = artifact_run_config(
+            agent=self.agent_path, run_dir=self.run_dir, prompt="fix it",
+            workspace=self.workspace,
+        )
+        agent, overrides = load_agent_definition(self.agent_path)
+        runner, _workspace, workdir = build_runner_config(agent, overrides, config)
+        self.assertEqual(runner.parser, "claude-json")
+        self.assertEqual(workdir, "/sandbox/repo")
+        mcp = json.loads(runner.command[runner.command.index("--mcp-config") + 1])
+        self.assertEqual(mcp["mcpServers"]["tools"]["args"], ["/sandbox/mcp/tools/server.js"])
+        self.assertIn(
+            {"source": str(server.parent.resolve()), "target": "/sandbox/mcp"},
+            runner.sandbox["uploads"],
+        )
+
+        captured = {}
+
+        class Recorder:
+            sandbox_handle = object()
+
+            def __init__(self, cfg, name):
+                captured["config"] = cfg
+
+            def run_turn(self, prompt):
+                captured["prompt"] = prompt
+                raise SandboxError("sandbox_setup_failed", "stop here")
+
+            def close(self):
+                pass
+
+        from rehearsal.artifact_run import run_artifact
+
+        with patch("rehearsal.artifact_run.verify_workspace_export_runtime"):
+            run_artifact(config, runner_factory=Recorder)
+        self.assertIn("Write terse notes.", captured["prompt"])
+        self.assertTrue(captured["prompt"].endswith("Task:\nfix it"))
 
     def test_missing_workspace_is_refused(self) -> None:
         with self.assertRaises(ArtifactRunError):

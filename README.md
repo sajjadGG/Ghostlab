@@ -110,7 +110,9 @@ ghostlab create                       # evaluate an MCP server or a skill
 
 Pick [`lab`](#evaluate-a-configured-agent-ghostlab-lab) when the thing under
 test is an **agent** — a model plus instructions, skills, MCPs, permissions,
-and a codebase — and `create` when it is an **MCP server** or a **skill**.
+and a codebase — and `create` when it is an **MCP server** or a **skill**. The agent under test
+can run in Codex, OpenCode, GitHub Copilot CLI, or Claude Code
+(`--aut-backend claude`).
 
 OpenShell is the default; there is no `--local` flag. Use the explicit
 `--sandbox local` escape hatch only for trusted code that you intentionally

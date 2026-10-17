@@ -285,9 +285,9 @@ def build_invocation(
             configured["model"] = model
         argv = build_copilot_command(configured, mcps=mcps)
         if sandboxed:
-            # The OpenShell base image pins Copilot CLI 1.0.16, which predates
-            # `--no-remote` and `--session-id`; the sandbox is never shared anyway.
-            argv = [part for part in argv if part != "--no-remote"]
+            from .runners import _copilot_sandbox_command
+
+            argv = _copilot_sandbox_command(argv, resume=False)
         else:
             # Tag the session as Ghostlab's so retro tooling can tell it apart.
             argv[-1:-1] = ["--session-id", new_copilot_session_id()]
@@ -322,6 +322,85 @@ def build_invocation(
     return Invocation(
         [str(part) for part in runner.get("command") or []], mode,
         str(runner.get("parser") or "text"), env,
+    )
+
+
+def agent_runner_config(
+    agent: dict[str, Any],
+    backend: str,
+    *,
+    sandbox: dict[str, Any],
+    workdir: str,
+    model: str = "",
+    timeout_seconds: int = 0,
+) -> "RunnerConfig":
+    """Resolve an agent definition into a runner that owns its own sandbox.
+
+    The evaluation pipeline and ``artifact-run`` drive agents through
+    :class:`RunnerConfig`, where the runner creates the OpenShell sandbox and
+    runs each turn with ``openshell sandbox exec``. This is the same
+    translation ``ghostlab exec`` uses, adapted to that shape: stdio MCP
+    programs (and OpenCode's instruction and skill files) are added to the
+    sandbox uploads and every path is rewritten to its in-sandbox location;
+    OpenCode's project config travels inline as ``OPENCODE_CONFIG_CONTENT``.
+
+    Skills and instruction files for non-OpenCode harnesses travel in the
+    prompt — see :func:`compose_prompt` — so callers that build their own
+    prompt must apply it themselves.
+    """
+    from .agent_sandbox import remote_path_for
+    from .config import RunnerConfig
+    from .opencode_config import runtime_input_paths
+    from .sandbox import MCP_UPLOAD_ROOT, auto_uploads_for_command
+
+    sandbox = dict(sandbox or {})
+    sandboxed = str(sandbox.get("backend") or "openshell") == "openshell"
+    path_map: PathMap | None = None
+    if sandboxed:
+        uploads = [dict(item) for item in sandbox.get("uploads") or []]
+        for mcp in (agent.get("inputs") or {}).get("mcps") or []:
+            if str(mcp.get("transport")) != "stdio":
+                continue
+            connection = dict(mcp.get("connection") or {})
+            raw = connection.get("command") or []
+            parts = ([raw] if isinstance(raw, str) else list(raw)) + list(
+                connection.get("args") or []
+            )
+            uploads += auto_uploads_for_command(parts, uploads, root=MCP_UPLOAD_ROOT)
+        if backend == "opencode":
+            skills = list((agent.get("inputs") or {}).get("skills") or [])
+            for item in runtime_input_paths(agent.get("runtime"), skills):
+                path = Path(str(item)).expanduser()
+                if path.exists():
+                    source = path if path.is_dir() else path.parent
+                    entry = {"source": str(source.resolve()), "target": "/sandbox/agent"}
+                    if entry not in uploads:
+                        uploads.append(entry)
+        sandbox["uploads"] = uploads
+
+        def path_map(value: Any) -> str:
+            return remote_path_for(uploads, value)
+
+    invocation = build_invocation(
+        agent, backend, workdir=workdir, model=model,
+        sandboxed=sandboxed, path_map=path_map,
+    )
+    env = dict(invocation.env)
+    if "opencode.json" in invocation.files:
+        env["OPENCODE_CONFIG_CONTENT"] = invocation.files["opencode.json"]
+        if sandboxed:
+            sandbox["env_allowlist"] = list(dict.fromkeys([
+                *list(sandbox.get("env_allowlist") or []), "OPENCODE_CONFIG_CONTENT",
+            ]))
+    runtime = dict(agent.get("runtime") or {})
+    return RunnerConfig(
+        kind="process",
+        command=list(invocation.argv),
+        env=env,
+        timeout_seconds=int(timeout_seconds or runtime.get("timeout_seconds") or 600),
+        prompt_mode=invocation.prompt_mode,
+        parser=invocation.parser,
+        sandbox=sandbox,
     )
 
 
