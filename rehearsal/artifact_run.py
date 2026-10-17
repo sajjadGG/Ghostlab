@@ -74,6 +74,7 @@ _MODEL_OUTAGE_SIGNALS = (
     "opencode error", "copilot error", "model not found", "unauthorized",
     "quota", "rate limit", "usage limit", "authentication failed", "no auth",
     "provider error", "overloaded", "service unavailable", "invalid api key",
+    "model is not supported",
 )
 
 # OpenShell-backed runners report a classified sandbox failure as exit 125 with

@@ -1,47 +1,41 @@
 # Ghostlab
 
-> A local, end-to-end **testing lab for configured AI agents** — coding agents role-play
-> real users, drive your tools over multiple turns, and the harness captures
-> traces, scores outcomes, and even **renders and clicks through MCP Apps UI
-> widgets**.
+> **Define an agent once — model, instructions, skills, MCPs, workspace — and run
+> it in any coding-agent harness, sandboxed in NVIDIA OpenShell.** Use it to get
+> a task done, or to evaluate how well the agent does its job.
 
 [![CI](https://github.com/sajjadGG/Ghostlab/actions/workflows/ci.yml/badge.svg)](https://github.com/sajjadGG/Ghostlab/actions)
+[![PyPI](https://img.shields.io/pypi/v/ghostlab)](https://pypi.org/project/ghostlab/)
 [![Docs](https://img.shields.io/badge/docs-wiki-blue)](https://sajjadgg.github.io/Ghostlab/)
 [![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![llms.txt](https://img.shields.io/badge/llms.txt-✓-purple)](llms.txt)
 
-**Test an agent the way it is actually used** — not only with unit tests against
-the protocol, but with a real coding agent (Codex / GitHub Copilot / Claude) that picks tools,
-makes mistakes, and tries to accomplish goals, while a second agent plays the
-user. Protocol-level checks (schema errors, a tool call that 500s) are useful
-sanity checks, but they aren't the real test — the real test is whether an
-agent can actually get a task done with its configured MCPs, skills, workspace,
-instructions, and runner, end to end.
-
 📖 **Docs wiki:** https://sajjadgg.github.io/Ghostlab/ · 🤖 **For agents:** [`llms.txt`](llms.txt) · 🛠 **Contributing:** [`CONTRIBUTING.md`](CONTRIBUTING.md)
-
-> **Naming:** the project and repo are **Ghostlab** (formerly *Rehearsal*). The CLI
-> is `ghostlab`, with `rehearsal` kept as an alias, and the installed Python
-> package is `rehearsal` — all the same project.
 
 <p align="center">
 <img src="static/ghostlablogo.png" width="400" alt="Logo" align="center">
 </p>
 
-## Quickstart
+Ghostlab does three things with one agent definition:
+
+| | Command | What you get |
+| --- | --- | --- |
+| **Run** | `ghostlab exec` | The agent does a task in Claude Code, Codex, GitHub Copilot CLI, or OpenCode — inside a throwaway OpenShell sandbox — and you get its answer, tool trace, and any files it produced. |
+| **Evaluate** | `ghostlab lab` / `create` → `test` → `review` | A second agent plays realistic users, drives the configured agent over multiple turns, and a judge scores the outcome against a release gate. |
+| **Build eval sets** | `ghostlab create --target` / `--skill`, `generate-dataset` | Persona × scenario test sets generated from an MCP server's tools or a skill's `SKILL.md`, curated as files, rerunnable in CI. |
+
+> **Naming:** the CLI is `ghostlab` (with `rehearsal` kept as an alias) and the
+> installed Python package is `rehearsal` — all the same project.
+
+## Install
 
 ```bash
-python3 -m venv .venv                # Python 3.10+
-.venv/bin/pip install -e .            # add '.[ui]' for the web UI, '.[apps]' for widget rendering
-
-ghostlab create                       # evaluate an MCP server
-ghostlab lab                          # evaluate a configured agent (model, skills, MCPs, code)
+pip install ghostlab                  # add [ui] for the web UI, [apps] for MCP Apps rendering
+ghostlab doctor                       # checks OpenShell and the agent CLIs
 ```
 
-Pick `create` when the thing under test is an **MCP server**, and
-[`lab`](#evaluate-a-configured-agent-ghostlab-lab) when it is an **agent** — a
-model plus instructions, skills, MCPs, permissions, and a codebase.
+From a checkout: `python3 -m venv .venv && .venv/bin/pip install -e .`
 
 Ghostlab uses [NVIDIA OpenShell](https://docs.nvidia.com/openshell/latest/)
 as its default execution boundary. Install OpenShell, start a supported compute
@@ -61,6 +55,63 @@ brew services restart openshell
 openshell status
 ```
 
+## Run an agent: `ghostlab exec`
+
+Describe the agent in one file:
+
+```json
+{
+  "id": "release-helper",
+  "instructions": "Be concise. Never claim something was published.",
+  "runtime": { "backend": "claude", "model": "sonnet" },
+  "workspace": "repo",
+  "inputs": {
+    "mcps":   [{ "config_ref": "mcp.json", "server": "tiny" }],
+    "skills": ["skills/release-notes"]
+  },
+  "sandbox": { "backend": "openshell", "providers": ["anthropic"] }
+}
+```
+
+Then hand it a task:
+
+```bash
+ghostlab exec --agent agent.json "Draft release notes from CHANGELOG.md"
+ghostlab exec --agent agent.json --backend copilot --model gpt-5-mini --provider copilot "..."
+ghostlab exec --agent agent.json --prompt-file task.md --export /sandbox/repo/NOTES.md > answer.md
+```
+
+The answer goes to stdout; status goes to stderr; the full trace — composed
+prompt, raw harness stream, every MCP and built-in tool call, and
+`exec.json` — is kept under `runs/`. The same definition runs in every harness:
+
+| `runtime.backend` | Harness | How MCPs attach | How skills attach |
+| --- | --- | --- | --- |
+| `claude` | Claude Code (`claude -p`) | `--mcp-config` (strict), MCP tools pre-approved | Prompt preamble |
+| `codex` | Codex (`codex exec --json`) | `-c mcp_servers.*` overrides | Prompt preamble |
+| `copilot` | GitHub Copilot CLI | `--additional-mcp-config` | Prompt preamble |
+| `opencode` | OpenCode (`opencode run`) | Generated `opencode.json` | Native `skills.paths` |
+| `runner` | Any CLI in `runner.command` | Your command | Prompt preamble |
+
+Under OpenShell (the default), the agent CLI, its stdio MCP servers, its skills,
+and an uploaded copy of its workspace all live in one sandbox that is deleted
+afterwards; credentials arrive through OpenShell providers (`--provider`) and
+nothing on the host is touched. The OpenShell `base` image already ships all
+four harness CLIs. `--sandbox local` runs on your machine and edits the
+workspace in place — use it only for trusted agents. See
+[Run an Agent](docs/run-an-agent.md).
+
+## Evaluate an agent, an MCP server, or a skill
+
+```bash
+ghostlab lab                          # evaluate a configured agent (model, skills, MCPs, code)
+ghostlab create                       # evaluate an MCP server or a skill
+```
+
+Pick [`lab`](#evaluate-a-configured-agent-ghostlab-lab) when the thing under
+test is an **agent** — a model plus instructions, skills, MCPs, permissions,
+and a codebase — and `create` when it is an **MCP server** or a **skill**.
+
 OpenShell is the default; there is no `--local` flag. Use the explicit
 `--sandbox local` escape hatch only for trusted code that you intentionally
 want to execute directly on the host:
@@ -79,7 +130,7 @@ logs with the run artifacts, and deletes the sandboxes at teardown. Local stdio
 MCP processes in the job pipeline are routed through the same boundary. OpenShell failures remain
 `harness_error`s and never silently fall back to host execution.
 
-That's the whole flow. Interactive `ghostlab create` guides you through the
+Interactive `ghostlab create` guides you through the
 evaluation subject (agent/MCP/skill), OpenShell image/providers, generation
 size, four model roles (AUT, user emulator, generation, and judge), separate AUT
 and user runner backends, Copilot/VS Code custom-agent names, runner policy,
@@ -189,31 +240,6 @@ reasoning, and the full dual-agent transcript with inline tool calls:
 <img src="static/case-report-transcript.png" width="760" alt="Per-case report with judge verdict and conversation transcript">
 </p>
 
-## Goal
-
-Build a repeatable, sandboxed tester that can:
-
-- Run arbitrary configured agents inside NVIDIA OpenShell.
-- Compose zero or more MCPs, skills, instructions, workspace files, and assets.
-- Launch one coding-agent session as the **agent-under-test**.
-- Launch another coding-agent session as the **user emulator** (persona + goal driven).
-- Drive multi-turn interactions between them.
-- Capture full traces, tool activity, failures, and outcomes.
-
-This lets you test with your existing Codex/Claude usage path, instead of wiring a separate LLM provider deployment just for E2E testing.
-
-## Scope
-
-Ghostlab is intentionally **app-agnostic**:
-
-- Treats an agent configuration—not a single MCP—as the evaluation boundary.
-- Works with MCP servers reachable by stdio/SSE/streamable HTTP and local skills.
-- Supports local or remote MCP endpoints.
-- Supports multiple coding-agent runners (Codex, OpenCode, Claude Code, and future adapters).
-- Expresses an OpenCode agent's full configuration — model, instructions, skills, subagents, tool permissions, and any number of MCPs — and runs all of it inside the sandbox.
-
-No Cortex-specific assumptions are required in the core harness.
-
 ## Reference
 
 Everything below is the individual-command reference and advanced usage —
@@ -271,8 +297,9 @@ primary discovery input for one-MCP/one-skill jobs:
 - `capabilities`: optional expected tools/resources/prompts
 - `startup`: optional health checks and boot timeout
 
-The canonical `agent` section contains `runner`, `instructions`, and composable
-`inputs.mcps`, `inputs.skills`, and assets. The sibling `sandbox` section defaults
+The canonical `agent` section contains a `runtime` (harness backend, model,
+and harness-specific settings) or a raw `runner`, `instructions`, and composable
+`inputs.mcps`, `inputs.skills`, and assets — the same file `ghostlab exec` runs. The sibling `sandbox` section defaults
 to OpenShell and controls the image, uploads, workdir, policy, resource limits,
 network mode, environment allowlist, providers, logs, and cleanup.
 `backend: local` is explicit unsandboxed compatibility—not a fallback.
@@ -281,6 +308,7 @@ network mode, environment allowlist, providers, logs, and cleanup.
 
 The package installs two equivalent console scripts: `ghostlab` and `rehearsal`.
 
+- `ghostlab exec` — run a configured agent on one task in any harness (Claude Code, Codex, Copilot, OpenCode), inside OpenShell, and print its answer.
 - `ghostlab lab` — guided setup for a **configured agent** (model, instructions, skills, MCPs, permissions, code), then generate scenarios from its inferred purpose and run them fully sandboxed.
 - `ghostlab create` — the end-to-end wizard described above.
 - `ghostlab init` — advanced: scaffold a standalone `ghostlab.yaml` **spec** from a target JSON (see [spec vs job](#spec-vs-job) — most users want `ghostlab create`).
@@ -515,13 +543,13 @@ persona-specific scenarios, and the pairs become runnable cases:
 ghostlab generate-dataset \
   --profile runs/<id>-inspect/capabilities.json \
   --personas 3 --scenarios-per-persona 3 --seed 7 \
-  --name cortex
+  --name my-mcp
 ```
 
 This writes a self-contained dataset directory:
 
 ```text
-datasets/cortex/
+datasets/my-mcp/
   dataset.json          manifest: mcp, seed, cases[]
   personas/<id>.json
   scenarios/<id>.json    persona-namespaced; inline `persona` is a situational note
@@ -533,7 +561,7 @@ Before spending agent credits, check that the dataset makes sense:
 
 ```bash
 ghostlab review-dataset \
-  --dataset datasets/cortex \
+  --dataset datasets/my-mcp \
   --profile runs/<id>-inspect/capabilities.json
 ```
 
@@ -543,7 +571,7 @@ tools, personas with no scenarios). Curation is file-first — each case gets a
 `status` in `dataset.json` (`pending` / `approved` / `rejected` / `needs-edit`):
 
 ```bash
-ghostlab review-dataset --dataset datasets/cortex \
+ghostlab review-dataset --dataset datasets/my-mcp \
   --approve case-a case-b --reject case-c
 ```
 
@@ -551,9 +579,9 @@ ghostlab review-dataset --dataset datasets/cortex \
 
 ```bash
 ghostlab run-dataset \
-  --dataset datasets/cortex \
+  --dataset datasets/my-mcp \
   --target target.json \
-  --aut-runner runners/codex-cortex-aut.json \
+  --aut-runner runners/codex-aut.example.json \
   --user-runner runners/codex-user-emulator.json \
   --provider openai \
   --limit 2
@@ -700,14 +728,14 @@ replay.
 
 ```bash
 ghostlab run --target target.json --scenario <scenario.json> \
-  --aut-runner runners/codex-cortex-local-session.json --user-runner <user.json>
+  --aut-runner runners/codex-session.example.json --user-runner <user.json>
 ```
 
 ### Validate your setup: `doctor`
 
 ```bash
 ghostlab doctor               # validates runners/*.json
-ghostlab doctor --runners runners/codex-cortex-local-session.json
+ghostlab doctor --runners runners/codex-session.example.json
 ghostlab doctor --sandbox local  # trusted local mode; skips OpenShell checks
 ```
 
@@ -832,13 +860,6 @@ Configure tab provides full JSON editors for both.
 See `runners/copilot-aut.example.json`, `runners/copilot-user.example.json`,
 and `examples/copilot-agent.json`. To use another process as either role, pass
 low-level JSON with `--aut-runner` and/or `--user-runner`.
-
-## Install from PyPI
-
-```bash
-pip install ghostlab            # add [ui] and/or [apps] for those extras
-ghostlab --help
-```
 
 ## Packaging & Release
 

@@ -202,12 +202,17 @@ def prepare_agent_sandbox(
     base_dir: "Path | None" = None,
     artifact_dir: "Path | None" = None,
     extra_paths: "list[str] | None" = None,
+    egress_policy: bool = True,
 ) -> AgentSandbox:
     """Create a sandbox containing everything the agent needs to run.
 
     Every host path the agent references — instruction files, skill folders,
     subagent prompts, its workspace — is uploaded, and the returned handle knows
     where each landed so commands and configs can be rewritten.
+
+    ``egress_policy`` generates the OpenCode starter policy when the config has
+    none. Other harnesses reach their model through the sandbox's declared
+    OpenShell providers and policy instead, so callers turn it off for them.
     """
     config = normalize_sandbox(sandbox_config, base_dir)
     if config.get("backend") != "openshell":
@@ -221,7 +226,8 @@ def prepare_agent_sandbox(
     if artifact_dir is not None:
         config["artifact_dir"] = str(artifact_dir)
         model = str((agent.get("runtime") or {}).get("model") or "")
-        config = ensure_agent_policy(config, model, Path(artifact_dir))
+        if egress_policy:
+            config = ensure_agent_policy(config, model, Path(artifact_dir))
 
     uploads = list(config.get("uploads") or [])
     workspace = agent.get("workspace")

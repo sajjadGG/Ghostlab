@@ -13,9 +13,12 @@ contract lint, MCP Apps probes) accumulate under its workspace directory
 
 ## Agent
 
-`agent` is the canonical evaluation subject:
+`agent` is the canonical subject — the thing `ghostlab exec` runs and the
+evaluation pipeline tests:
 
-- `runner`: any process/coding-agent command Ghostlab can drive turn by turn.
+- `runtime`: the harness (`backend`: `claude`, `codex`, `copilot`, or
+  `opencode`), its model, and harness-specific settings.
+- `runner`: alternatively, any process/coding-agent command Ghostlab can drive turn by turn.
 - `instructions`: agent-level behavior and policy.
 - `inputs.mcps`: zero or more native MCP definitions or normalized config references.
 - `inputs.skills`: zero or more `SKILL.md` inputs.

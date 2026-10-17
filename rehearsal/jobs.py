@@ -42,8 +42,6 @@ AUT_RUNNER_FILE = "aut.json"
 USER_RUNNER_FILE = "user.json"
 RUNNER_HOST_KINDS = ("process", "codex-session", "copilot-session")
 
-_BEARER_ENV_RE = re.compile(r"Bearer\s+\$\{(\w+)\}")
-
 # Documented in the generated job.yaml so users know what each prompt override
 # can interpolate. Keep in sync with the *_TEMPLATE placeholders in the prompt
 # builders (rehearsal/prompts.py and the generation modules).
@@ -331,7 +329,7 @@ def build_codex_aut_runner(
 
     Wires the job's target MCP straight into a codex process via `-c
     mcp_servers.<id>...` overrides (mirrors the hand-written examples in
-    `runners/codex-cortex-*-aut.json`), so `ghostlab create` can turn on
+    `runners/codex-aut.example.json`), so `ghostlab create` can turn on
     semantic/security testing without the user hand-editing a runner JSON.
     Bearer-token auth (``Authorization: Bearer ${VAR}``) is detected and wired
     via codex's `bearer_token_env_var`; anything else is left unwired (the
@@ -347,29 +345,11 @@ def build_codex_aut_runner(
             "id": target.id, "transport": target.transport,
             "connection": target.connection,
         }]
-    for entry in agent_mcps:
-        server_id = str(entry.get("id") or spec.id)
-        transport = str(entry.get("transport") or "streamable-http")
-        connection = dict(entry.get("connection") or {})
-        if transport == "stdio":
-            parts = connection.get("command") or []
-            if isinstance(parts, str):
-                parts = [parts]
-            parts = [*parts, *(connection.get("args") or [])]
-            command += [
-                "-c", f"mcp_servers.{server_id}.command={json.dumps([str(p) for p in parts])}",
-            ]
-            continue
-        url = connection.get("url", "")
-        command += ["-c", f"mcp_servers.{server_id}.url={json.dumps(str(url))}"]
-        for value in (connection.get("headers") or {}).values():
-            match = _BEARER_ENV_RE.search(str(value))
-            if match:
-                command += [
-                    "-c",
-                    f"mcp_servers.{server_id}.bearer_token_env_var={json.dumps(match.group(1))}",
-                ]
-                break
+    from .runner_presets import codex_mcp_overrides
+
+    command += codex_mcp_overrides(
+        [{**dict(entry), "id": str(entry.get("id") or spec.id)} for entry in agent_mcps]
+    )
     command += ["exec", "--json", "--skip-git-repo-check", "-"]
     return {
         "kind": kind,

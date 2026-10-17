@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ghostlab"
 dynamic = ["version"]
-description = "OpenShell-first end-to-end evaluation lab for configured AI agents, MCP servers, skills, and MCP Apps."
+description = "Define an AI agent once (model, instructions, skills, MCPs) and run or evaluate it in Claude Code, Codex, Copilot, or OpenCode, sandboxed in NVIDIA OpenShell."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -25,6 +25,12 @@ keywords = [
   "evaluation",
   "codex",
   "claude",
+  "claude-code",
+  "github-copilot",
+  "opencode",
+  "openshell",
+  "sandbox",
+  "agent-skills",
   "mcp-apps",
 ]
 classifiers = [

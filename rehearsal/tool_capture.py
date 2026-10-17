@@ -120,6 +120,7 @@ def parse_codex_output(jsonl_text: str) -> dict[str, Any]:
     """
     messages: list[str] = []
     calls: list[dict[str, Any]] = []
+    errors: list[str] = []
     for line in jsonl_text.splitlines():
         line = line.strip()
         if not line:
@@ -127,6 +128,10 @@ def parse_codex_output(jsonl_text: str) -> dict[str, Any]:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if event.get("type") == "turn.failed":
+            # Provider rejections (unsupported model, quota) arrive in-stream.
+            errors.append(str((event.get("error") or {}).get("message") or "turn failed"))
             continue
         if event.get("type") != "item.completed":
             continue
@@ -160,7 +165,7 @@ def parse_codex_output(jsonl_text: str) -> dict[str, Any]:
             if isinstance(duration, (int, float)):
                 record["duration_ms"] = duration
             calls.append(record)
-    return {"message": "\n".join(messages).strip(), "tool_calls": calls}
+    return {"message": "\n".join(messages).strip(), "tool_calls": calls, "errors": errors}
 
 
 def parse_opencode_output(
@@ -384,6 +389,84 @@ def parse_copilot_output(jsonl_text: str) -> dict[str, Any]:
         # Intermediate assistant messages normally contain tool intent. The last
         # non-empty message is the conversational reply after tool execution.
         "message": messages[-1].strip() if messages else "",
+        "tool_calls": calls,
+        "builtin_calls": builtins,
+        "errors": errors,
+    }
+
+
+def parse_claude_output(jsonl_text: str) -> dict[str, Any]:
+    """Parse Claude Code `-p --output-format stream-json --verbose` output.
+
+    MCP tools surface as ``mcp__<server>__<tool>``; everything else (Bash, Edit,
+    Read, ...) is a built-in. Each ``tool_use`` block is paired with the
+    ``tool_result`` that answers it. The final ``result`` frame is the reply;
+    when it is missing (killed mid-run) the last assistant text stands in.
+    """
+    messages: list[str] = []
+    calls: list[dict[str, Any]] = []
+    builtins: list[dict[str, Any]] = []
+    errors: list[str] = []
+    pending: dict[str, dict[str, Any]] = {}
+    final: str | None = None
+    for line in jsonl_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        payload = event.get("message")
+        content = payload.get("content") if isinstance(payload, dict) else None
+        blocks = [block for block in content or [] if isinstance(block, dict)] \
+            if isinstance(content, list) else []
+        if kind == "assistant":
+            for block in blocks:
+                if block.get("type") == "text" and block.get("text"):
+                    messages.append(str(block["text"]))
+                elif block.get("type") == "tool_use":
+                    name = str(block.get("name") or "?")
+                    record: dict[str, Any] = {"arguments": block.get("input")}
+                    if name.startswith("mcp__") and name.count("__") >= 2:
+                        _, server, tool = name.split("__", 2)
+                        record = {"server": server, "tool": tool, **record}
+                        target = calls
+                    else:
+                        record = {"server": "builtin", "tool": name, **record}
+                        target = builtins
+                    record["status"] = "completed"
+                    target.append(record)
+                    record["index"] = len(target)
+                    pending[str(block.get("id"))] = record
+        elif kind == "user":
+            for block in blocks:
+                if block.get("type") != "tool_result":
+                    continue
+                record = pending.pop(str(block.get("tool_use_id")), None)
+                if record is None:
+                    continue
+                result = block.get("content")
+                if block.get("is_error"):
+                    record["status"] = "failed"
+                    record["error"] = result
+                    record["failure_cause"] = classify_tool_failure(result)
+                    record["failure_detail"] = " ".join(str(result).split())[:500]
+                else:
+                    record["result"] = result
+        elif kind == "result":
+            if event.get("is_error") or event.get("subtype") not in (None, "success"):
+                errors.append(
+                    str(event.get("result") or event.get("subtype") or "Claude Code error")
+                )
+            if isinstance(event.get("result"), str):
+                final = event["result"]
+    message = final if final is not None else (messages[-1] if messages else "")
+    return {
+        "message": message.strip(),
         "tool_calls": calls,
         "builtin_calls": builtins,
         "errors": errors,

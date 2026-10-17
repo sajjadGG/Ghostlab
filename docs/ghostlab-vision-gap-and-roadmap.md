@@ -1,6 +1,6 @@
 # Ghostlab Vision And Roadmap
 
-_Current implementation snapshot: July 2026._
+_Current implementation snapshot: October 2026._
 
 This page describes the product that exists now and the remaining direction.
 It replaces the original MCP-only gap analysis, whose proposed spec, setup,
@@ -9,13 +9,19 @@ implemented.
 
 ## Product Vision
 
-Ghostlab is the local QA plane for configured AI agents. The evaluation subject
-is not limited to one MCP server: it can be an arbitrary runner plus
-instructions, MCPs, skills, workspace files, assets, and test cases.
+Ghostlab is a sandboxed runtime and QA plane for configured AI agents. An agent
+is defined once — a harness and model plus instructions, MCPs, skills,
+workspace files, and assets — and that one definition can be:
 
-The central question is outcome-oriented: can this configured agent reliably
-complete realistic user goals without violating its security or permission
-boundaries?
+- **run** on any task in Claude Code, Codex, GitHub Copilot CLI, or OpenCode
+  inside NVIDIA OpenShell (`ghostlab exec`), to get an answer or an artifact;
+- **evaluated** against realistic, generated user goals (`lab`, `create`,
+  `test`, `review`);
+- used as the subject of **eval sets** built from an MCP server or a skill.
+
+The central evaluation question is outcome-oriented: can this configured agent
+reliably complete realistic user goals without violating its security or
+permission boundaries?
 
 Ghostlab should provide:
 
@@ -110,7 +116,23 @@ generation still use the first MCP or skill as the primary capability. The next
 step is a merged capability graph across every MCP, skill, instruction source,
 and declared asset, including conflicts and cross-capability workflows.
 
-### 2. Portable Sandbox Profiles
+### 2. One Runtime Path For Run And Evaluate
+
+`ghostlab exec` resolves an agent definition into a sandboxed invocation for
+every harness, while the job pipeline still materializes its own per-harness
+runner files and only puts the *whole* agent in the sandbox for OpenCode. The
+next step is to route the evaluation pipeline's agent-under-test and
+`artifact-run` through the same resolver, so a definition that runs under
+`exec` is exactly what gets evaluated and benchmarked. Two concrete gaps found
+while building `exec`:
+
+- `artifact-run` still requires a raw `runner.command` and does not attach the
+  definition's MCPs and skills.
+- The job pipeline's OpenShell Copilot runners always pass `--session-id` and
+  `--no-remote`, which the Copilot CLI in OpenShell's `base` image (1.0.16)
+  rejects; `exec` already omits them inside the sandbox.
+
+### 3. Portable Sandbox Profiles
 
 OpenShell configuration should gain reusable project profiles for:
 
@@ -123,14 +145,14 @@ OpenShell configuration should gain reusable project profiles for:
 OpenShell is alpha software, so Ghostlab should keep CLI compatibility tests and
 surface supported runtime versions clearly.
 
-### 3. Stronger Agent-Definition Validation
+### 4. Stronger Agent-Definition Validation
 
 Agent configs should receive a published schema, richer diagnostics, and a
 dry-run command that shows the resolved runner, staged paths, providers,
 environment allowlist, MCP composition, and test inventory before creating a
 sandbox.
 
-### 4. Broader Host Fidelity
+### 5. Broader Host Fidelity
 
 The host-adapter layer should continue to model product-specific behavior:
 
@@ -139,21 +161,21 @@ The host-adapter layer should continue to model product-specific behavior:
 - Host-specific MCP Apps bridges and metadata aliases.
 - Approval, cancellation, retry, and context-compaction behavior.
 
-### 5. Better Coverage Intelligence
+### 6. Better Coverage Intelligence
 
 Planning should reason over state transitions and workflow graphs, not only tool
 families. Useful additions include pairwise capability coverage, mutation/reset
 coverage, credential-boundary cases, long-horizon workflows, and historical
 failure seeding across jobs.
 
-### 6. Evaluation Calibration
+### 7. Evaluation Calibration
 
 LLM judging needs ongoing calibration against human-reviewed fixtures. The
 highest-value work is disagreement reporting, judge-version fingerprints,
 multi-judge policies for release gates, and confidence intervals that separate
 model variance from actual product regressions.
 
-### 7. CI And Fleet Operation
+### 8. CI And Fleet Operation
 
 The current artifacts are CI-friendly, but larger deployments need shared
 OpenShell gateways, concurrency controls, sandbox quotas, artifact retention,
@@ -161,12 +183,13 @@ provider rotation, sharding, and a stable machine-readable summary contract.
 
 ## Near-Term Priority Order
 
-1. Publish and validate the composed-agent schema and dry-run output.
-2. Merge discovery across all configured MCPs and skills.
-3. Add OpenShell version-compatibility integration tests and reusable policies.
-4. Expand deterministic state/reset and security-boundary coverage.
-5. Calibrate judges against maintained human-reviewed fixtures.
-6. Add CI sharding and shared-gateway operational guidance.
+1. Route the evaluation pipeline and `artifact-run` through the `exec` resolver.
+2. Publish and validate the composed-agent schema and dry-run output.
+3. Merge discovery across all configured MCPs and skills.
+4. Add OpenShell version-compatibility integration tests and reusable policies.
+5. Expand deterministic state/reset and security-boundary coverage.
+6. Calibrate judges against maintained human-reviewed fixtures.
+7. Add CI sharding and shared-gateway operational guidance.
 
 ## Definition Of Done
 

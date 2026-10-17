@@ -1,0 +1,20 @@
+{
+  "id": "release-helper",
+  "description": "Drafts release notes for the Widget billing service from its changelog.",
+  "instructions": "Be concise. Never claim a release was published.",
+  "runtime": {
+    "backend": "claude",
+    "model": "sonnet",
+    "timeout_seconds": 600
+  },
+  "workspace": "repo",
+  "inputs": {
+    "mcps": [{ "config_ref": "mcp.json", "server": "tiny" }],
+    "skills": ["skills/release-notes"]
+  },
+  "sandbox": {
+    "backend": "openshell",
+    "image": "base",
+    "providers": ["anthropic"]
+  }
+}

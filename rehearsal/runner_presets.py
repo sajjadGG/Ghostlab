@@ -8,6 +8,7 @@ the AUT, and a plain codex command for the user emulator.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -29,23 +30,57 @@ def _codex_base(codex_bin: str) -> list[str]:
     return [codex_bin, "--sandbox", "read-only", "-a", "never"]
 
 
+_BEARER_ENV_RE = re.compile(r"Bearer\s+\$\{(\w+)\}")
+_ENV_REF_RE = re.compile(r"\$\{?\w+\}?")
+
+
+def codex_mcp_overrides(mcps: "list[dict[str, object]]") -> list[str]:
+    """`-c mcp_servers.<id>...` overrides that attach every MCP to codex.
+
+    Codex wants `command` as a string and `args` as a list; a list-valued
+    `command` makes it refuse to load its configuration at all. Bearer-token
+    auth written as ``Bearer ${VAR}`` maps to `bearer_token_env_var`; other
+    literal headers become `http_headers`, and env-referencing ones map to
+    `env_http_headers` so the secret is read inside codex, not baked in.
+    """
+    args: list[str] = []
+    for entry in mcps:
+        server_id = str(entry.get("id") or "mcp")
+        transport = str(entry.get("transport") or "streamable-http")
+        connection = dict(entry.get("connection") or {})  # type: ignore[arg-type]
+        prefix = f"mcp_servers.{server_id}"
+        if transport == "stdio":
+            raw = connection.get("command") or []
+            parts = [raw] if isinstance(raw, str) else list(raw)
+            parts = [str(part) for part in [*parts, *(connection.get("args") or [])]]
+            if not parts:
+                raise ValueError(f"stdio MCP {server_id!r} has no command")
+            args += ["-c", f"{prefix}.command={json.dumps(parts[0])}"]
+            args += ["-c", f"{prefix}.args={json.dumps(parts[1:])}"]
+            for key, value in dict(connection.get("env") or {}).items():
+                args += ["-c", f"{prefix}.env.{key}={json.dumps(str(value))}"]
+            continue
+        if transport not in ("sse", "streamable-http", "http"):
+            raise ValueError(f"Unsupported transport for codex runner: {transport}")
+        args += ["-c", f"{prefix}.url={json.dumps(str(connection.get('url', '')))}"]
+        for name, value in dict(connection.get("headers") or {}).items():
+            text = str(value)
+            bearer = _BEARER_ENV_RE.search(text)
+            if bearer and str(name).lower() == "authorization":
+                args += ["-c", f"{prefix}.bearer_token_env_var={json.dumps(bearer.group(1))}"]
+            elif _ENV_REF_RE.fullmatch(text.strip()):
+                variable = text.strip().strip("${}")
+                args += ["-c", f"{prefix}.env_http_headers.{name}={json.dumps(variable)}"]
+            elif not _ENV_REF_RE.search(text):
+                args += ["-c", f"{prefix}.http_headers.{name}={json.dumps(text)}"]
+    return args
+
+
 def _mcp_config_args(target: TargetConfig) -> list[str]:
     """`-c mcp_servers.<id>...` overrides that point codex at the target."""
-    conn = target.connection
-    sid = target.id
-    if target.transport in ("sse", "streamable-http", "http"):
-        url = conn.get("url", "")
-        return ["-c", f'mcp_servers.{sid}.url="{url}"']
-    if target.transport == "stdio":
-        command = conn.get("command", "")
-        args = conn.get("args", [])
-        return [
-            "-c",
-            f'mcp_servers.{sid}.command="{command}"',
-            "-c",
-            f"mcp_servers.{sid}.args={json.dumps(args)}",
-        ]
-    raise ValueError(f"Unsupported transport for codex runner: {target.transport}")
+    return codex_mcp_overrides([{
+        "id": target.id, "transport": target.transport, "connection": target.connection,
+    }])
 
 
 def _model_args(model: str) -> list[str]:

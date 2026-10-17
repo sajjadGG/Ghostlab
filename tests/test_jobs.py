@@ -43,7 +43,7 @@ class DefaultJobSpecTest(unittest.TestCase):
             target=_target(),
             generation={"personas": 5, "model": "gpt-x"},
             review_gates={"min_pass_rate": 0.75},
-            aut_runner="runners/codex-cortex-local-aut.json",
+            aut_runner="runners/codex-aut.example.json",
         )
         self.assertEqual(spec.generation["personas"], 5)
         self.assertEqual(spec.generation["model"], "gpt-x")
@@ -53,7 +53,7 @@ class DefaultJobSpecTest(unittest.TestCase):
         self.assertTrue(spec.review["gates"]["no_tool_schema_errors"])
         aut = [h for h in spec.hosts if h["id"] == "aut"][0]
         self.assertEqual(aut["kind"], "process")
-        self.assertEqual(aut["config_ref"], "runners/codex-cortex-local-aut.json")
+        self.assertEqual(aut["config_ref"], "runners/codex-aut.example.json")
 
     def test_none_override_values_are_ignored(self) -> None:
         spec = jobs.default_job_spec(

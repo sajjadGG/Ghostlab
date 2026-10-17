@@ -16,10 +16,14 @@ ghostlab --version
 
 ## Install A Coding-Agent CLI
 
-Ghostlab needs Codex or OpenCode for scenario generation and judging. The AUT
-and user runner can independently use Codex, OpenCode, or GitHub Copilot CLI:
+`ghostlab exec` runs an agent in Claude Code, Codex, GitHub Copilot CLI, or
+OpenCode. Inside OpenShell the sandbox image supplies the CLI; with
+`--sandbox local` the one you pick must be installed on the host. Scenario
+generation and judging use Codex, Copilot, or OpenCode, and the evaluated agent
+and the user emulator can each use Codex, OpenCode, or Copilot:
 
 ```bash
+claude --version                # Claude Code
 codex --version                 # uses your ChatGPT/Codex plan
 opencode --version              # uses GitHub Copilot, Azure, etc.
 copilot --version               # native GitHub Copilot / VS Code custom-agent runner
@@ -30,8 +34,9 @@ per command with `--llm-backend opencode --model github-copilot/claude-sonnet-4.
 or per job via `generation.backend` in `job.yaml`. See the README's
 "Coding-agent backends" section for precedence and model selection.
 
-Copilot CLI is a runner rather than a generation/judge backend. Authenticate it
-with `copilot login`, then select it per role:
+Copilot CLI works both as a runner and, with `--llm-backend copilot`, as the
+generation/judge backend. Authenticate it with `copilot login`, then select it
+per role:
 
 ```bash
 ghostlab create --name copilot-eval --target https://example.com/mcp \
@@ -136,6 +141,23 @@ with the server's contract.
 OpenShell currently labels itself alpha software; pin and validate the runtime
 version in CI, and treat gateway/policy upgrades as infrastructure changes.
 
+
+## Run Your First Agent
+
+`examples/agent-lab/task-agent.json` defines a small release-notes agent with a
+stdio MCP server, a skill, and a workspace. Run it in whichever harness you
+have credentials for:
+
+```bash
+ghostlab exec --agent examples/agent-lab/task-agent.json --provider anthropic \
+  "Call host_info, then draft the release notes"
+ghostlab exec --agent examples/agent-lab/task-agent.json \
+  --backend copilot --model gpt-5-mini --provider copilot "Draft the release notes"
+```
+
+`host_info` reports the kernel the MCP server runs on — `linux ...` confirms it
+ran inside the sandbox. See [Run an Agent](run-an-agent.md) for the definition
+format and every harness.
 ## Evaluate A Configured Agent (`ghostlab lab`)
 
 When the thing you want to test is an *agent* — a model plus instructions,
@@ -269,7 +291,7 @@ variable under `env_allowlist`.
 It scaffolds a self-contained directory:
 
 ```
-jobs/cortex-eval/
+jobs/my-mcp-eval/
   job.yaml         # the whole config: target, hosts, generation, test, prompts, gates
   test-plan.yaml   # produced by `ghostlab plan`
   workspace/       # discover/generated/test artifacts + ghostlab.sqlite3
@@ -281,8 +303,8 @@ jobs/cortex-eval/
 Non-interactive (for scripts/CI):
 
 ```bash
-ghostlab create --name cortex-eval --target http://localhost:8000/mcp \
-  --aut-runner runners/codex-cortex-local-aut.json --yes
+ghostlab create --name my-mcp-eval --target http://localhost:8000/mcp \
+  --aut-runner runners/codex-aut.example.json --yes
 ```
 
 ### Bring your existing MCP config
@@ -320,11 +342,11 @@ A `401` from `discover`/`inspect` means the server got no (or a wrong) auth head
 Then run the loop against the job by name (`--job`), no paths to juggle:
 
 ```bash
-ghostlab discover --job cortex-eval    # inspect + lint + refresh capabilities
-ghostlab plan     --job cortex-eval    # coverage-driven test-plan.yaml
-ghostlab test     --job cortex-eval    # execute across host adapters
-ghostlab test     --job cortex-eval --resume  # resume completed case/host pairs
-ghostlab review   --job cortex-eval    # readiness report / release gate
+ghostlab discover --job my-mcp-eval    # inspect + lint + refresh capabilities
+ghostlab plan     --job my-mcp-eval    # coverage-driven test-plan.yaml
+ghostlab test     --job my-mcp-eval    # execute across host adapters
+ghostlab test     --job my-mcp-eval --resume  # resume completed case/host pairs
+ghostlab review   --job my-mcp-eval    # readiness report / release gate
 ```
 
 Inside a job directory you can drop `--job` entirely — the commands auto-detect `job.yaml` in the current folder.
