@@ -833,6 +833,60 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir", type=Path, default=None, help="Where to write scorecard.* (default: the summary dir)."
     )
 
+    exec_parser = sub.add_parser(
+        "exec",
+        help="Run a configured agent (any harness, its skills and MCPs) on one "
+             "task inside OpenShell and print its answer.",
+    )
+    exec_parser.add_argument(
+        "--agent", required=True, type=Path,
+        help="Agent definition JSON/YAML (runtime, instructions, skills, MCPs, workspace).",
+    )
+    exec_parser.add_argument(
+        "task", nargs="?", default="",
+        help="The task. Omit it to use --prompt-file, or pass '-' to read stdin.",
+    )
+    exec_parser.add_argument(
+        "--prompt-file", type=Path, default=None, help="File holding the task."
+    )
+    exec_parser.add_argument(
+        "--workspace", type=Path, default=None,
+        help="Directory the agent works on (default: the agent config's `workspace`). "
+             "Under OpenShell it is an uploaded copy; with --sandbox local it is edited in place.",
+    )
+    exec_parser.add_argument(
+        "--backend", choices=["codex", "claude", "copilot", "opencode", "runner"],
+        default="", help="Harness override (default: runtime.backend, else runner.command).",
+    )
+    exec_parser.add_argument("--model", default="", help="Model override for the harness.")
+    exec_parser.add_argument(
+        "--sandbox", choices=["openshell", "local"], default="",
+        help="Execution boundary (default: the agent config's sandbox.backend, else "
+             "openshell). 'local' runs on this machine and must be trusted.",
+    )
+    exec_parser.add_argument("--image", default="", help="OpenShell image override.")
+    exec_parser.add_argument(
+        "--provider", action="append", default=None,
+        help="Attach an OpenShell provider for model credentials (repeatable).",
+    )
+    exec_parser.add_argument(
+        "--export", action="append", default=None, metavar="REMOTE[=NAME]",
+        help="Download a sandbox path into the run dir before teardown (repeatable).",
+    )
+    exec_parser.add_argument(
+        "--run-dir", type=Path, default=None,
+        help="Where to keep the answer and trace (default: runs/<timestamp>-exec-<agent>).",
+    )
+    exec_parser.add_argument(
+        "--timeout", type=int, default=0, help="Turn timeout in seconds (default: runtime's, else 900)."
+    )
+    exec_parser.add_argument(
+        "--json", action="store_true", help="Print the full exec.json manifest instead of the answer."
+    )
+    exec_parser.add_argument(
+        "--keep-sandbox", action="store_true", help="Leave the sandbox running for inspection."
+    )
+
     artifact_parser = sub.add_parser(
         "artifact-run",
         help="Run one configured agent once on a mutable workspace and export artifacts.",
@@ -3851,6 +3905,60 @@ def _cmd_benchmark_scorecard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_exec(args: argparse.Namespace) -> int:
+    """Run a configured agent on one task and print its answer."""
+    import sys
+
+    from .agent_exec import ExecConfig, ExecError, execute
+
+    task = args.task
+    if args.prompt_file:
+        task = args.prompt_file.read_text(encoding="utf-8")
+    elif task == "-":
+        task = sys.stdin.read()
+    run_dir = args.run_dir
+    if run_dir is None:
+        stamp = utc_now().replace(":", "").replace("-", "").split(".")[0]
+        run_dir = Path("runs") / f"{stamp}-exec-{args.agent.stem}"
+    exports = []
+    for item in args.export or []:
+        remote, _, local = item.partition("=")
+        exports.append((remote, local or Path(remote).name))
+    try:
+        result = execute(ExecConfig(
+            agent_path=args.agent, prompt=task, run_dir=run_dir,
+            workspace=args.workspace, sandbox=args.sandbox, backend=args.backend,
+            model=args.model, timeout_seconds=args.timeout, image=args.image,
+            providers=tuple(args.provider or ()), exports=tuple(exports),
+            keep_sandbox=args.keep_sandbox,
+        ))
+    except ExecError as exc:
+        raise ConfigError(str(exc)) from exc
+
+    manifest = result.manifest
+    if args.json:
+        print(json.dumps(manifest, indent=2, default=str))
+    elif result.answer:
+        print(result.answer)
+    # Status goes to stderr so `ghostlab exec ... > answer.md` captures only the answer.
+    label = "pass" if result.ok else "fail"
+    where = manifest["sandbox"] + (
+        f" ({manifest['sandbox_name']})" if manifest.get("sandbox_name") else ""
+    )
+    calls = manifest["tool_summary"]["total"]
+    print(tc.verdict(f"exec {result.status}", label), file=sys.stderr)
+    print(tc.muted(
+        f"  {manifest['backend']} · model={manifest['model'] or 'default'} · {where} · "
+        f"{calls} MCP call(s) · {manifest['duration_seconds']}s"
+    ), file=sys.stderr)
+    for warning in manifest.get("warnings", []):
+        print(tc.muted(f"  warning: {warning}"), file=sys.stderr)
+    if manifest.get("error"):
+        print(f"  error: {manifest['error']}", file=sys.stderr)
+    print(tc.muted(f"  trace: {result.run_dir}"), file=sys.stderr)
+    return 0 if result.ok else 1
+
+
 def cmd_artifact_run(args: argparse.Namespace) -> int:
     """One configured agent, one prompt, one mutable workspace, declared exports."""
     from .artifact_run import STATUS_COMPLETED, ArtifactRunError, run_artifact
@@ -4203,6 +4311,7 @@ _HANDLERS.update(
         "critique": cmd_critique,
         "compare": cmd_compare,
         "scorecard": cmd_scorecard,
+        "exec": cmd_exec,
         "artifact-run": cmd_artifact_run,
         "scorer-run": cmd_scorer_run,
         "apps-probe": cmd_apps_probe,

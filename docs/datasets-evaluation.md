@@ -8,13 +8,13 @@ ghostlab generate-dataset \
   --personas 3 \
   --scenarios-per-persona 3 \
   --seed 7 \
-  --name cortex
+  --name my-mcp
 ```
 
 This writes a self-contained directory:
 
 ```text
-datasets/cortex/
+datasets/my-mcp/
   dataset.json
   personas/<id>.json
   scenarios/<id>.json
@@ -27,7 +27,7 @@ seed governs case ordering for reproducibility.
 
 ```bash
 ghostlab review-dataset \
-  --dataset datasets/cortex \
+  --dataset datasets/my-mcp \
   --profile runs/<id>-inspect/capabilities.json
 ```
 
@@ -76,9 +76,9 @@ run contains a call to that tool whose arguments include the given key/value pai
 ## Evaluate A Dataset
 
 ```bash
-ghostlab run-dataset --dataset datasets/cortex \
+ghostlab run-dataset --dataset datasets/my-mcp \
   --target target.json \
-  --aut-runner runners/codex-cortex-local-session.json \
+  --aut-runner runners/codex-session.example.json \
   --evaluate --provider openai \
   --capabilities runs/<id>-inspect/capabilities.json
 ```

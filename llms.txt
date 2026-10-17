@@ -1,10 +1,12 @@
 # Ghostlab
 
-> An OpenShell-first, end-to-end testing lab for configured AI agents.
-> An evaluated agent can combine a runner, instructions, MCP servers, skills,
-> workspace files, and assets. Coding agents role-play real users over multiple
-> turns; Ghostlab captures traces, scores outcomes, compares regressions, and can
-> render and interact with MCP Apps `ui://` widgets.
+> Define an agent once — model, instructions, skills, MCP servers, workspace —
+> and run it in any coding-agent harness (Claude Code, Codex, GitHub Copilot CLI,
+> OpenCode) inside an NVIDIA OpenShell sandbox. `ghostlab exec` runs it on a task
+> and returns the answer; the evaluation pipeline has coding agents role-play real
+> users over multiple turns, captures traces, scores outcomes, compares
+> regressions, builds eval sets for MCP servers and skills, and can render and
+> interact with MCP Apps `ui://` widgets.
 
 The Python package is `rehearsal`; the installed CLI is `ghostlab` (alias
 `rehearsal`). It uses the stdlib for MCP transport (stdio / streamable-HTTP+SSE),
@@ -24,6 +26,7 @@ Streamlit UI, and an MCP Apps render layer.
 
 - [cli.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/cli.py): argparse entry point; one `cmd_*` per pipeline command.
 - [agents.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/agents.py): load and normalize composed agent definitions, including MCPs, skills, workspace, assets, and inline tests.
+- [agent_exec.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/agent_exec.py): `ghostlab exec` — translate one agent definition into a Claude Code / Codex / Copilot / OpenCode invocation and run it in OpenShell.
 - [sandbox.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/sandbox.py): NVIDIA OpenShell lifecycle, upload/env policy, execution, logs, artifact download, and cleanup.
 - [mcp_client.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/mcp_client.py): minimal stdlib MCP client (stdio + streamable-HTTP/SSE), `tools/list`, `resources/read`, `tools/call`.
 - [inspect.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/inspect.py) + [profile.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/profile.py): understand a target MCP and build a capability profile.
@@ -37,6 +40,7 @@ Streamlit UI, and an MCP Apps render layer.
 
 ## Commands (the `ghostlab` CLI)
 
+- `exec`: run a configured agent on one task in any harness, inside OpenShell, and print its answer.
 - `create`: build an agent-, MCP-, or skill-evaluation job; OpenShell is the default sandbox.
 - `config`: print the exact resolved runner command, four model roles, composed inputs, and OpenShell settings (`--json` for automation).
 - `discover` / `plan` / `test` / `review`: run the job pipeline and release gate.
@@ -58,13 +62,12 @@ non-zero. Standalone callers can enforce the same contract with
 
 - [examples/](https://github.com/sajjadGG/Ghostlab/tree/main/examples): ready-to-run agent, skill, target, scenario, and `mcpServers` configs.
 - [runners/](https://github.com/sajjadGG/Ghostlab/tree/main/runners): agent-runner presets (Codex process/session and GitHub Copilot session, with separate AUT/user examples).
-- [specs/](https://github.com/sajjadGG/Ghostlab/tree/main/specs): end-to-end design specs (vanilla MCP + MCP Apps).
 
 ## Contributing & issues
 
 - [Open issues](https://github.com/sajjadGG/Ghostlab/issues): good entry points are labeled by pipeline stage (`pipeline:run`, `pipeline:evaluate`, …).
 - [Tests](https://github.com/sajjadGG/Ghostlab/tree/main/tests): run `python -m pytest`; most logic is browser-free and unit-tested.
-- To contribute: fork or branch, keep changes Python 3.9-syntax-safe, add tests, and open a PR against `main`. See [CONTRIBUTING](https://github.com/sajjadGG/Ghostlab/blob/main/CONTRIBUTING.md).
+- To contribute: fork or branch, keep changes Python 3.10-compatible, add tests, and open a PR against `main`. See [CONTRIBUTING](https://github.com/sajjadGG/Ghostlab/blob/main/CONTRIBUTING.md).
 
 ## Optional
 

@@ -1,6 +1,6 @@
 ---
 name: ghostlab
-description: Test an MCP server or a configured AI agent end to end with Ghostlab — a scripted user role-plays against the agent, real tool calls are captured, and an LLM judge scores the outcome inside an OpenShell sandbox. Use when asked to evaluate, test, validate, or find problems in an MCP server, an agent configuration, or a skill; when asked whether an MCP "actually works" with a real agent; or to generate personas/scenarios, judge a run, or produce an evaluation report.
+description: Run a configured AI agent (model, instructions, skills, MCPs, workspace) on a task in any harness — Claude Code, Codex, Copilot, OpenCode — inside an OpenShell sandbox, or test an MCP server, skill, or agent end to end with Ghostlab (a scripted user role-plays against the agent, real tool calls are captured, and an LLM judge scores the outcome). Use when asked to run a defined agent on a task in a sandbox; to evaluate, test, validate, or find problems in an MCP server, an agent configuration, or a skill; when asked whether an MCP "actually works" with a real agent; or to generate personas/scenarios, judge a run, or produce an evaluation report.
 ---
 
 # Ghostlab
@@ -15,8 +15,9 @@ half. The expensive, useful half is the conversation.
 
 ## Pick the right entry point
 
-| The thing under test | Command |
+| The goal | Command |
 | --- | --- |
+| Get a task done by a defined agent, sandboxed | `ghostlab exec --agent agent.json "task"` |
 | An MCP server | `ghostlab create` |
 | A configured agent (model + instructions + skills + MCPs + code) | `ghostlab lab`, or an `agent.json` (below) |
 | A skill folder | `ghostlab create --skill ./skills/x` |
@@ -43,6 +44,20 @@ flag to switch:
 
 OpenShell must report `Connected`. If it does not, Docker is usually stopped:
 `open -a Docker && brew services restart openshell`.
+
+## Running an agent on a task
+
+```bash
+ghostlab exec --agent agent.json "Draft the release notes" > answer.md
+ghostlab exec --agent agent.json --backend copilot --model gpt-5-mini --provider copilot "..."
+```
+
+The agent file's `runtime.backend` picks the harness (`claude`, `codex`,
+`copilot`, `opencode`); its MCPs, skills, instructions, and workspace are wired
+into that harness automatically. stdout is only the answer; `exec.json` in the
+run directory has the status and every tool call. A non-`completed` status
+says which side broke: `model_unavailable` and `sandbox_error` are setup
+problems to fix, not findings about the agent.
 
 ## Evaluating an MCP server
 

@@ -136,7 +136,7 @@ single-file entry point for the implemented `init` → `discover` → `plan` →
 
 ```bash
 ghostlab init --target target.json          # writes ghostlab.yaml
-ghostlab init --target target.json --out cortex.ghostlab.json
+ghostlab init --target target.json --out my-mcp.ghostlab.json
 ```
 
 Options: `--name` (display name), `--workspace` (artifact directory, default
@@ -416,7 +416,7 @@ ghostlab generate-dataset \
   --personas 3 \
   --scenarios-per-persona 3 \
   --seed 7 \
-  --name cortex
+  --name my-mcp
 ```
 
 ## review-dataset
@@ -425,12 +425,12 @@ Review, flag, approve, or reject dataset cases before spending agent credits.
 
 ```bash
 ghostlab review-dataset \
-  --dataset datasets/cortex \
+  --dataset datasets/my-mcp \
   --profile runs/<id>-inspect/capabilities.json
 ```
 
 ```bash
-ghostlab review-dataset --dataset datasets/cortex \
+ghostlab review-dataset --dataset datasets/my-mcp \
   --approve case-a case-b --reject case-c
 ```
 
@@ -465,9 +465,9 @@ flags; without the flag, each runner file's own sandbox providers are preserved.
 
 ```bash
 ghostlab run-dataset \
-  --dataset datasets/cortex \
+  --dataset datasets/my-mcp \
   --target target.json \
-  --aut-runner runners/codex-cortex-aut.json \
+  --aut-runner runners/codex-aut.example.json \
   --user-runner runners/codex-user-emulator.json \
   --provider openai \
   --limit 2
@@ -534,6 +534,47 @@ no number — `scorer_error`, `scorer_timeout`, `judge_unavailable`,
 `invalid_candidate_artifact`, or a report whose unscored weight exceeded the
 20% limit — are reported as coverage loss and error counts, never as zeros.
 Writes `benchmark-scorecard.json` and `benchmark-scorecard.md`.
+
+## exec
+
+Run a configured agent on one task, in any harness, and print its answer.
+
+```bash
+ghostlab exec --agent agent.json "Draft release notes from CHANGELOG.md"
+ghostlab exec --agent agent.json --backend copilot --model gpt-5-mini --provider copilot "..."
+ghostlab exec --agent agent.json --prompt-file task.md --export /sandbox/repo/NOTES.md
+echo "task" | ghostlab exec --agent agent.json - --json
+```
+
+The harness comes from `runtime.backend` (`claude`, `codex`, `copilot`,
+`opencode`) or, when there is none, the agent's raw `runner.command`. The
+definition's MCPs, skills, instructions, and workspace are attached in each
+harness's own format. The default boundary is OpenShell: the CLI, its stdio
+MCPs, and an uploaded copy of the workspace run in one sandbox that is deleted
+afterwards.
+
+| Option | Meaning |
+| --- | --- |
+| `--agent` | Agent definition JSON/YAML (required). |
+| `TASK` / `--prompt-file` / `-` | The task: an argument, a file, or stdin. |
+| `--workspace` | Directory the agent works on (default: the definition's `workspace`). |
+| `--backend` | Harness override: `claude`, `codex`, `copilot`, `opencode`, `runner`. |
+| `--model` | Model override. |
+| `--sandbox` | `openshell` (default) or `local` (trusted agents only; edits the workspace in place). |
+| `--image` | OpenShell image override (default `base`). |
+| `--provider` | Attach an OpenShell provider for model credentials (repeatable). |
+| `--export REMOTE[=NAME]` | Download a sandbox path into the run directory before teardown (repeatable). |
+| `--run-dir` | Output directory (default `runs/<timestamp>-exec-<agent>`). |
+| `--timeout` | Turn timeout in seconds (default: `runtime.timeout_seconds`, else 900). |
+| `--json` | Print `exec.json` instead of the answer. |
+| `--keep-sandbox` | Leave the sandbox running for inspection. |
+
+Only the answer goes to stdout; status and the trace location go to stderr.
+The run directory holds `answer.md`, `exec.json` (status, backend, model,
+sandbox, MCP and built-in tool calls, timing), `prompt.txt`, the raw
+`stdout.txt`/`stderr.txt`, and the OpenShell log. Exit status is `0` only for
+`completed`; `agent_error`, `model_unavailable`, `timed_out`, `sandbox_error`,
+and `harness_error` exit `1`. See [Run an Agent](run-an-agent.md).
 
 ## artifact-run
 
@@ -712,7 +753,7 @@ marked.
 ```bash
 ghostlab doctor
 ghostlab doctor --probe
-ghostlab doctor --runners runners/codex-cortex-local-session.json
+ghostlab doctor --runners runners/codex-session.example.json
 ghostlab doctor --sandbox local
 ```
 

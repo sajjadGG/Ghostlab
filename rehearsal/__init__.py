@@ -1,3 +1,3 @@
-"""MCP Ghostlab / Rehearsal test harness."""
+"""Ghostlab: run and evaluate configured AI agents in any harness, sandboxed in OpenShell."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

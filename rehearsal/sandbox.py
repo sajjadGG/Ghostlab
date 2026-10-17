@@ -138,10 +138,14 @@ class OpenShellSandbox:
         timeout: int | None = None, check: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         runner = self.run or _default_run
+        # `sandbox exec` waits for stdin EOF. With no input, an inherited stdin
+        # (a CI runner, an agent driving Ghostlab) never closes, and every call
+        # hangs until its timeout — so give it an empty one.
+        stdin = {"input": input_text} if input_text is not None else {"stdin": subprocess.DEVNULL}
         try:
             result = runner(
-                command, input=input_text, text=True, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, timeout=timeout, check=False,
+                command, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=timeout, check=False, **stdin,
             )
         except subprocess.TimeoutExpired as exc:
             raise SandboxError("sandbox_timeout", f"command timed out: {' '.join(command[:4])}") from exc
