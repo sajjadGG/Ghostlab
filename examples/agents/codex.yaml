@@ -1,0 +1,11 @@
+# Codex CLI, headless (`codex exec --json`).
+name: codex-helper
+harness: codex
+model: gpt-5.4
+options:
+  sandbox_mode: workspace-write   # codex's own --sandbox
+  approval: never                 # -a
+  reasoning_effort: medium
+sandbox:
+  backend: openshell
+  providers: [openai]

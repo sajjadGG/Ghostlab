@@ -1,0 +1,10 @@
+name: labeler
+harness: claude
+model: haiku
+instructions: You label support tickets. Reply with JSON only.
+options:
+  deny_tools: [Bash, Edit, Write, WebFetch, WebSearch]
+timeout: 120
+sandbox:
+  backend: openshell
+  providers: [anthropic]

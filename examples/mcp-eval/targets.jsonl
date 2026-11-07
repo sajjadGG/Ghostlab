@@ -1,0 +1,1 @@
+{"id": "tiny", "mcp": {"command": "node", "args": ["examples/mcp-eval/tiny-mcp.js"]}}

@@ -1,0 +1,10 @@
+# A tool-less model for planning, playing the user, and judging.
+name: helper
+harness: claude
+model: sonnet
+options:
+  deny_tools: [Bash, Edit, Write, WebFetch, WebSearch]
+timeout: 300
+sandbox:
+  backend: openshell
+  providers: [anthropic]

@@ -1,0 +1,9 @@
+# The agent under test. The MCP being evaluated is attached per item.
+name: assistant
+harness: claude
+model: sonnet
+instructions: You are a helpful assistant. Use your tools when they help.
+timeout: 600
+sandbox:
+  backend: openshell
+  providers: [anthropic]
