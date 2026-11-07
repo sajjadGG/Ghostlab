@@ -1,0 +1,16 @@
+# A configured agent: instructions, a skill, and a workspace it edits.
+#   ghostlab exec --agent examples/release-notes/agent.yaml \
+#     "Draft release notes for the next version into RELEASE.md" --collect RELEASE.md
+name: release-notes
+harness: claude
+model: sonnet
+instructions: Be concise.
+instruction_files: [AGENTS.md]
+skills: [skills/release-notes]
+workspace: repo
+options:
+  permission_mode: acceptEdits
+  allow_tools: [Read, Write, Edit]
+sandbox:
+  backend: openshell
+  providers: [anthropic]

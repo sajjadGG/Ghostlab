@@ -1,17 +1,16 @@
 # Agent Instructions
 
-This repository is Ghostlab, a Python CLI and optional Streamlit UI for testing MCP-exposed apps with dual coding-agent sessions.
+This repository is Ghostlab: a headless runner for coding agents (Claude Code, Codex, Copilot CLI, OpenCode) sandboxed in NVIDIA OpenShell, plus a Python SDK for checkpointed, resumable agent pipelines.
 
 ## Project Shape
 
-- Core package: `rehearsal/`
-- Compatibility package: `ghostlab/`
-- Tests: `tests/`
-- Example runner configs: `runners/`; per-job configs live under `jobs/<name>/`
+- Package: `ghostlab/` (`agent`, `harnesses`, `parsers`, `sandbox`, `session`, `pipeline`, `cli`)
+- Tests: `tests/`, with fake agent and fake OpenShell CLIs in `tests/fakes/`
+- Example agents and pipelines: `examples/`
 - Documentation wiki: `docs/` with `mkdocs.yml`
 - CI and release pipelines: `.github/workflows/`
 
-Prefer the public CLI name `ghostlab` in documentation and examples. The `rehearsal` console script remains supported for compatibility.
+Ghostlab is infrastructure: keep job-specific logic (MCP evaluation, labeling, ...) in example pipelines, not in the package.
 
 ## Development Setup
 
@@ -31,18 +30,12 @@ python3.13 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
 ```
 
-Install UI dependencies only when working on the Streamlit app:
-
-```bash
-.venv/bin/pip install -e ".[ui]"
-```
-
 ## Coding Guidance
 
 - Keep edits scoped to the requested behavior.
 - Preserve public CLI compatibility unless a change explicitly removes it.
 - Prefer standard-library solutions unless the project already depends on a package for the job.
-- Keep runner config and MCP target examples JSON-compatible and easy to inspect.
+- Keep agent configs YAML/JSON and easy to inspect.
 - Do not commit generated run outputs, datasets, virtualenvs, `site/`, `dist/`, or cache directories.
 - When adding a CLI command, update tests, README examples, and the MkDocs CLI reference.
 - When changing packaging, run build and Twine checks.

@@ -1,0 +1,14 @@
+# OpenCode, headless (`opencode run --format json`). Instructions, skills, and
+# MCPs travel in its own config; `options.config` is merged into opencode.json.
+name: opencode-helper
+harness: opencode
+model: github-copilot/claude-sonnet-4.5
+options:
+  config:
+    permission: {edit: allow, bash: deny}
+sandbox:
+  backend: openshell
+  image: docker/agent-sandbox.Dockerfile
+  # OpenCode keeps provider auth on disk; copy it in, outside the workspace.
+  files:
+    /opt/agent/share/opencode/auth.json: ~/.local/share/opencode/auth.json

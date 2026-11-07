@@ -1,75 +1,33 @@
 # Ghostlab
 
-> Define an agent once — model, instructions, skills, MCP servers, workspace —
-> and run it in any coding-agent harness (Claude Code, Codex, GitHub Copilot CLI,
-> OpenCode) inside an NVIDIA OpenShell sandbox. `ghostlab exec` runs it on a task
-> and returns the answer; the evaluation pipeline has coding agents role-play real
-> users over multiple turns, captures traces, scores outcomes, compares
-> regressions, builds eval sets for MCP servers and skills, and can render and
-> interact with MCP Apps `ui://` widgets.
+> A headless runner for coding agents (Claude Code, Codex, GitHub Copilot CLI, OpenCode, or any CLI), sandboxed in NVIDIA OpenShell, plus a Python SDK for composing agent calls into checkpointed, resumable pipelines — evaluations, labeling, testing, and other batch jobs.
 
-The Python package is `rehearsal`; the installed CLI is `ghostlab` (alias
-`rehearsal`). It uses the stdlib for MCP transport (stdio / streamable-HTTP+SSE),
-shells out to coding-agent CLIs, and runs agent sessions and local stdio MCPs in
-NVIDIA OpenShell by default. `--sandbox local` is the explicit unsandboxed
-compatibility opt-out; there is no automatic fallback. Pipeline:
-**understand → generate → run → evaluate**, with optional SQLite persistence, a
-Streamlit UI, and an MCP Apps render layer.
+The package and CLI are both `ghostlab`. Its only dependency is PyYAML. Ghostlab is infrastructure: job-specific logic (such as an MCP evaluation) lives in user pipelines, like the ones in `examples/`.
 
-## Documentation
+## Architecture (modules under `ghostlab/`)
 
-- [README](https://github.com/sajjadGG/Ghostlab/blob/main/README.md): full overview, install, and a worked example of every command.
-- [Docs wiki](https://sajjadgg.github.io/Ghostlab/): hosted MkDocs documentation.
-- [CONTRIBUTING](https://github.com/sajjadGG/Ghostlab/blob/main/CONTRIBUTING.md): how to set up, run tests, and open a PR (read this before contributing).
+- [agent.py](https://github.com/sajjadGG/Ghostlab/blob/main/ghostlab/agent.py): `Agent` and `MCP` — the immutable agent definition, YAML/JSON loading, `with_`/`with_mcp` variants, `run`/`session`.
+- [harnesses.py](https://github.com/sajjadGG/Ghostlab/blob/main/ghostlab/harnesses.py): one `Harness` per CLI — command line, MCP config, resume, parser, sandbox needs.
+- [parsers.py](https://github.com/sajjadGG/Ghostlab/blob/main/ghostlab/parsers.py): each harness's JSONL stream → message, MCP/built-in tool calls, errors, session id.
+- [sandbox.py](https://github.com/sajjadGG/Ghostlab/blob/main/ghostlab/sandbox.py): `Sandbox` config and the two boxes — `LocalBox` and `OpenShellBox` (create, upload, exec, fetch, delete).
+- [session.py](https://github.com/sajjadGG/Ghostlab/blob/main/ghostlab/session.py): `Session` (multi-turn, resumes the harness session) and `Result` with classified statuses.
+- [pipeline.py](https://github.com/sajjadGG/Ghostlab/blob/main/ghostlab/pipeline.py): `stage`, `Pipeline`, `Context` — map / fan-out / gather stages, item checkpoints, per-call caching, resume.
+- [cli.py](https://github.com/sajjadGG/Ghostlab/blob/main/ghostlab/cli.py): `ghostlab exec`, `run`, `status`.
 
-## Architecture (key modules under `rehearsal/`)
+## Docs
 
-- [cli.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/cli.py): argparse entry point; one `cmd_*` per pipeline command.
-- [agents.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/agents.py): load and normalize composed agent definitions, including MCPs, skills, workspace, assets, and inline tests.
-- [agent_exec.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/agent_exec.py): `ghostlab exec` — translate one agent definition into a Claude Code / Codex / Copilot / OpenCode invocation and run it in OpenShell.
-- [sandbox.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/sandbox.py): NVIDIA OpenShell lifecycle, upload/env policy, execution, logs, artifact download, and cleanup.
-- [mcp_client.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/mcp_client.py): minimal stdlib MCP client (stdio + streamable-HTTP/SSE), `tools/list`, `resources/read`, `tools/call`.
-- [inspect.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/inspect.py) + [profile.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/profile.py): understand a target MCP and build a capability profile.
-- [llm_backend.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/llm_backend.py): picks the generation/judging backend — `codex`, `copilot`, or `opencode` — behind one `generate_json(prompt, schema)` surface.
-- [generate.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/generate.py), [personas.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/personas.py), [dataset.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/dataset.py): scenario / persona / dataset generation (codex-backed).
-- [orchestrator.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/orchestrator.py) + [runners.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/runners.py): the dual-agent turn loop and agent-host adapters.
-- [tool_capture.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/tool_capture.py): structured MCP tool-call capture from agent output.
-- [evaluate.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/evaluate.py) + [compare.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/compare.py): deterministic + codex-judge verdicts and regression diffs.
-- [storage/](https://github.com/sajjadGG/Ghostlab/tree/main/rehearsal/storage): SQLite persistence (`GhostlabStore`).
-- [mcp_apps.py](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/mcp_apps.py) + [apps_host/](https://github.com/sajjadGG/Ghostlab/tree/main/rehearsal/apps_host): MCP Apps host layer — detect, diagnose, render, and drive `ui://` widgets.
+- [Getting started](https://sajjadgg.github.io/Ghostlab/getting-started/)
+- [Agents](https://sajjadgg.github.io/Ghostlab/agents/): config reference, harness options, sandbox.
+- [Pipelines](https://sajjadgg.github.io/Ghostlab/pipelines/): stages, context, checkpointing and resume rules.
+- [CLI](https://sajjadgg.github.io/Ghostlab/cli/)
 
-## Commands (the `ghostlab` CLI)
+## Examples
 
-- `exec`: run a configured agent on one task in any harness, inside OpenShell, and print its answer.
-- `create`: build an agent-, MCP-, or skill-evaluation job; OpenShell is the default sandbox.
-- `config`: print the exact resolved runner command, four model roles, composed inputs, and OpenShell settings (`--json` for automation).
-- `discover` / `plan` / `test` / `review`: run the job pipeline and release gate.
-- `inspect`: connect to a target MCP and capture tools/resources/prompts (+ lint).
-- `profile`: turn an `inspect.json` into a capability profile.
-- `generate-scenarios` / `generate-personas` / `generate-dataset`: build persona × scenario test data.
-- `review-dataset`: coverage, flags, and per-case approve/reject.
-- `run` / `run-dataset`: run the dual-agent E2E loop, one scenario or a whole dataset; both default real runners to OpenShell.
-- `evaluate` / `compare`: score a run and diff two runs for regressions.
-- `apps-probe` / `apps-render`: probe and render MCP Apps `ui://` widgets.
-- `db` / `ui`: SQLite history and the Streamlit pipeline UI.
+- [examples/mcp-eval/pipeline.py](https://github.com/sajjadGG/Ghostlab/blob/main/examples/mcp-eval/pipeline.py): describe → scenarios (fan-out) → emulated-user conversations + judge → report (gather).
+- [examples/batch-label/pipeline.py](https://github.com/sajjadGG/Ghostlab/blob/main/examples/batch-label/pipeline.py): concurrent labeling with answer validation and retries.
+- [examples/agents/](https://github.com/sajjadGG/Ghostlab/tree/main/examples/agents): one agent config per harness.
 
-The complete `create` pipeline requires at least one real semantic/security
-conversation. Placeholder-only plans and all-skipped semantic runs return
-non-zero. Standalone callers can enforce the same contract with
-`plan --require-semantic` and `test --require-semantic`.
+## Development
 
-## Examples (config you can copy)
-
-- [examples/](https://github.com/sajjadGG/Ghostlab/tree/main/examples): ready-to-run agent, skill, target, scenario, and `mcpServers` configs.
-- [runners/](https://github.com/sajjadGG/Ghostlab/tree/main/runners): agent-runner presets (Codex process/session and GitHub Copilot session, with separate AUT/user examples).
-
-## Contributing & issues
-
-- [Open issues](https://github.com/sajjadGG/Ghostlab/issues): good entry points are labeled by pipeline stage (`pipeline:run`, `pipeline:evaluate`, …).
-- [Tests](https://github.com/sajjadGG/Ghostlab/tree/main/tests): run `python -m pytest`; most logic is browser-free and unit-tested.
-- To contribute: fork or branch, keep changes Python 3.10-compatible, add tests, and open a PR against `main`. See [CONTRIBUTING](https://github.com/sajjadGG/Ghostlab/blob/main/CONTRIBUTING.md).
-
-## Optional
-
-- [pyproject.toml](https://github.com/sajjadGG/Ghostlab/blob/main/pyproject.toml): packaging, optional extras (`ui`, `apps`, `dev`), console scripts.
-- [Streamlit UI](https://github.com/sajjadGG/Ghostlab/blob/main/rehearsal/ui/app.py): browser front-end over the pipeline.
+- Tests: `.venv/bin/python -m pytest` — fake agent and fake `openshell` CLIs in `tests/fakes/` exercise the real command building, sandbox lifecycle, and parsing.
+- Docs: `.venv/bin/python -m mkdocs build --strict`.

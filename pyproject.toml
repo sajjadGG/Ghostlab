@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ghostlab"
 dynamic = ["version"]
-description = "Define an AI agent once (model, instructions, skills, MCPs) and run or evaluate it in Claude Code, Codex, Copilot, or OpenCode, sandboxed in NVIDIA OpenShell."
+description = "A headless runner for coding agents (Claude Code, Codex, Copilot, OpenCode), sandboxed in NVIDIA OpenShell, with a Python SDK for checkpointed, resumable agent pipelines: evals, labeling, and batch jobs."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -13,25 +13,21 @@ authors = [
   { name = "SajjadGG" }
 ]
 keywords = [
-  "mcp",
-  "model-context-protocol",
-  "testing",
-  "end-to-end-testing",
-  "cli",
   "agents",
   "ai-agents",
-  "llm",
-  "llm-evaluation",
+  "headless",
+  "pipeline",
+  "batch",
   "evaluation",
+  "llm-evaluation",
+  "labeling",
+  "mcp",
   "codex",
-  "claude",
   "claude-code",
   "github-copilot",
   "opencode",
   "openshell",
   "sandbox",
-  "agent-skills",
-  "mcp-apps",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -45,12 +41,10 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Testing",
-  "Topic :: Software Development :: Quality Assurance",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "questionary>=2.1,<3",
-  "rich>=14,<16",
+  "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
@@ -63,16 +57,9 @@ dev = [
 docs = [
   "mkdocs>=1.6",
 ]
-ui = [
-  "streamlit>=1.30",
-]
-apps = [
-  "playwright>=1.40",
-]
 
 [project.scripts]
-ghostlab = "rehearsal.cli:main"
-rehearsal = "rehearsal.cli:main"
+ghostlab = "ghostlab.cli:main"
 
 [project.urls]
 Documentation = "https://sajjadgg.github.io/Ghostlab/"
@@ -82,10 +69,10 @@ Issues = "https://github.com/sajjadGG/Ghostlab/issues"
 Changelog = "https://github.com/sajjadGG/Ghostlab/releases"
 
 [tool.hatch.version]
-path = "rehearsal/__init__.py"
+path = "ghostlab/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["rehearsal", "ghostlab"]
+packages = ["ghostlab"]
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -96,11 +83,10 @@ include = [
   "/docs",
   "/mkdocs.yml",
   "/pyproject.toml",
-  "/rehearsal",
   "/ghostlab",
   "/tests",
   "/examples",
-  "/runners",
+  "/docker",
 ]
 
 [tool.pytest.ini_options]

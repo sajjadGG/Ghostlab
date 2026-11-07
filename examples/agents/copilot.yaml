@@ -1,0 +1,11 @@
+# GitHub Copilot CLI, headless (`copilot --output-format json`).
+name: copilot-helper
+harness: copilot
+model: gpt-5.4
+options:
+  # agent: release-notes          # a .github/agents/*.agent.md custom agent
+  deny_tools: [shell]
+sandbox:
+  backend: openshell
+  image: docker/agent-sandbox.Dockerfile
+  providers: [copilot]

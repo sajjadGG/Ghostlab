@@ -1,0 +1,14 @@
+# Claude Code, headless (`claude -p --output-format stream-json`).
+name: claude-helper
+harness: claude
+model: sonnet
+instructions: Be concise and precise.
+options:
+  permission_mode: acceptEdits   # forwarded as --permission-mode
+  allow_tools: [Read, Grep, Glob]
+  # deny_tools: [Bash]
+  # max_turns: 20
+timeout: 600
+sandbox:
+  backend: openshell
+  providers: [anthropic]          # an OpenShell provider holding the API key

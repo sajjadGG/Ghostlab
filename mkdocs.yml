@@ -1,5 +1,5 @@
 site_name: Ghostlab Wiki
-site_description: Documentation for Ghostlab — define an agent once, run it in any coding-agent harness inside NVIDIA OpenShell, and evaluate it, its MCPs, and its skills.
+site_description: Ghostlab — run coding agents headlessly in any harness, sandboxed in NVIDIA OpenShell, and compose them into checkpointed, resumable pipelines.
 site_url: https://sajjadgg.github.io/Ghostlab/
 repo_url: https://github.com/sajjadGG/Ghostlab
 repo_name: sajjadGG/Ghostlab
@@ -8,12 +8,9 @@ theme:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
-  - Run an Agent: run-an-agent.md
-  - Concepts: concepts.md
+  - Agents: agents.md
+  - Pipelines: pipelines.md
   - CLI Reference: cli.md
-  - Datasets and Evaluation: datasets-evaluation.md
-  - Configured Agent Lab: configured-agent-lab.md
-  - Vision & Roadmap: ghostlab-vision-gap-and-roadmap.md
   - Publishing: publishing.md
 markdown_extensions:
   - toc:

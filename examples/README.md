@@ -1,87 +1,20 @@
 # Examples
 
-Ready-to-run sample configs so you can try Ghostlab without writing any JSON
-first. They point at the public Hugging Face MCP (`https://huggingface.co/mcp`),
-which can be **introspected without a token**, so the read-only commands below
-work with zero setup.
+Run these from the repository root.
 
-| File | Shape | Used by |
-| --- | --- | --- |
-| `target.json` | Native Ghostlab target (`id` + `transport` + `connection`) | `ghostlab inspect`, `ghostlab run` |
-| `scenario.json` | A dual-agent scenario (persona, goal, success/failure criteria) | `ghostlab run` |
-| `mcp-config.json` | Standard `mcpServers` client config | `ghostlab create`, `ghostlab inspect` |
-| `agent.json` | Composed agent (runner + skill + OpenShell policy) | `ghostlab create --agent` |
-| `copilot-agent.json` | Declarative GitHub Copilot/VS Code custom-agent runtime | `ghostlab create --agent --aut-backend copilot` |
+| Directory | What it is |
+| --- | --- |
+| [`agents/`](agents) | a starting agent config for each harness |
+| [`release-notes/`](release-notes) | one agent with instructions, a skill, and a workspace: `ghostlab exec --agent examples/release-notes/agent.yaml "Draft release notes into RELEASE.md" --collect RELEASE.md` |
+| [`batch-label/`](batch-label) | a one-stage batch job: `ghostlab run examples/batch-label/pipeline.py --input examples/batch-label/tickets.jsonl` |
+| [`mcp-eval/`](mcp-eval) | a four-stage MCP evaluation: `ghostlab run examples/mcp-eval/pipeline.py --input examples/mcp-eval/targets.jsonl` |
 
-## Try it
-
-Real runner examples use OpenShell by default. Verify it before starting:
+The agent configs default to OpenShell with an `anthropic` provider. To run on
+this machine instead, override a pipeline's agent parameter or `exec`'s
+boundary:
 
 ```bash
-openshell status
-ghostlab doctor
-```
-
-Introspect the target with no auth (writes `inspect.json` + `inspect.md`):
-
-```bash
-ghostlab inspect --target examples/target.json
-```
-
-Run the mock dual-agent scenario end to end—no coding-agent credits and no
-network to the target. Mock runners are in-process fixtures, so this particular
-example does not create an OpenShell sandbox:
-
-```bash
-ghostlab run \
-  --target examples/target.json \
-  --scenario examples/scenario.json \
-  --aut-runner runners/mock-aut.json \
-  --user-runner runners/mock-user.json
-```
-
-Scaffold a job straight from a standard `mcpServers` config:
-
-```bash
-ghostlab create --target examples/mcp-config.json
-```
-
-Scaffold an agent-centric evaluation:
-
-```bash
-ghostlab create --name concise-helper --agent examples/agent.json --yes
-```
-
-To use GitHub Copilot CLI for both roles, including a VS Code custom agent:
-
-```bash
-ghostlab create --name copilot-helper --agent examples/copilot-agent.json \
-  --aut-backend copilot --user-backend copilot \
-  --user-model gpt-5-mini --sandbox local --no-discover --yes
-```
-
-Edit `runtime.agent` in `copilot-agent.json` to the name of a custom agent
-available to Copilot CLI (for example one defined under `.github/agents/`).
-
-`agent.json` attaches an OpenShell provider named `openai`. Confirm it exists
-with `openshell provider list`, or edit the example to use a provider already
-configured on your gateway. For a trusted local-only trial, opt out explicitly:
-
-```bash
-ghostlab create --name concise-helper --agent examples/agent.json \
-  --sandbox local --yes
-```
-
-## Adding auth
-
-Most Hugging Face tools (beyond introspection) need a token. Add a bearer header
-to either config and export the referenced env var — the value is an env-var
-*reference*, never a literal secret in the file:
-
-```json
-"headers": { "Authorization": "Bearer ${HF_TOKEN}" }
-```
-
-```bash
-export HF_TOKEN=hf_...      # your token, kept out of the config file
+ghostlab exec --agent examples/agents/claude.yaml --sandbox local "Hello"
+ghostlab run examples/batch-label/pipeline.py --input examples/batch-label/tickets.jsonl \
+  --param 'labeler={"harness": "claude", "model": "haiku", "sandbox": "local"}'
 ```

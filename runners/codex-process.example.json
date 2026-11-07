@@ -1,7 +1,0 @@
-{
-  "kind": "process",
-  "command": ["codex", "exec", "-"],
-  "env": {},
-  "timeout_seconds": 300,
-  "prompt_mode": "stdin"
-}
