@@ -9,7 +9,7 @@ session layer never cares which one it has:
 * ``fetch(path, dest)`` — copy a workspace file out before teardown.
 
 The workspace is always a copy, so parallel items never share edits and the
-caller's directory is never touched. OpenShell is the default; ``local`` must
+caller's directory is never touched. Its path never names the job or item. OpenShell is the default; ``local`` must
 be asked for, and an OpenShell failure never falls back to it.
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -140,26 +141,32 @@ def _subprocess(argv: Sequence[str], *, stdin: str | None, env: Mapping[str, str
     return Completed(done.returncode, done.stdout, done.stderr)
 
 
-def _copy_workspace(source: Path | None, dest: Path) -> None:
-    if dest.exists():
-        return  # a resumed session keeps the edits it already made
-    if source is None:
-        dest.mkdir(parents=True)
-    else:
-        shutil.copytree(source, dest, symlinks=True)
-
-
 class LocalBox:
-    """Runs the harness on the host, in a private copy of the workspace."""
+    """Runs the harness on the host, in a private copy of the workspace.
+
+    The copy lives in a neutral temporary directory while the agent runs —
+    harnesses tell the model their working directory, and the run directory's
+    path names the job and item — and is moved to ``<run_dir>/workspace`` on
+    close, as evidence of what the agent changed.
+    """
 
     def __init__(self, sandbox: Sandbox, workspace: Path | None, run_dir: Path) -> None:
         self.sandbox = sandbox
         self.source = workspace
-        self.path = run_dir / "workspace"
-        self.workdir = str(self.path)
+        self.run_dir = run_dir
+        self.path: Path | None = None
+        self.workdir = ""
 
     def start(self) -> None:
-        _copy_workspace(self.source, self.path)
+        if self.path is not None:
+            return
+        self.path = Path(tempfile.mkdtemp(prefix="ghostlab-")) / (
+            self.source.name if self.source else "workspace")
+        if self.source is None:
+            self.path.mkdir()
+        else:
+            shutil.copytree(self.source, self.path, symlinks=True)
+        self.workdir = str(self.path)
 
     def inside(self, host_path: Any) -> str:
         return str(host_path)
@@ -170,7 +177,7 @@ class LocalBox:
         return _subprocess(argv, stdin=stdin, env=merged, cwd=self.workdir, timeout=timeout)
 
     def fetch(self, path: str, dest: Path) -> None:
-        source = self.path / path
+        source = Path(self.workdir) / path
         if not source.exists():
             raise SandboxError("sandbox_download_failed", f"no such file in workspace: {path}")
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -180,7 +187,14 @@ class LocalBox:
             shutil.copy2(source, dest)
 
     def close(self) -> None:
-        pass
+        if self.path is None:
+            return
+        kept = self.run_dir / "workspace"
+        shutil.rmtree(kept, ignore_errors=True)
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(self.path), str(kept))
+        shutil.rmtree(self.path.parent, ignore_errors=True)
+        self.path = None
 
 
 # --- OpenShell ------------------------------------------------------------- #
