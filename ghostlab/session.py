@@ -34,7 +34,7 @@ STATUSES = (COMPLETED, "agent_error", "timed_out", "model_unavailable", "sandbox
 _MODEL_OUTAGE = (
     "model not found", "unauthorized", "quota", "rate limit", "usage limit",
     "authentication failed", "no auth", "provider error", "overloaded",
-    "service unavailable", "invalid api key", "model is not supported",
+    "service unavailable", "invalid api key", "model is not supported", "is not available",
 )
 
 

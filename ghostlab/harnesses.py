@@ -218,7 +218,7 @@ class Codex(Harness):
 
 # Copilot options: agent-config key -> CLI flag.
 _COPILOT_VALUES = {
-    "agent": "--agent", "reasoning_effort": "--effort", "mode": "--mode",
+    "agent": "--agent", "reasoning_effort": "--reasoning-effort", "mode": "--mode",
     "max_autopilot_continues": "--max-autopilot-continues", "log_level": "--log-level",
 }
 _COPILOT_FLAGS = {

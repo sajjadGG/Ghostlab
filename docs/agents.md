@@ -111,8 +111,11 @@ for the model's provider. The sandbox log is saved as `openshell.log`, and the
 sandbox is deleted unless `keep` is set. OpenShell failures are reported as
 `sandbox_error` and never fall back to local execution.
 
-**Local** runs the harness on the host, in a private copy of the workspace
-(`<run_dir>/workspace`), with the full host environment. `uploads`, `files`,
+**Local** runs the harness on the host, in a private copy of the workspace,
+with the full host environment. The copy sits in a neutral temporary directory
+while the agent runs — harnesses tell the model their working directory, and a
+run directory's path names the job and item — and is moved to
+`<run_dir>/workspace` afterwards. `uploads`, `files`,
 and the other OpenShell settings do not apply. Use it only for agents and MCPs
 you trust.
 

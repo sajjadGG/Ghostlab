@@ -26,7 +26,10 @@ def test_the_workspace_is_a_private_copy(local_agent: Agent, tmp_path: Path) -> 
     (repo / "README.md").write_text("hello")
     agent = local_agent.with_(workspace=repo)
     result = agent.run("write:NOTES.md json", tmp_path / "run", collect=("NOTES.md", "README.md"))
-    assert Path(result.json()["cwd"]).resolve() == (tmp_path / "run/workspace").resolve()
+    # The agent runs in a neutral directory: harnesses tell the model their cwd.
+    cwd = Path(result.json()["cwd"]).resolve()
+    assert cwd.name == "repo" and not cwd.is_relative_to(tmp_path.resolve())
+    assert (tmp_path / "run/workspace/NOTES.md").read_text() == "written\n"
     assert not (repo / "NOTES.md").exists()
     assert result.files == ["NOTES.md", "README.md"]
     assert (result.dir / "files/NOTES.md").read_text() == "written\n"

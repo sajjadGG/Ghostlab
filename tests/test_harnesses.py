@@ -85,10 +85,12 @@ def test_codex_header_shapes() -> None:
 
 
 def test_copilot_tags_sessions_locally_and_continues_in_a_sandbox() -> None:
-    local = build(agent("copilot", options={"agent": "notes", "deny_tools": ["shell"]}))
+    local = build(agent("copilot", options={"agent": "notes", "deny_tools": ["shell"],
+                                            "reasoning_effort": "low"}))
     argv = local.argv
     assert not local.stdin and argv[-1] == "--prompt"
     assert argv[argv.index("--session-id") + 1].startswith(GHOSTLAB_COPILOT_SESSION_PREFIX)
+    assert argv[argv.index("--reasoning-effort") + 1] == "low"
     assert ["--agent", "notes"] == argv[argv.index("--agent"):argv.index("--agent") + 2]
     assert ["--deny-tool", "shell"] == argv[argv.index("--deny-tool"):argv.index("--deny-tool") + 2]
     assert json.loads(argv[argv.index("--additional-mcp-config") + 1])["mcpServers"]["tiny"]["type"] == "local"
